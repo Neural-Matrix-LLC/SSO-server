@@ -239,3 +239,21 @@ Not verifiable without Docker (BLOCKED): that the image actually builds on 3.13.
 
 ## G6. Blocked / not executed (unchanged)
 BLOCKED (no Docker/MySQL): E2E-10 compose + TLS via nginx; the MySQL integration run on **8.0 and 8.4** (`docker-compose.test.yml` incl. `test_mysql_integration.py`: version, `caching_sha2_password`, grants, TLS); building the image with `SSO_UID/SSO_GID` and checking the runtime uid; `docker compose config --images`; LEGACY-09; SEC-36 (nginx); SEC-38 (container hardening); DEPLOY-13 against MySQL. Not executed: LEGACY-08 (no myFinance), E2E-09 (browser), DEPLOY-14 (Developer pytest/coverage, writes outside `qa/`).
+
+---
+
+# Quick check @ 5666f8b
+
+Branch `sso-server-sprint1`: local and `origin` were both already at `5666f8b` (contains `7979f6c` QA, `8ea535b` DevOps, `5666f8b` fix), and the tree was clean; `git pull --ff-only` → "Already up to date". Python 3.13.16 (`qa/.venv-py3.13.16`), throw-away SQLite, file cache. Evidence: `qa/run/quick-checks.txt`, `quick-sso-nonroot.log`, `readme-check.sh` / `readme-check.log`, `quick-pytest-static.log`, `quick-junit-static.xml`. 2026-10-10 12:53–12:58 PT.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Real root (`sudo`, euid 0), `SSO_DEBUG=False`: `manage.py check`, `check --deploy`, gunicorn | **PASS.** All three stop with `ImproperlyConfigured: Refusing to run as root (uid 0) with SSO_DEBUG=False …` (manage exit 1, gunicorn exit 3 "Worker failed to boot"). **`sso.E002`**: with the normal config the settings guard fires *before* the checks run, so `check` cannot print E002. That's by design (E002 is for settings modules that change DEBUG after loading). Verified with a settings module that imports `ssoproject.settings` with `SSO_DEBUG=True` and then sets `DEBUG=False`: as root, `check` and `check --deploy` both report `(sso.E002) Refusing to run as root …`, exit 1 |
+| 2a | Non-root (uid 1000), `SSO_DEBUG=False` | **PASS.** `check`: no issues. `check --deploy`: only W004/W008 (plain-HTTP QA config), no sso.E\*. gunicorn starts, `/healthz` → 200 `{"status":"ok"}`, master euid 1000 on 3.13.16 |
+| 2b | Root, `SSO_DEBUG=True` | **PASS.** `check` no issues, migrate OK, gunicorn starts, `/healthz` → 200. No warning is logged (none expected per the commit/README). gunicorn 26 created `/root/.gunicorn/gunicorn.ctl` (control socket) |
+| 3 | README §2 dev commands in a fresh `git archive HEAD` copy under `qa/run/readme-check/`, `.venv` there | **PASS.** Run verbatim from the README (setup line + "Run the server locally" block) with `python3.13` = 3.13.16 first on PATH. Two QA deviations: `createsuperuser --noinput` with `DJANGO_SUPERUSER_*` (it's interactive), and gunicorn backgrounded. `pip install -r requirements-dev.txt` now brings gunicorn 26.2.0 and requests 2.34.2. migrate OK, superuser created, `curl /healthz` → `{"status":"ok"}`, server process on 3.13.16 |
+| 4 | Static deploy tests (`-m static`) | **PASS: 35/35** (31 earlier + new DEPLOY-20 ×3, DEPLOY-20b), 0 warnings under `-X dev -W default`. DEPLOY-20 runs the settings import in a fresh interpreter with `os.geteuid` patched, so no real root is needed |
+
+Notes:
+- At 12:53 a non-QA process briefly held `127.0.0.1:8000`. QA's non-root start there failed with "address in use", and the `/healthz` 503 `database` answer came from that other server. QA reran on port 8020 (PASS). QA's `pkill -f "gunicorn … -b 127.0.0.1:8000"` matches any server started with the README command line, so it may have stopped that other process. From now on QA uses its own ports and stops servers by PID.
+- Cleanup: all servers stopped; root-created `/tmp/qa-quick-root*` and `/tmp/qa-cache-quick*`, plus the README's `/tmp/ssokeys` and `/tmp/sso-cache`, removed; nothing root-owned left in the repo. Nothing outside `qa/` changed.

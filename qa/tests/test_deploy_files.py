@@ -280,3 +280,48 @@ def test_DEPLOY_19_proxy_and_cache_hardening_still_in_place(repo):
     assert not re.search(r"^\s+ports:", web, re.M), "web must not be published"
     conf = "".join(_text(p) for p in _find(repo, "nginx.conf"))
     assert re.search(r"proxy_set_header\s+X-Forwarded-For\s+\$remote_addr;", conf), "nginx must overwrite XFF"
+
+
+# Quick check @ 5666f8b: refuse to run as root with SSO_DEBUG=False (sso/runtime.py, settings.py, sso.E002).
+_ROOT_HARNESS = r"""
+import os, sys
+sys.path.insert(0, os.environ["QA_REPO"])
+if os.environ["QA_FAKE_EUID"] != "real":
+    os.geteuid = lambda: int(os.environ["QA_FAKE_EUID"])
+try:
+    import ssoproject.settings as s  # noqa: F401
+except Exception as exc:  # ImproperlyConfigured
+    print("RAISED", type(exc).__name__, str(exc)[:80])
+else:
+    print("LOADED DEBUG=%s" % s.DEBUG)
+"""
+
+
+@pytest.mark.parametrize("euid,debug,expect", [
+    ("0", "False", "RAISED ImproperlyConfigured Refusing to run as root"),
+    ("0", "True", "LOADED DEBUG=True"),
+    ("10001", "False", "RAISED ImproperlyConfigured SSO_SECRET_KEY is empty"),  # gets past the root guard
+])
+def test_DEPLOY_20_settings_refuse_uid0_without_debug(repo, euid, debug, expect):
+    """Harness: os.geteuid monkeypatched in a fresh interpreter (no real root needed); minimal env, so a
+    non-root non-debug load stops at the next guard (empty secret), which proves the root guard passed."""
+    import sys
+    env = {"PATH": os.environ["PATH"], "QA_REPO": repo, "QA_FAKE_EUID": euid, "SSO_DEBUG": debug,
+           "SSO_ENV_FILE": "", "PYTHONDONTWRITEBYTECODE": "1"}
+    p = subprocess.run([sys.executable, "-c", _ROOT_HARNESS], env=env, capture_output=True, text=True,
+                       cwd=repo, timeout=60)
+    assert expect in p.stdout, (p.stdout, p.stderr[-2000:])
+
+
+def test_DEPLOY_20b_root_guard_wired_into_settings_and_checks(repo):
+    settings = _read(repo, "ssoproject/settings.py")
+    guard = re.search(r"^if not DEBUG and running_as_root\(\):\n\s+raise ImproperlyConfigured\(ROOT_MESSAGE\)",
+                      settings, re.M)
+    assert guard, "settings must raise ImproperlyConfigured when not DEBUG and running as root"
+    assert guard.start() < settings.index("SECRET_KEY = "), "root guard should run before the other settings"
+    checks = _read(repo, "sso/checks.py")
+    assert re.search(r'id="sso\.E002"', checks) and "running_as_root()" in checks
+    runtime = _read(repo, "sso/runtime.py")
+    assert "geteuid" in runtime
+    # images never start as root: final USER is the non-root uid (DEPLOY-16) and the test image too
+    assert re.search(r"^USER\s+10001:10001\s*$", _read(repo, "docker/Dockerfile.test"), re.M)
