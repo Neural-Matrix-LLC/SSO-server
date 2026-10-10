@@ -42,7 +42,7 @@ but nothing uses it.
 | `sso/checks.py` | System check `sso.E001` (Error): per-process/no-op cache with `SSO_DEBUG=False` |
 | `sso/migrations/0001_initial.py` | The only migration this project owns (new `sso_*` tables) |
 | `sso/tests/` | pytest suite (see §9 for the spec §11 mapping) |
-| `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
+| `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`, with `JWKSCache`: keys cached 1 h, an unknown `kid` refetches the JWKS at most once per 60 s, spec §8.1) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
 | `examples/frontend/` | `index.html` test page plus the spec §7.2 `auth.js` (SSO base URL configurable) |
 | `scripts/gen_keys.sh` | RSA key pair (default 3072-bit). Prints the `kid`. Refuses to overwrite |
 | `scripts/gen_selfsigned_cert.sh`, `scripts/dev_setup.sh` | Local dev TLS cert, keys and `.env` |
@@ -254,6 +254,7 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 | logout-all and introspect after revocation | `test_logout_all_blacklists_everything_and_revokes`, `test_introspect.py::test_introspect_inactive_after_logout_all` |
 | access token rejected at /refresh | `test_access_token_rejected_at_refresh` |
 | refresh token rejected by the §8.2 verifier | `test_verifier.py::test_verifier_rejects_refresh_token` |
+| verifier JWKS refetch ≤ 1/min on unknown kid (§8.1) | `test_verifier.py::test_unknown_kid_refetches_at_most_once_per_minute`, `test_rotation_new_kid_picked_up_by_refetch` |
 | JWKS `kid` matches the token header | `test_discovery_errors.py::test_jwks_lists_all_public_keys_and_kid_matches_token_header` |
 | expired and wrong aud/iss rejected | `test_refresh_rejects_bad_claims`, `test_me_rejects_expired_wrong_aud_iss`, `test_verifier_rejects_expired_wrong_aud_iss`, `test_introspect_inactive_cases` |
 | cookie mode HttpOnly/Secure + Origin | `test_cookie_mode.py::test_browser_login_sets_hardened_cookie_and_omits_body_token`, `test_cookie_refresh_requires_allowed_origin` |
