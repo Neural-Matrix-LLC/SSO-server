@@ -215,6 +215,9 @@ SECURE_REDIRECT_EXEMPT = [r"^healthz$"]
 SECURE_HSTS_SECONDS = env.int("SSO_HSTS_SECONDS", default=0 if DEBUG else 31536000)
 SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool("SSO_HSTS_INCLUDE_SUBDOMAINS", default=True)
 SECURE_HSTS_PRELOAD = env.bool("SSO_HSTS_PRELOAD", default=False)
+# HSTS preload is a whole-domain commitment (all subdomains, hard to undo): a decision for the
+# domain owner, not this app, so its deploy-check warning is silenced (README open questions).
+SILENCED_SYSTEM_CHECKS = ["security.W021"]
 
 SSO_ADMIN_PATH = env.str("SSO_ADMIN_PATH", default="sso-admin/").strip("/") + "/"
 

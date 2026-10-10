@@ -101,8 +101,9 @@ def _classify(exc: Exception, response_status: int) -> tuple[str, str]:
         wait = int(exc.wait) if exc.wait is not None else None
         return "rate_limited", (f"Too many attempts. Try again in {wait} s." if wait else GENERIC[429][1])
     if isinstance(exc, (exceptions.AuthenticationFailed, exceptions.NotAuthenticated)):
-        codes = exc.get_codes()
-        if codes == "user_inactive" or (isinstance(codes, dict) and codes.get("code") == "user_inactive"):
+        # DRF style: code on the ErrorDetail; simplejwt style: detail={"detail": ..., "code": ...}
+        code = exc.detail.get("code") if isinstance(exc.detail, dict) else exc.get_codes()
+        if str(code) == "user_inactive":
             return AccountInactive.error_code, AccountInactive.default_detail
         return "token_invalid", TokenInvalid.default_detail
     return GENERIC.get(response_status, ("error", "Request failed."))
