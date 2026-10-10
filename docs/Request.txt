@@ -1,0 +1,9 @@
+write a plan to build a SSO login server in "SSO-server.md" 
+1) it reuse the same Django method of user login management, @myFinance/settings.py using the database "dcWebUsers".
+2) All the users are kept.
+3) Support REST API for login
+4) add protocol so that application front-end login--> SSO server and return a token
+5) front-end use the token to access services in other back-end server.
+6) make a section to list the front-end approach to use the API
+7) another section to list how the backend services use the protocol to verify the user login(token)
+8) The plan will be a new repo project, but not to develop here in this repo. So the "SSO-server.md" has to be very clear for developer to write UI/application to use this SSO.
