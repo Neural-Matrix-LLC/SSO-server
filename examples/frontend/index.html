@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SSO test page</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 15px/1.4 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1rem; }
+  fieldset { margin-bottom: 1rem; } label { display: block; margin: .3rem 0; }
+  pre { background: #f4f4f4; padding: .8rem; overflow: auto; max-height: 22rem; }
+  .err { color: #b00020; } .ok { color: #1b5e20; } code { background: #eee; padding: 0 .2rem; }
+</style>
+<script>
+  // Configure without editing code:  index.html?sso=https://sso.host&api=https://sso.host/verifier
+  const q = new URLSearchParams(location.search);
+  window.SSO_BASE = q.get("sso") || location.origin;
+  window.API_BASE = q.get("api") || (location.origin + "/verifier");
+</script>
+</head>
+<body>
+<h1>SSO test page</h1>
+<p>Uses the spec §7.2 <code>auth.js</code> client in browser (cookie) mode.
+   SSO: <code id="sso"></code> &middot; demo API: <code id="api"></code></p>
+<p class="small">This page's origin (<code id="origin"></code>) must be in <code>SSO_CORS_ALLOWED_ORIGINS</code>.</p>
+
+<fieldset id="loginBox">
+  <legend>Login</legend>
+  <form id="loginForm">
+    <label>Username or e-mail <input name="username" autocomplete="username" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <button>Log in</button>
+  </form>
+</fieldset>
+
+<fieldset>
+  <legend>Session</legend>
+  <div id="status">Restoring session…</div>
+  <button id="btnRefresh">Refresh now</button>
+  <button id="btnMe">GET /api/v1/auth/me</button>
+  <button id="btnApi">Call demo API /me</button>
+  <label>Group check: <input id="group" value="trader" size="10"> <button id="btnGroup">Call demo API /group/…</button></label>
+  <button id="btnLogout">Log out</button>
+</fieldset>
+
+<h3>Output</h3>
+<pre id="out"></pre>
+
+<script type="module">
+import { login, logout, refresh, restoreSession, currentUser, apiFetch, ssoBase, _accessTokenForDemo } from "./auth.js";
+
+const $ = (id) => document.getElementById(id);
+$("sso").textContent = ssoBase(); $("api").textContent = window.API_BASE; $("origin").textContent = location.origin;
+
+const MESSAGES = {   // spec §7.4 UI checklist
+  invalid_credentials: "Wrong username or password",
+  account_inactive: "Please activate your account from the email we sent",
+  rate_limited: "Too many attempts, try again later",
+  origin_not_allowed: "This page's origin is not allowed by the SSO server (SSO_CORS_ALLOWED_ORIGINS)",
+};
+function show(obj, cls = "") { $("out").className = cls; $("out").textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2); }
+function fail(e) { show(`${e.status || ""} ${e.code || ""}: ${MESSAGES[e.code] || e.message}`, "err"); }
+function claims() {
+  const t = _accessTokenForDemo(); if (!t) return null;
+  return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+}
+function render() {
+  const u = currentUser();
+  $("status").innerHTML = u ? `<span class="ok">Logged in as <b>${u.username}</b> (groups: ${u.groups.join(", ") || "none"})</span>`
+                            : "Not logged in";
+  $("loginBox").hidden = !!u;
+}
+
+$("loginForm").onsubmit = async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  try { await login(f.username.value, f.password.value); f.password.value = ""; render(); show({ user: currentUser(), access_token_claims: claims() }, "ok"); }
+  catch (e) { fail(e); }
+};
+$("btnRefresh").onclick = async () => { try { await refresh(); render(); show({ refreshed: true, access_token_claims: claims() }, "ok"); } catch (e) { fail(e); render(); } };
+$("btnMe").onclick = async () => {
+  const r = await apiFetch(ssoBase() + "/api/v1/auth/me").catch((e) => ({ error: e.message }));
+  show(r.json ? await r.json() : r, r.ok ? "ok" : "err");
+};
+async function callApi(path) {
+  try { const r = await apiFetch(window.API_BASE + path); show({ status: r.status, body: await r.json() }, r.ok ? "ok" : "err"); }
+  catch (e) { show(e.message, "err"); render(); }
+}
+$("btnApi").onclick = () => callApi("/me");
+$("btnGroup").onclick = () => callApi("/group/" + encodeURIComponent($("group").value));
+$("btnLogout").onclick = async () => { await logout(); render(); show("logged out (refresh cookie cleared)"); };
+
+(await restoreSession()) ? show({ restored: true, user: currentUser() }, "ok") : show("No session: please log in.");
+render();
+</script>
+</body>
+</html>
