@@ -22,7 +22,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DJANGO_SETTINGS_MODULE=ssoproject.settings \
-    GUNICORN_WORKERS=3
+    GUNICORN_WORKERS=3 \
+    SSO_FORWARDED_ALLOW_IPS=127.0.0.1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libmariadb3 \
  && rm -rf /var/lib/apt/lists/* \
@@ -53,5 +54,6 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
   CMD ["python", "/app/docker/healthcheck.py"]
 
 # R5/R6: gunicorn only. No migrate/createsuperuser/clearsessions/flushexpiredtokens at start-up.
-# Default access log format logs no headers; web is never published, so trusting all forwarders is safe.
-CMD ["sh", "-c", "exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - --forwarded-allow-ips '*'"]
+# Default access log format logs no headers. gunicorn trusts X-Forwarded-* only from
+# SSO_FORWARDED_ALLOW_IPS (comma list of IPs/CIDRs; image default 127.0.0.1, compose sets the nginx network).
+CMD ["sh", "-c", "exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - --forwarded-allow-ips \"${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

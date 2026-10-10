@@ -39,7 +39,7 @@ but nothing uses it.
 | `sso/signals.py` | A password change made through this project revokes the user's tokens. A login rehash does not |
 | `sso/admin.py` | ServiceClient admin. The secret is generated and shown once; only its hash is stored |
 | `sso/management/commands/create_service_client.py` | CLI registration and secret rotation |
-| `sso/checks.py` | Deploy check `sso.W001`: LocMem cache used in production |
+| `sso/checks.py` | System check `sso.E001` (Error): per-process/no-op cache with `SSO_DEBUG=False` |
 | `sso/migrations/0001_initial.py` | The only migration this project owns (new `sso_*` tables) |
 | `sso/tests/` | pytest suite (see §9 for the spec §11 mapping) |
 | `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
@@ -88,7 +88,8 @@ SSO_JWT_PUBLIC_KEY_PATHS=/tmp/ssokeys/dev.public.pem
 SSO_CORS_ALLOWED_ORIGINS=http://127.0.0.1:5500
 SSO_SSL_REDIRECT=False
 SSO_COOKIE_SECURE=False
-SSO_NUM_PROXIES=0
+# SSO_DEBUG=False needs a shared cache; without Redis a file cache works for one host
+SSO_CACHE_URL=filecache:///tmp/sso-cache
 X
 .venv/bin/python manage.py migrate && .venv/bin/python manage.py createsuperuser
 .venv/bin/gunicorn ssoproject.wsgi:application -b 127.0.0.1:8000
@@ -115,11 +116,12 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_ACCESS_TTL_MIN` / `SSO_REFRESH_TTL_DAYS` | `15` / `7` | |
 | `SSO_CORS_ALLOWED_ORIGINS` | — | Front-end origins. Also the allow-list for the cookie-mode `Origin` check |
 | `SSO_COOKIE_DOMAIN` | host-only | e.g. `.example.com` so sibling sub-domains share the cookie |
-| `SSO_CACHE_URL` | `locmemcache://` | Throttle counters. Use `redis://redis:6379/0` with more than one gunicorn worker. Keys are prefixed with `sso` |
-| `SSO_NUM_PROXIES` | `1` | DRF `NUM_PROXIES`: the right-most `X-Forwarded-For` entry (set by nginx) is taken as the client IP |
+| `SSO_CACHE_URL` | none (`locmemcache://` only when `SSO_DEBUG=True`) | Throttle counters, shared by all gunicorn workers. **Required when `SSO_DEBUG=False`**: empty, `locmemcache://` or `dummycache://` stop the server at startup (`ImproperlyConfigured`), and `manage.py check` reports `sso.E001` if `CACHES` is overridden to one of them. `docker-compose.yml` defaults it to `redis://redis:6379/0`; on a single host without Redis use `filecache:///path`. Keys are prefixed with `sso` |
+| `SSO_NUM_PROXIES` | `0` | DRF `NUM_PROXIES`. `0` ignores `X-Forwarded-For` (safe when gunicorn is reached directly). `docker-compose.yml` sets `1`: nginx **overwrites** `X-Forwarded-For` and `web` is not published, so the right-most entry is the real client IP. Never set `1` when clients can reach gunicorn directly or the proxy appends to a client-supplied header: they could then pick their own IP and bypass the per-IP throttle |
+| `SSO_FORWARDED_ALLOW_IPS` | `127.0.0.1` (image) | gunicorn `--forwarded-allow-ips`: comma list of IPs/CIDRs whose `X-Forwarded-Proto` is trusted. Compose sets it to the `edge` network (`SSO_EDGE_SUBNET`, default `172.31.250.0/24`), where nginx is the only other container. Never `*` |
 | `SSO_ADMIN_PATH` | `sso-admin/` | Admin is not served at `/admin/` |
 | `SSO_SSL_REDIRECT`, `SSO_HSTS_SECONDS`, `SSO_COOKIE_SECURE`, `SSO_THROTTLE_*`, `SSO_LOG_LEVEL` | secure defaults | Overrides for dev and tuning |
-| Deployment parameters / compose only: `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, `SSO_IMAGE_TAG`, `GUNICORN_WORKERS`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR` | | Deployment plan §0. Nothing host-specific is built into code, compose or nginx. The derived app values (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
+| Deployment parameters / compose only: `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, `SSO_IMAGE_TAG`, `GUNICORN_WORKERS`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR`, `SSO_EDGE_SUBNET` (fixed subnet of the nginx↔web network; change it if it collides with a host network) | | Deployment plan §0. Nothing host-specific is built into code, compose or nginx. The derived app values (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
 
 With `SSO_DEBUG=False`, the process **refuses to start** (`ImproperlyConfigured` with a clear message) if any
 of these is true: `SSO_SECRET_KEY` or `SSO_ISSUER` is empty, a key file is missing or unreadable, or a key
@@ -243,10 +245,10 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 
 | Spec §11 item | Test(s) |
 |---|---|
-| Legacy Django 4.1 PBKDF2 hash | `test_login.py::test_login_ok_native_with_legacy_django41_hash` (fixture `pbkdf2_sha256$390000$…`) |
+| Legacy Django 4.1 PBKDF2 hash | `test_login.py::test_login_ok_native_with_legacy_django41_hash` (fixture `pbkdf2_sha256$390000$…`); corrupt hashes (QA LEGACY-06): `test_login_corrupt_stored_hash_is_401_not_500` |
 | login ok / wrong password / unknown user / inactive user | `test_login.py::test_login_ok_*`, `test_login_wrong_password`, `test_login_unknown_user_same_error_and_runs_dummy_hash`, `test_login_inactive_user*` |
 | email login | `test_login_by_email_case_insensitive`, `test_login_by_email_duplicate_rejected`, `test_empty_email_never_matches`, `test_login_unknown_email_runs_dummy_hash` |
-| throttling | `test_throttle_per_ip`, `test_throttle_per_username_across_ips`, `test_throttle_uses_x_forwarded_for_with_one_proxy` |
+| throttling | `test_throttle_per_ip`, `test_throttle_per_username_across_ips`, `test_throttle_uses_x_forwarded_for_with_one_proxy`, `test_x_forwarded_for_ignored_with_zero_proxies`; fail-fast cache: `test_keys_settings.py::test_settings_fail_fast_without_shared_cache` |
 | refresh rotation (old token rejected on reuse) | `test_token_flow.py::test_refresh_rotation_old_token_rejected_on_reuse`, `test_cookie_mode.py::test_cookie_refresh_with_allowed_origin_rotates_cookie` |
 | logout blacklists | `test_logout_blacklists_refresh_token`, `test_cookie_logout_checks_origin_then_clears_cookie` |
 | logout-all and introspect after revocation | `test_logout_all_blacklists_everything_and_revokes`, `test_introspect.py::test_introspect_inactive_after_logout_all` |
@@ -272,6 +274,9 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
   blacklist write is the race guard: if two refreshes use the same token at once, only one succeeds.
 * **Introspect** returns current DB values for username, email, groups and is_staff, plus `iat`, `exp`,
   `iss`, `aud` and `client_id`.
+* **Corrupt stored hashes** (e.g. `pbkdf2_sha256$notanumber$…`, or a missing digest) make Django's hasher
+  raise. Login treats that as a wrong password: one dummy hash, 401 `invalid_credentials`, an extra
+  `sso.auth` log line `result=stored_hash_invalid` (no hash, no password), and the row is left unchanged.
 * **Logout** in cookie mode with no cookie returns 204. With an invalid token it returns 401
   `token_invalid` and still clears the cookie.
 * **JSON-only parser** (no form or multipart), so a cross-site form POST cannot reach the API. Form posts get 415.
@@ -308,6 +313,4 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 8. Redis 7.2 (BSD) vs Valkey 8 for the cache (deployment plan Q14).
 9. Should the cookie-mode `Origin` check also cover `/login` (login-CSRF hardening)? It is not required by
    the addendum and is not implemented.
-10. QA's seed script (`qa/tests/fixtures/seed_test_data.py`) still needs the R27 guard
-    (`SSO_ALLOW_SYNTHETIC_SEED=1` plus a local DB host). `qa/tests/conftest.py` still defaults to a real-domain
-    origin (R10 note). Both files belong to QA, so this sprint did not change them.
+10. ~~QA seed R27 guard / real-domain origin in `qa/tests/conftest.py`~~ **Done by QA** (QA results §8).

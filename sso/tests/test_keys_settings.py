@@ -96,6 +96,7 @@ GOOD = {
     "SSO_ISSUER": "https://sso.test",
     "SSO_JWT_PRIVATE_KEY_PATH": os.environ["SSO_TEST_CURRENT_PRIVATE"],
     "SSO_JWT_PUBLIC_KEY_PATHS": os.environ["SSO_TEST_CURRENT_PUBLIC"],
+    "SSO_CACHE_URL": "redis://127.0.0.1:6379/0",
 }
 
 
@@ -149,14 +150,63 @@ def test_deploy_check_passes_with_prod_like_env():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_locmem_deploy_warning(settings):
-    from sso.checks import locmem_cache_in_production
+def test_per_process_cache_check_is_an_error(settings):
+    from sso.checks import per_process_cache_in_production
 
     settings.DEBUG = False
-    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
-    assert [w.id for w in locmem_cache_in_production(None)] == ["sso.W001"]
+    for backend in ("django.core.cache.backends.locmem.LocMemCache", "django.core.cache.backends.dummy.DummyCache"):
+        settings.CACHES = {"default": {"BACKEND": backend}}
+        errors = per_process_cache_in_production(None)
+        assert [e.id for e in errors] == ["sso.E001"] and errors[0].is_serious()
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache", "LOCATION": "redis://x"}}
+    assert per_process_cache_in_production(None) == []
     settings.DEBUG = True
-    assert locmem_cache_in_production(None) == []
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+    assert per_process_cache_in_production(None) == []
+
+
+@pytest.mark.parametrize("cache_url,message", [
+    ("", "SSO_CACHE_URL is empty"),
+    ("locmemcache://x", "uses the locmem backend"),
+    ("dummycache://", "uses the dummy backend"),
+])
+def test_settings_fail_fast_without_shared_cache(cache_url, message):
+    r = _run_settings({**GOOD, "SSO_CACHE_URL": cache_url})
+    assert r.returncode != 0
+    assert "ImproperlyConfigured" in r.stderr and message in r.stderr
+
+
+def test_shared_cache_backends_accepted(tmp_path):
+    assert _run_settings({**GOOD, "SSO_CACHE_URL": f"filecache://{tmp_path}"}).returncode == 0
+    assert _run_settings({**GOOD, "SSO_CACHE_URL": "redis://redis:6379/0"}).returncode == 0
+    # debug mode may still use the in-process default
+    r = _run_settings({**GOOD, "SSO_CACHE_URL": "", "SSO_DEBUG": "True"})
+    assert r.returncode == 0, r.stderr
+
+
+def test_manage_check_reports_error_for_locmem_override(tmp_path):
+    """The Django check (not only the import-time guard) fails when CACHES is overridden afterwards."""
+    mod = tmp_path / "override_settings.py"
+    mod.write_text("from ssoproject.settings import *\n"
+                   "CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}\n")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    env.update({"DJANGO_SETTINGS_MODULE": "override_settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "sqlite",
+                "SSO_SQLITE_PATH": ":memory:", "SSO_ALLOWED_HOSTS": "sso.test",
+                "PYTHONPATH": f"{tmp_path}:{REPO}", **GOOD})
+    r = subprocess.run([sys.executable, "manage.py", "check"], cwd=REPO, env=env, capture_output=True,
+                       text=True, timeout=60)
+    assert r.returncode != 0 and "sso.E001" in r.stderr
+
+
+def test_num_proxies_defaults_to_zero():
+    code = ("import django; django.setup(); from rest_framework.settings import api_settings; "
+            "print(api_settings.NUM_PROXIES)")
+    e = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    e.update({"DJANGO_SETTINGS_MODULE": "ssoproject.settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "sqlite",
+              "SSO_SQLITE_PATH": ":memory:", **GOOD})
+    r = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "0"
 
 
 def test_env_file_is_read(tmp_path):

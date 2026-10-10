@@ -164,12 +164,35 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 # --------------------------------------------------------------------------- cache (throttling)
-# LocMem is per-process: production with >1 gunicorn worker needs SSO_CACHE_URL=redis://... (B.3)
-CACHES = {"default": env.cache_url("SSO_CACHE_URL", default="locmemcache://sso-default")}
+# Throttle counters must be shared by all gunicorn workers (addendum B.3, QA defect 5). With
+# SSO_DEBUG=False the server refuses to start without SSO_CACHE_URL or with a per-process (locmem)
+# or no-op (dummy) cache. Use redis://... (compose default) or, for a single-host run without Redis,
+# filecache:///path (shared between the workers of one host).
+_PER_PROCESS_CACHES = {
+    "django.core.cache.backends.locmem.LocMemCache": "locmem",
+    "django.core.cache.backends.dummy.DummyCache": "dummy",
+}
+_cache_url = env.str("SSO_CACHE_URL", default="")
+if not _cache_url:
+    if not DEBUG:
+        raise ImproperlyConfigured(
+            "SSO_CACHE_URL is empty: set a shared cache for throttling, e.g. redis://redis:6379/0 "
+            "(SSO_DEBUG=False never falls back to a per-process cache)."
+        )
+    _cache_url = "locmemcache://sso-default"
+CACHES = {"default": env.cache_url_config(_cache_url)}
+if not DEBUG and CACHES["default"]["BACKEND"] in _PER_PROCESS_CACHES:
+    raise ImproperlyConfigured(
+        f"SSO_CACHE_URL uses the {_PER_PROCESS_CACHES[CACHES['default']['BACKEND']]} backend, which is not "
+        "shared between gunicorn workers, so login throttling would not work. Use redis://... or filecache://..."
+    )
 CACHES["default"].setdefault("KEY_PREFIX", "sso")  # namespaced throttle keys (deployment plan R12)
 
 # --------------------------------------------------------------------------- DRF / SimpleJWT
-SSO_NUM_PROXIES = env.int("SSO_NUM_PROXIES", default=1)
+# Number of trusted reverse proxies in front of gunicorn. Default 0 = X-Forwarded-For is ignored, so a
+# directly reachable server cannot be tricked out of its per-IP throttle (QA defect 4). docker-compose.yml
+# sets 1, which is correct only because nginx overwrites X-Forwarded-For and web is not published.
+SSO_NUM_PROXIES = env.int("SSO_NUM_PROXIES", default=0)
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],

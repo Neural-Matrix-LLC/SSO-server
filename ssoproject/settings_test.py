@@ -47,7 +47,11 @@ os.environ.update(
         "SSO_CORS_ALLOWED_ORIGINS": "https://fin.example.test,https://app.example.test",
         "SSO_COOKIE_DOMAIN": ".example.test",
         "SSO_SSL_REDIRECT": "False",
-        "SSO_CACHE_URL": "locmemcache://sso-tests",
+        # a shared-cache URL satisfies the production fail-fast; no Redis is contacted at import.
+        # CACHES is switched to LocMem below (single test process).
+        "SSO_CACHE_URL": "redis://127.0.0.1:6379/15",
+        # tests exercise the compose configuration: one trusted proxy (nginx)
+        "SSO_NUM_PROXIES": "1",
         "SSO_TEST_KEYDIR": _KEYDIR,
         "SSO_TEST_CURRENT_PRIVATE": _cur_priv,
         "SSO_TEST_CURRENT_PUBLIC": _cur_pub,
@@ -60,3 +64,6 @@ if os.environ["SSO_DB_ENGINE"] == "sqlite":
     os.environ["SSO_SQLITE_PATH"] = ":memory:"
 
 from .settings import *  # noqa: E402,F401,F403
+
+CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "sso-tests",
+                      "KEY_PREFIX": "sso"}}

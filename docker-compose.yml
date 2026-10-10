@@ -19,6 +19,12 @@ services:
     env_file: .env
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+      # nginx (the only proxy) overwrites X-Forwarded-For; trust exactly that one hop (QA defect 4)
+      SSO_NUM_PROXIES: "1"
+      # gunicorn trusts X-Forwarded-Proto only from the edge network, where nginx lives
+      SSO_FORWARDED_ALLOW_IPS: ${SSO_FORWARDED_ALLOW_IPS:-${SSO_EDGE_SUBNET:-172.31.250.0/24}}
+      # shared throttle cache; settings refuse a per-process cache when SSO_DEBUG=False (QA defect 5)
+      SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
     volumes:
       - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
       # optional MySQL server CA for verified DB TLS (SSO_DB_SSL_CA=/run/mysql-ca/ca.pem, R20/R28)
@@ -96,6 +102,10 @@ services:
     logging: *default-logging
 
 networks:
-  edge: {}            # nginx <-> web; web also reaches the remote MySQL through it
+  edge:               # nginx <-> web; web also reaches the remote MySQL through it
+    ipam:
+      config:
+        # fixed so gunicorn can trust exactly this network; change if it collides on the host
+        - subnet: ${SSO_EDGE_SUBNET:-172.31.250.0/24}
   backend:
     internal: true    # redis is never reachable from outside
