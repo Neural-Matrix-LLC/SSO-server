@@ -1,5 +1,5 @@
 # Demo back-end service for QA (not part of the SSO image).
-FROM python:3.12.15-slim-trixie
+FROM python:3.13.16-slim-trixie
 ENV PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .

@@ -1,5 +1,7 @@
 # Exact pins for the Docker image (deployment plan R9). Generated from a tested venv with:
-#   pip freeze | grep -E '<runtime packages>'  (+ mysqlclient, which cannot be built on the dev box)
+#   pip freeze | grep -E '<runtime packages>'
+# Verified 2026-10-10: every pin installs on CPython 3.13.16 (the image's Python) from a clean venv; mysqlclient
+# 2.3.0 builds from source against trixie's libmariadb-dev (client 3.4.9). No pin needed a bump for 3.13.
 # Regenerate after changing requirements*.txt and re-run the test suite.
 asgiref==3.12.1
 cffi==2.1.1

@@ -1,5 +1,5 @@
 # Runtime dependencies of the SSO server (ranges). The image installs the exact pins in requirements.lock.
-# Target: Django 5.2 LTS only (production MySQL 8.4; deployment plan R9). The test suite also runs on
+# Target: Django 5.2 LTS only, Python 3.13 (production MySQL 8.0 now, 8.4 later; deployment plan R9). The test suite also runs on
 # Django 4.2 (scripts/test_both_django.sh) to keep the code portable, but 4.2 is not shipped.
 Django>=5.2,<5.3
 djangorestframework>=3.15,<4

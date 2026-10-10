@@ -13,9 +13,15 @@ x-logging: &default-logging
 
 services:
   web:
-    image: sso-server:${SSO_IMAGE_TAG:?set SSO_IMAGE_TAG in .env}
+    # Docker Hub name. DOCKER_USER / IMAGE_TAG come from .env; a shell export of the same name wins over .env.
+    image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
     build:
       context: .
+      args:
+        SSO_UID: ${SSO_UID:-10001}
+        SSO_GID: ${SSO_GID:-10001}
+    # non-root (R2). Must equal the build args: the image's files and the host key files are owned for it.
+    user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
     env_file: .env
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}

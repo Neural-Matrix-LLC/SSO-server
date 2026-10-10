@@ -1,10 +1,13 @@
 # syntax=docker/dockerfile:1
 # SSO server image (deployment plan §15 R1-R9).
-#   docker build -t sso-server:<tag> .
+#   docker build -t <docker-user>/sso-server:<tag> .            (or: docker compose build)
+#   docker build --build-arg SSO_UID=1500 --build-arg SSO_GID=1500 ...   (match host key-file owner; default 10001)
 # Keys, .env and certs are NEVER copied in: they are mounted at runtime (/run/keys:ro, env_file).
-# Debian 13 (trixie) slim: its libmariadb3 (Connector/C 3.4) ships the caching_sha2_password client plugin
-# that MySQL 8.4 accounts need (R1). Pin by digest in CI if wanted: python:3.12.15-slim-trixie@sha256:...
-ARG PYTHON_IMAGE=python:3.12.15-slim-trixie
+# Python 3.13 on Debian 13 (trixie) slim (R1). Its libmariadb3 (Connector/C 3.4) ships the
+# caching_sha2_password client plugin, the default auth plugin for new accounts on MySQL 8.0 and 8.4.
+# Patch pinned; digest of python:3.13.16-slim-trixie on 2026-10-10 (multi-arch index), if you want to pin harder:
+#   python:3.13.16-slim-trixie@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
+ARG PYTHON_IMAGE=python:3.13.16-slim-trixie
 
 # ---------------------------------------------------------------- builder: compiles mysqlclient wheels
 FROM ${PYTHON_IMAGE} AS builder
@@ -17,6 +20,9 @@ RUN pip wheel --wheel-dir /wheels -r /tmp/requirements.lock
 
 # ---------------------------------------------------------------- runtime: no compilers
 FROM ${PYTHON_IMAGE} AS runtime
+# Non-root runtime user (R2). Default 10001; override to match the owner of the host key files.
+ARG SSO_UID=10001
+ARG SSO_GID=10001
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -28,8 +34,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libmariadb3 \
  && rm -rf /var/lib/apt/lists/* \
  && dpkg -L libmariadb3 | grep -q '/plugin/caching_sha2_password.so$' \
- && groupadd --system --gid 10001 sso \
- && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sso
+ && for id in "${SSO_UID}" "${SSO_GID}"; do case "$id" in ''|*[!0-9]*) echo "SSO_UID/SSO_GID must be numeric, got '$id'" >&2; exit 1;; esac; done \
+ && if [ "${SSO_UID}" -eq 0 ] || [ "${SSO_GID}" -eq 0 ]; then echo "SSO_UID/SSO_GID must not be 0 (root)" >&2; exit 1; fi \
+ && if ! getent group "${SSO_GID}" >/dev/null; then groupadd --system --gid "${SSO_GID}" sso; fi \
+ && if getent passwd "${SSO_UID}" >/dev/null; then \
+      echo "uid ${SSO_UID} already exists in the base image ($(getent passwd "${SSO_UID}" | cut -d: -f1)); pick another" >&2; exit 1; fi \
+ && useradd --system --uid "${SSO_UID}" --gid "${SSO_GID}" --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sso
 COPY --from=builder /wheels /wheels
 COPY requirements.lock /tmp/
 RUN pip install --no-index --find-links /wheels -r /tmp/requirements.lock && rm -rf /wheels /tmp/requirements.lock
@@ -46,7 +56,7 @@ RUN SSO_ENV_FILE= SSO_DEBUG=True SSO_DB_ENGINE=sqlite SSO_SQLITE_PATH=/tmp/build
  && rm -f /tmp/build.sqlite3 \
  && rm -rf sso/tests
 
-USER 10001:10001
+USER ${SSO_UID}:${SSO_GID}
 EXPOSE 8000
 
 # R7: send the Host Django expects and X-Forwarded-Proto: https (no curl needed).

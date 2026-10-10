@@ -39,4 +39,4 @@ echo "private=$PRIV"
 echo "public=$PUB"
 echo "kid=$KID"
 echo "Set SSO_JWT_PRIVATE_KEY_PATH=/run/keys/$NAME.private.pem and add /run/keys/$NAME.public.pem to SSO_JWT_PUBLIC_KEY_PATHS." >&2
-echo "On the server: chown 10001:10001 the files (container uid). Never commit them." >&2
+echo "On the server: chown them to the container user (SSO_UID:SSO_GID, default 10001:10001). Never commit them." >&2
