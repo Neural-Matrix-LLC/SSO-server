@@ -31,3 +31,6 @@ docker-compose.override.yml
 mysql-ca/*
 !mysql-ca/.gitkeep
 !.env.test.example
+
+# QA raw run logs
+qa/run/

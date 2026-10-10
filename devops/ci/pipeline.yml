@@ -1,0 +1,226 @@
+# =============================================================================
+# DRAFT, NOT ACTIVE (v1.1, 2026-10-10). CI pipeline for sso-server (GitHub Actions syntax).
+# Proposal by DevOps; see devops/DEPLOYMENT-PLAN.md §8.
+# It lives under devops/ci/ on purpose and will NOT run from here. To activate
+# (after Thomas approves and the GitHub repo exists, addendum D), copy it to
+# .github/workflows/ci.yml and resolve the TODOs.
+# No deploy step: deployments are manual (plan §12). No runtime secrets in CI.
+# v1.1: Django 5.2 only (4.2 matrix dropped, Thomas 2026-10-10); MySQL service = mysql:8.4
+#       with default auth (caching_sha2_password; mysql_native_password disabled by default);
+#       the image job now logs in to MySQL 8.4 from inside the built image.
+# =============================================================================
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  MYSQL_IMAGE: "mysql:8.4"   # TODO: pin the patch version used in prod (8.4.x)
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2   # TODO: pin to a commit SHA
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: No key/env/dump files tracked
+        run: |
+          if git ls-files | grep -E '(\.pem$|(^|/)\.env($|\.)|\.sql(\.gz)?$)' | grep -v '\.env\.example$'; then
+            echo "Tracked secret-like files found"; exit 1; fi
+
+  unit:
+    # Django 5.2 only. ssoproject/settings_test.py generates throw-away keys and uses in-memory SQLite.
+    needs: lint
+    runs-on: ubuntu-24.04
+    env:
+      SSO_DB_ENGINE: sqlite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: pip install -r requirements-dev.txt
+      - name: No pending migrations (addendum B11)
+        run: DJANGO_SETTINGS_MODULE=ssoproject.settings_test python manage.py makemigrations --check --dry-run
+      - name: Tests + coverage gate (addendum C; pytest.ini already adds --cov=sso)
+        run: pytest --cov-fail-under=90
+
+  integration-mysql:
+    needs: lint
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4          # keep in sync with env.MYSQL_IMAGE (services can't read env)
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root
+          MYSQL_DATABASE: dcWebUsers
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      SSO_DB_ENGINE: mysql
+      SSO_DBHOST: 127.0.0.1
+      SSO_DBPORT: "3306"
+      SSO_DBNAME: dcWebUsers
+      SSO_DBUSER: root           # CI only: pytest-django must CREATE DATABASE test_dcWebUsers
+      SSO_DBPWD: ci-root
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config default-libmysqlclient-dev mysql-client
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Assert MySQL 8.4 with default auth plugin
+        run: |
+          mysql -h127.0.0.1 -uroot -pci-root -N -e "SELECT VERSION(); SELECT plugin FROM mysql.user WHERE user='root' AND host='%';" | tee mysql-info.txt
+          grep -q '^8\.4\.' mysql-info.txt
+          grep -q 'caching_sha2_password' mysql-info.txt
+      # Mimic myFinance's existing dcWebUsers: built-in apps first (plan §2.1), then check the plan.
+      - name: Migrate plan must only touch sso + token_blacklist
+        env: { DJANGO_SETTINGS_MODULE: ssoproject.settings_test }
+        run: |
+          for app in auth contenttypes admin sessions; do python manage.py migrate "$app"; done
+          python manage.py migrate --plan | tee plan.txt
+          if grep -E '^\s*(auth|contenttypes|admin|sessions)\.' plan.txt; then
+            echo "Unexpected migrations for shared apps"; exit 1; fi
+          python manage.py migrate
+      - name: Tests on MySQL 8.4
+        run: pytest --no-cov   # settings_test honours SSO_DB_ENGINE=mysql
+
+  deploy-check:
+    needs: lint
+    runs-on: ubuntu-24.04
+    env:
+      DJANGO_SETTINGS_MODULE: ssoproject.settings
+      SSO_ENV_FILE: ""
+      SSO_DB_ENGINE: sqlite
+      SSO_DEBUG: "False"
+      SSO_SECRET_KEY: ci-only-not-a-secret-0123456789abcdefghijklmnopqrstuvwxyz
+      SSO_ALLOWED_HOSTS: sso.ci.invalid
+      SSO_ISSUER: https://sso.ci.invalid
+      SSO_CORS_ALLOWED_ORIGINS: https://app.ci.invalid
+      SSO_COOKIE_DOMAIN: .ci.invalid
+      SSO_JWT_PRIVATE_KEY_PATH: ci-keys/ci.private.pem
+      SSO_JWT_PUBLIC_KEY_PATHS: ci-keys/ci.public.pem
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config default-libmysqlclient-dev
+      - run: pip install -r requirements.txt pip-audit
+      - run: |
+          mkdir -p ci-keys && umask 077
+          openssl genrsa -out ci-keys/ci.private.pem 2048
+          openssl rsa -in ci-keys/ci.private.pem -pubout -out ci-keys/ci.public.pem
+      - run: python manage.py check --deploy --fail-level WARNING
+      - run: pip-audit -r requirements.txt
+
+  image:
+    needs: [unit, integration-mysql, deploy-check]
+    runs-on: ubuntu-24.04
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root
+          MYSQL_DATABASE: dcWebUsers
+          MYSQL_USER: sso_ci            # created with the 8.4 default plugin caching_sha2_password
+          MYSQL_PASSWORD: ci-pass
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute tags
+        id: tags
+        run: |
+          echo "sha=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "ver=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"; fi
+      - name: Build
+        run: docker build -t sso-server:${{ steps.tags.outputs.sha }} .
+      - name: Image must not contain secrets and must run as uid 10001
+        run: |
+          IMG=sso-server:${{ steps.tags.outputs.sha }}
+          U="$(docker image inspect -f '{{.Config.User}}' "$IMG")"
+          [ "$U" = "10001:10001" ] || [ "$U" = "10001" ] || { echo "image user is '$U'"; exit 1; }
+          docker run --rm --entrypoint sh "$IMG" -c \
+            '! find / -xdev \( -name "*.pem" -path "*keys*" -o -name ".env" -o -name "*.sql*" \) 2>/dev/null | grep -q .'
+      - name: Throw-away keys + env for the container
+        run: |
+          mkdir -p ci-keys && umask 077
+          openssl genrsa -out ci-keys/private.pem 2048
+          openssl rsa -in ci-keys/private.pem -pubout -out ci-keys/public.pem
+          chmod 644 ci-keys/*.pem   # CI only; prod: 0600 owned by 10001 (plan §4.2)
+          cat > ci.env <<'ENV'
+          SSO_DEBUG=False
+          SSO_SECRET_KEY=ci-only-not-a-secret-0123456789abcdefghijklmnopqrstuvwxyz
+          SSO_ALLOWED_HOSTS=sso.ci.invalid
+          SSO_ISSUER=https://sso.ci.invalid
+          SSO_CORS_ALLOWED_ORIGINS=https://app.ci.invalid
+          SSO_COOKIE_DOMAIN=.ci.invalid
+          SSO_DB_ENGINE=mysql
+          SSO_DBHOST=127.0.0.1
+          SSO_DBPORT=3306
+          SSO_DBNAME=dcWebUsers
+          SSO_DBUSER=sso_ci
+          SSO_DBPWD=ci-pass
+          SSO_JWT_PRIVATE_KEY_PATH=/run/keys/private.pem
+          SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/public.pem
+          ENV
+      - name: DB login from inside the image (caching_sha2_password on MySQL 8.4, plan §6.0)
+        run: |
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -N \
+            -e "SELECT user, plugin FROM mysql.user WHERE user='sso_ci'" | grep caching_sha2_password
+          docker run --rm --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" \
+            sso-server:${{ steps.tags.outputs.sha }} python manage.py check --database default
+      - name: Migrate + container smoke (/healthz with Host header, plan R7)
+        run: |
+          IMG=sso-server:${{ steps.tags.outputs.sha }}
+          docker run --rm --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" "$IMG" python manage.py migrate
+          docker run -d --name sso --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" "$IMG"
+          for i in $(seq 1 30); do
+            curl -fsS -H 'Host: sso.ci.invalid' http://127.0.0.1:8000/healthz && exit 0
+            sleep 2; done
+          docker logs sso; exit 1
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0   # TODO: pin to a commit SHA
+        with:
+          image-ref: sso-server:${{ steps.tags.outputs.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      # ---------------------------------------------------------------------
+      # PUBLISH, DISABLED in this draft. Enable only after a registry is
+      # approved (plan Q8). Tags: sha-<12hex> on main, vX.Y.Z on tags. Never latest.
+      # ---------------------------------------------------------------------
+      # - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+      #   uses: docker/login-action@v3
+      #   with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      # - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+      #   run: |
+      #     R=ghcr.io/<owner>/sso-server
+      #     docker tag sso-server:${{ steps.tags.outputs.sha }} $R:${{ steps.tags.outputs.sha }}
+      #     docker push $R:${{ steps.tags.outputs.sha }}
+      #     if [ -n "${{ steps.tags.outputs.ver }}" ]; then
+      #       docker tag sso-server:${{ steps.tags.outputs.sha }} $R:${{ steps.tags.outputs.ver }}
+      #       docker push $R:${{ steps.tags.outputs.ver }}; fi
