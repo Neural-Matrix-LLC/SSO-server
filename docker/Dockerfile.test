@@ -5,7 +5,13 @@ ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential pkg-config default-libmysqlclient-dev openssl \
  && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 10001 sso \
+ && useradd --system --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin sso \
+ && install -d -o 10001 -g 10001 /src
 WORKDIR /src
 COPY requirements-dev.txt ./
 RUN pip install -r requirements-dev.txt "mysqlclient>=2.2,<3" "redis>=5,<9" "${DJANGO_SPEC}"
-COPY . .
+# owned by the test user: pytest writes .coverage / .pytest_cache here
+COPY --chown=10001:10001 . .
+# the settings refuse uid 0 when SSO_DEBUG=False (as the test settings are), so run pytest non-root too
+USER 10001:10001

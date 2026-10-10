@@ -2,7 +2,8 @@
 
 All configuration comes from environment variables (optionally a ``.env`` file), read with
 django-environ (addendum B.12). In non-debug mode the process refuses to start when
-``SSO_SECRET_KEY``, ``SSO_ISSUER`` or the JWT key files are missing.
+``SSO_SECRET_KEY``, ``SSO_ISSUER`` or the JWT key files are missing, when ``SSO_CACHE_URL`` is not a
+shared cache, or when it runs as root (uid 0).
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import environ
 from django.core.exceptions import ImproperlyConfigured
 
 from sso.keys import KeyConfigError, generate_ephemeral_keyset, load_keyset
+from sso.runtime import ROOT_MESSAGE, running_as_root
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -25,6 +27,11 @@ if _env_file and Path(_env_file).is_file():
     env.read_env(_env_file)
 
 DEBUG = env.bool("SSO_DEBUG", default=False)
+
+# Non-root only (deployment plan R2): with SSO_DEBUG=False the process refuses to start as uid 0, the
+# same way as for a missing secret or a per-process cache. sso.E002 repeats it as a system check.
+if not DEBUG and running_as_root():
+    raise ImproperlyConfigured(ROOT_MESSAGE)
 
 # --------------------------------------------------------------------------- core / fail-fast
 SECRET_KEY = env.str("SSO_SECRET_KEY", default="")

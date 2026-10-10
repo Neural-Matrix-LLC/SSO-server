@@ -39,7 +39,7 @@ but nothing uses it.
 | `sso/signals.py` | A password change made through this project revokes the user's tokens. A login rehash does not |
 | `sso/admin.py` | ServiceClient admin. The secret is generated and shown once; only its hash is stored |
 | `sso/management/commands/create_service_client.py` | CLI registration and secret rotation |
-| `sso/checks.py` | System check `sso.E001` (Error): per-process/no-op cache with `SSO_DEBUG=False` |
+| `sso/checks.py`, `sso/runtime.py` | System checks (Errors) with `SSO_DEBUG=False`: `sso.E001` per-process/no-op cache, `sso.E002` running as root |
 | `sso/migrations/0001_initial.py` | The only migration this project owns (new `sso_*` tables) |
 | `sso/tests/` | pytest suite (see §9 for the spec §11 mapping) |
 | `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`, with `JWKSCache`: keys cached 1 h, an unknown `kid` refetches the JWKS at most once per 60 s, spec §8.1) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
@@ -104,8 +104,10 @@ SSO_COOKIE_SECURE=False
 SSO_CACHE_URL=filecache:///tmp/sso-cache
 X
 .venv/bin/python manage.py migrate && .venv/bin/python manage.py createsuperuser
-.venv/bin/gunicorn ssoproject.wsgi:application -b 127.0.0.1:8000
+.venv/bin/gunicorn ssoproject.wsgi:application -b 127.0.0.1:8000     # gunicorn comes with requirements-dev.txt
+curl -s http://127.0.0.1:8000/healthz                                 # {"status":"ok"}
 ```
+Run it as a normal user: with `SSO_DEBUG=False` the server and `manage.py` refuse to start as root (uid 0).
 With `SSO_DEBUG=True` the server also starts without key files. It then uses an **ephemeral** in-memory
 key and logs a warning, and tokens become invalid on every restart.
 
@@ -224,7 +226,12 @@ args (the user is created at build time) and compose's `user:`. Set them to the 
 private key can stay `0600`; the build refuses 0 (root) and a uid that already exists in the base image. If you
 change them, rebuild (`docker compose build`) so the image's user matches `user:`. (The app files are root-owned
 and read-only, so a mismatch would still run; it just leaves the uid without a passwd entry.) A pre-built image
-pulled from Docker Hub has the default 10001: keep `SSO_UID`/`SSO_GID` unset and chown the keys to 10001. There is no root entrypoint that drops privileges: the
+pulled from Docker Hub has the default 10001: keep `SSO_UID`/`SSO_GID` unset and chown the keys to 10001. With `SSO_DEBUG=False` the
+process also refuses to start as uid 0 (`ImproperlyConfigured` at settings load, plus system check `sso.E002`), so a
+`docker run --user 0` or a host-side `sudo manage.py …` fails loudly; run commands via `docker compose exec/run web …`,
+which use `user:`. The build's `collectstatic` runs as root but with a throw-away `SSO_DEBUG=True` config, so the
+guard does not affect it; the test image (`docker/Dockerfile.test`) runs pytest as uid 10001. There is no root
+entrypoint that drops privileges: the
 container starts as the unprivileged user and never needs root (keys are read-only mounts, the root fs is read-only).
 **Proxy trust and the shared-host-nginx variant.** `SSO_NUM_PROXIES` defaults to `1` in compose and can be
 set in `.env`. If a host-level nginx sits in front of the compose nginx, that host nginx **must overwrite**

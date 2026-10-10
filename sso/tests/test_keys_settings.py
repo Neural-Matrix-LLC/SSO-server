@@ -251,3 +251,78 @@ def test_mysql_settings_host_port_and_tls_options(tmp_path):
 def test_mysql_tls_settings_fail_fast(extra, message):
     r = _db_options(extra)
     assert r.returncode != 0 and message in r.stderr
+
+
+# ---------------------------------------------------------------- non-root fail-fast (R2)
+def _run_as_uid(uid, env_over: dict, code: str = "import django; django.setup(); print('OK')"):
+    """Load the real settings in a subprocess whose os.geteuid() returns ``uid`` (None = no geteuid)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    env.update({"DJANGO_SETTINGS_MODULE": "ssoproject.settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "sqlite",
+                "SSO_SQLITE_PATH": ":memory:", "PYTHONPATH": str(REPO)})
+    env.update(env_over)
+    patch = "import os\n" + ("del os.geteuid\n" if uid is None else f"os.geteuid = lambda: {uid}\n")
+    return subprocess.run([sys.executable, "-c", patch + code], cwd=REPO, env=env, capture_output=True,
+                          text=True, timeout=60)
+
+
+def test_root_without_debug_refuses_to_start():
+    r = _run_as_uid(0, GOOD)
+    assert r.returncode != 0
+    assert "ImproperlyConfigured" in r.stderr and "Refusing to run as root (uid 0)" in r.stderr
+    assert "SSO_UID" in r.stderr
+
+
+def test_root_with_debug_is_allowed():
+    r = _run_as_uid(0, {**GOOD, "SSO_DEBUG": "True"})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().endswith("OK")
+
+
+@pytest.mark.parametrize("uid", [10001, 1000, None])  # None: platform without os.geteuid (Windows)
+def test_non_root_or_no_geteuid_starts(uid):
+    r = _run_as_uid(uid, GOOD)
+    assert r.returncode == 0, r.stderr
+
+
+def test_running_as_root_helper(monkeypatch):
+    from sso import runtime
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    assert runtime.running_as_root() is True
+    monkeypatch.setattr(os, "geteuid", lambda: 10001, raising=False)
+    assert runtime.running_as_root() is False
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    assert runtime.running_as_root() is False
+
+
+def test_root_system_check_is_an_error(settings, monkeypatch):
+    from sso.checks import not_root_in_production
+
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    settings.DEBUG = False
+    errors = not_root_in_production(None)
+    assert [e.id for e in errors] == ["sso.E002"] and errors[0].is_serious()
+    settings.DEBUG = True
+    assert not_root_in_production(None) == []
+    settings.DEBUG = False
+    monkeypatch.setattr(os, "geteuid", lambda: 10001, raising=False)
+    assert not_root_in_production(None) == []
+
+
+def test_dockerfile_collectstatic_still_works_as_root(tmp_path):
+    """The image build runs collectstatic as root (before USER). It uses a throw-away SSO_DEBUG=True config,
+    so the root guard must not fire. Run that exact environment as uid 0 into a temp STATIC_ROOT."""
+    dockerfile = (REPO / "Dockerfile").read_text()
+    step = dockerfile[dockerfile.index("RUN SSO_ENV_FILE="):dockerfile.index("collectstatic")]
+    assert "SSO_DEBUG=True" in step and "SSO_DB_ENGINE=sqlite" in step
+    assert dockerfile.index("collectstatic") < dockerfile.index("\nUSER ")  # i.e. it does run as root
+    (tmp_path / "build_settings.py").write_text(
+        f"from ssoproject.settings import *  # noqa\nSTATIC_ROOT = {str(tmp_path / 'static')!r}\n")
+    env = {"SSO_DEBUG": "True", "SSO_DB_ENGINE": "sqlite", "SSO_SQLITE_PATH": str(tmp_path / "build.sqlite3"),
+           "DJANGO_SETTINGS_MODULE": "build_settings", "PYTHONPATH": f"{tmp_path}:{REPO}"}
+    code = ("import warnings; warnings.simplefilter('ignore')\n"
+            "from django.core.management import execute_from_command_line\n"
+            "execute_from_command_line(['manage.py', 'collectstatic', '--noinput', '-v', '0'])\n")
+    r = _run_as_uid(0, env, code)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "static" / "admin").is_dir()
