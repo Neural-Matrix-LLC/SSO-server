@@ -5,6 +5,7 @@ from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from rest_framework import serializers
 
+from .logs import log_stored_hash_error
 from .tokens import user_groups
 
 
@@ -58,4 +59,12 @@ def check_credentials(request, identifier: str, password: str) -> User | None:
             _dummy_hash(password)
             return None
         username = matches[0]
-    return authenticate(request, username=username, password=password)
+    try:
+        return authenticate(request, username=username, password=password)
+    except (ValueError, TypeError):
+        # A malformed/truncated stored hash (e.g. "pbkdf2_sha256$notanumber$..." or a missing digest)
+        # makes Django's hasher raise. Treat it as a failed login: same hash cost, same 401 answer
+        # (no account-existence signal), plus an operator log line so the row can be fixed.
+        _dummy_hash(password)
+        log_stored_hash_error(request, username)
+        return None

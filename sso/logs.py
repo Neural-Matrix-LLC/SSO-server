@@ -34,3 +34,10 @@ def log_token_event(request, event: str, result: str, *, user_id: int | None = N
     if user_id is not None:
         payload["user_id"] = user_id
     logger.info(json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
+def log_stored_hash_error(request, username: str) -> None:
+    """The user's stored password hash could not be parsed. Logs neither the hash nor the password."""
+    payload = {"event": "login", "result": "stored_hash_invalid", "username": (username or "")[:254],
+               "ip": client_ip(request)}
+    logger.error(json.dumps(payload, ensure_ascii=True, sort_keys=True))

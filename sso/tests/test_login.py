@@ -183,3 +183,45 @@ def test_login_get_not_allowed(api, db):
     r = api.get("/api/v1/auth/login")
     assert r.status_code == 405
     assert r.json() == {"error": "method_not_allowed", "detail": "Method not allowed."}
+
+
+# QA LEGACY-06: same hash shapes as qa/tests/testdata.py (password_hash_for "malformed" / "truncated")
+@pytest.mark.parametrize("username,bad_hash", [
+    ("qa_malformed", "pbkdf2_sha256$notanumber$qasaltqa_malformed$AAAA"),
+    ("qa_truncated", "pbkdf2_sha256$390000$qasaltqa_truncated"),
+])
+@pytest.mark.parametrize("via_email", [False, True])
+def test_login_corrupt_stored_hash_is_401_not_500(api, make_user, monkeypatch, caplog, username, bad_hash, via_email):
+    import json
+    import logging
+
+    import sso.serializers as s
+
+    make_user(username=username, email=f"{username}@example.test", password_hash=bad_hash)
+    calls = []
+    orig = s._dummy_hash
+    monkeypatch.setattr(s, "_dummy_hash", lambda pw: (calls.append(1), orig(pw)))
+    caplog.set_level(logging.INFO, logger="sso.auth")
+    secret = "Some-Password-42"
+    r = login(api, username=f"{username}@example.test" if via_email else username, password=secret)
+    assert r.status_code == 401
+    assert r.json() == {"error": "invalid_credentials", "detail": "Username or password is incorrect."}
+    assert calls == [1]  # timing: one dummy hash on this path
+    events = [json.loads(rec.getMessage()) for rec in caplog.records if rec.name == "sso.auth"]
+    assert {"event": "login", "result": "stored_hash_invalid", "username": username, "ip": "127.0.0.1"} in events
+    assert [e["result"] for e in events if e["event"] == "login"][-1] == "invalid_credentials"
+    assert secret not in caplog.text and bad_hash not in caplog.text
+    # the stored row is left untouched (no rehash/overwrite of the shared table)
+    from django.contrib.auth.models import User
+    assert User.objects.get(username=username).password == bad_hash
+
+
+def test_x_forwarded_for_ignored_with_zero_proxies(api, db, settings):
+    """QA defect 4: with SSO_NUM_PROXIES=0 (the default) a client-chosen X-Forwarded-For cannot dodge the IP throttle."""
+    rf = dict(settings.REST_FRAMEWORK)
+    rf["NUM_PROXIES"] = 0
+    settings.REST_FRAMEWORK = rf
+    for i in range(10):
+        assert login(api, username=f"u{i}", password="x", HTTP_X_FORWARDED_FOR=f"198.51.100.{i}").status_code == 401
+    r = login(api, username="z", password="x", HTTP_X_FORWARDED_FOR="198.51.100.200")
+    assert r.status_code == 429
