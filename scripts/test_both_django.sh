@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Run the suite on Django 5.2 (pinned) and Django 4.2 (MySQL-5.7 fallback, addendum B.1).
+# Run the suite on Django 5.2 (the shipped target) and Django 4.2 (code-portability check only;
+# 4.2 is not shipped: deployment plan R9).
 # Creates .venv (5.2) and .venv-dj42 (4.2) on first use. Both are gitignored.
 set -euo pipefail
 cd "$(dirname "$0")/.."

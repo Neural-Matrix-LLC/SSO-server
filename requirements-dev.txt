@@ -1,6 +1,7 @@
 # Test/dev dependencies. Install with:  pip install -r requirements-dev.txt
 # (mysqlclient is NOT needed for the default SQLite test run; use requirements.txt for MySQL.)
-# Range covers the 4.2 fallback too; pip picks 5.2. Narrow it with an extra spec, e.g. "Django>=4.2,<4.3".
+# Range also allows 4.2 for the portability test run (scripts/test_both_django.sh); pip picks 5.2.
+# The shipped target is Django 5.2 only (requirements.txt / requirements.lock).
 Django>=4.2,<5.3
 djangorestframework>=3.15,<4
 djangorestframework-simplejwt>=5.5,<6

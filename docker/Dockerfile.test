@@ -1,5 +1,5 @@
 # Test image for docker-compose.test.yml (MySQL integration run). Not a production image.
-FROM python:3.12.15-slim-bookworm
+FROM python:3.12.15-slim-trixie
 ARG DJANGO_SPEC="Django>=5.2,<5.3"
 ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apt-get update \

@@ -1,6 +1,6 @@
-# Runtime dependencies of the SSO server.
-# Django 5.2 LTS is the default pin. If production MySQL is < 8.0.11, use
-# requirements-django42.txt instead (Django 4.2 LTS supports MySQL 5.7); the code supports both.
+# Runtime dependencies of the SSO server (ranges). The image installs the exact pins in requirements.lock.
+# Target: Django 5.2 LTS only (production MySQL 8.4; deployment plan R9). The test suite also runs on
+# Django 4.2 (scripts/test_both_django.sh) to keep the code portable, but 4.2 is not shipped.
 Django>=5.2,<5.3
 djangorestframework>=3.15,<4
 djangorestframework-simplejwt>=5.5,<6

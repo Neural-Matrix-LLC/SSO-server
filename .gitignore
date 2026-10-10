@@ -28,3 +28,6 @@ staticfiles/
 # local compose override (copy of docker-compose.dev.yml); never on a server
 docker-compose.override.yml
 !.env.dev.example
+mysql-ca/*
+!mysql-ca/.gitkeep
+!.env.test.example

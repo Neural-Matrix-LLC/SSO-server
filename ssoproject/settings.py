@@ -115,6 +115,22 @@ if SSO_DB_ENGINE == "sqlite":
         }
     }
 elif SSO_DB_ENGINE == "mysql":
+    # Optional DB TLS (deployment plan §6.0 / R28). mysqlclient emulates ssl_mode on MariaDB Connector/C:
+    # REQUIRED -> TLS enforced, VERIFY_CA / VERIFY_IDENTITY -> server certificate verified against the CA.
+    _db_options: dict = {"charset": "utf8mb4"}
+    SSO_DB_SSL_CA = env.str("SSO_DB_SSL_CA", default="")
+    SSO_DB_SSL_MODE = env.str("SSO_DB_SSL_MODE", default="").upper() or ("VERIFY_CA" if SSO_DB_SSL_CA else "")
+    _SSL_MODES = {"DISABLED", "PREFERRED", "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY"}
+    if SSO_DB_SSL_MODE and SSO_DB_SSL_MODE not in _SSL_MODES:
+        raise ImproperlyConfigured(f"SSO_DB_SSL_MODE must be one of {sorted(_SSL_MODES)}, got {SSO_DB_SSL_MODE!r}")
+    if SSO_DB_SSL_MODE in {"VERIFY_CA", "VERIFY_IDENTITY"} and not SSO_DB_SSL_CA:
+        raise ImproperlyConfigured(f"SSO_DB_SSL_MODE={SSO_DB_SSL_MODE} needs SSO_DB_SSL_CA (path to the server CA cert)")
+    if SSO_DB_SSL_CA:
+        if not Path(SSO_DB_SSL_CA).is_file():
+            raise ImproperlyConfigured(f"SSO_DB_SSL_CA file not found: {SSO_DB_SSL_CA}")
+        _db_options["ssl"] = {"ca": SSO_DB_SSL_CA}
+    if SSO_DB_SSL_MODE:
+        _db_options["ssl_mode"] = SSO_DB_SSL_MODE
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.mysql",
@@ -124,7 +140,7 @@ elif SSO_DB_ENGINE == "mysql":
             "USER": env.str("SSO_DBUSER", default=""),
             "PASSWORD": env.str("SSO_DBPWD", default=""),
             "CONN_MAX_AGE": env.int("SSO_DB_CONN_MAX_AGE", default=60),
-            "OPTIONS": {"charset": "utf8mb4"},
+            "OPTIONS": _db_options,
             "TEST": {"NAME": env.str("SSO_TEST_DBNAME", default="test_dcWebUsers")},
         }
     }

@@ -46,14 +46,16 @@ but nothing uses it.
 | `examples/frontend/` | `index.html` test page plus the spec §7.2 `auth.js` (SSO base URL configurable) |
 | `scripts/gen_keys.sh` | RSA key pair (default 3072-bit). Prints the `kid`. Refuses to overwrite |
 | `scripts/gen_selfsigned_cert.sh`, `scripts/dev_setup.sh` | Local dev TLS cert, keys and `.env` |
-| `scripts/test_both_django.sh` | Runs the suite on Django 5.2 and on Django 4.2 |
+| `scripts/test_both_django.sh` | Runs the suite on Django 5.2 (shipped) and Django 4.2 (portability check only) |
 | `Dockerfile`, `.dockerignore`, `docker/healthcheck.py` | Production image (multi-stage, uid 10001, no keys inside) |
 | `docker-compose.yml` | Production/staging: `web` + `redis` + `nginx`. No DB container |
-| `docker-compose.dev.yml`, `docker/nginx-dev.d/` | Local overlay: self-signed TLS, MySQL 8.4, demo page, verifier |
-| `docker-compose.test.yml`, `docker/Dockerfile.test` | Optional pytest run against MySQL 8.4 |
-| `docker/nginx.conf` | nginx template: TLS, HSTS, proxy headers, ACME, rate limit |
-| `requirements*.txt` / `requirements*.lock` | Ranges (dev) and exact pins (image). Django 5.2 default, 4.2 fallback |
-| `.env.example`, `.env.dev.example` | Every environment variable, documented |
+| `docker-compose.dev.yml`, `docker/nginx-dev.d/` | Local overlay: self-signed TLS, MySQL 8.4 (sso_app/sso_migrator), demo page, verifier |
+| `docker-compose.test.yml`, `docker/Dockerfile.test` | Local/QA MySQL 8.4 and a pytest run against it |
+| `docker/mysql-init/01-sso-accounts.sh` | Local MySQL init: creates `sso_app` (DML only) and `sso_migrator` (DDL) like prod |
+| `docker/nginx.conf` | nginx template: TLS 1.2/1.3, port-aware redirect, 444 default server, proxy headers, ACME, admin allow-list hook, login rate limit |
+| `docker/nginx-admin.d/`, `mysql-ca/` | Mount points for the optional admin allow-list and the DB CA certificate |
+| `requirements.txt` / `requirements.lock` / `requirements-dev.txt` | Ranges, exact image pins (Django 5.2 only), test deps |
+| `.env.example`, `.env.dev.example`, `.env.test.example` | Every environment variable, documented (placeholders only) |
 
 ## 2. Local setup and tests
 
@@ -65,11 +67,11 @@ scripts/test_both_django.sh           # Django 5.2 (.venv) and Django 4.2 (.venv
 The tests need no database server and no key files. `ssoproject/settings_test.py` generates throw-away keys.
 `mysqlclient` is needed only for MySQL (`requirements.txt`, the Docker image, `docker-compose.test.yml`).
 
-MySQL 8.4 integration run (needs Docker):
+MySQL 8.4 integration run (needs Docker; passwords come from the git-ignored `.env.test`):
 ```bash
-docker compose -f docker-compose.test.yml run --rm --build tests
-SSO_TEST_DJANGO_SPEC="Django>=4.2,<4.3" docker compose -f docker-compose.test.yml run --rm --build tests
-docker compose -f docker-compose.test.yml down -v
+scripts/dev_setup.sh          # creates .env.test once (random passwords)
+docker compose --env-file .env.test -f docker-compose.test.yml run --rm --build tests
+docker compose --env-file .env.test -f docker-compose.test.yml down -v
 ```
 
 Run the server locally without Docker (SQLite, plain HTTP):
@@ -106,7 +108,8 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_ISSUER` | — | **Required.** The public base URL, which becomes the JWT `iss` and the root of the discovery URLs. No domain is built into the code |
 | `SSO_AUDIENCE` | `myfin-services` | JWT `aud` (access and refresh tokens) |
 | `SSO_DB_ENGINE` | `mysql` | `mysql` or `sqlite` |
-| `SSO_DBHOST` / `SSO_DBPORT` / `SSO_DBNAME` / `SSO_DBUSER` / `SSO_DBPWD` | `127.0.0.1` / `3306` / `dcWebUsers` / — / — | MySQL connection |
+| `SSO_DBHOST` / `SSO_DBPORT` / `SSO_DBNAME` / `SSO_DBUSER` / `SSO_DBPWD` | `127.0.0.1` / `3306` / `dcWebUsers` / — / — | MySQL connection (runtime account `sso_app`, DML only) |
+| `SSO_DB_SSL_CA` / `SSO_DB_SSL_MODE` | — / — | Optional DB TLS. With a CA, the mode defaults to `VERIFY_CA`. Modes: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY`. A missing CA file stops start-up |
 | `SSO_JWT_PRIVATE_KEY_PATH` | — | **Required.** Signing key |
 | `SSO_JWT_PUBLIC_KEY_PATHS` | — | Comma list of **all** published or accepted public keys (rotation). The signing key's own public key is always included. The singular `SSO_JWT_PUBLIC_KEY_PATH` is still read as a fallback |
 | `SSO_ACCESS_TTL_MIN` / `SSO_REFRESH_TTL_DAYS` | `15` / `7` | |
@@ -116,7 +119,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_NUM_PROXIES` | `1` | DRF `NUM_PROXIES`: the right-most `X-Forwarded-For` entry (set by nginx) is taken as the client IP |
 | `SSO_ADMIN_PATH` | `sso-admin/` | Admin is not served at `/admin/` |
 | `SSO_SSL_REDIRECT`, `SSO_HSTS_SECONDS`, `SSO_COOKIE_SECURE`, `SSO_THROTTLE_*`, `SSO_LOG_LEVEL` | secure defaults | Overrides for dev and tuning |
-| Compose only: `SSO_IMAGE_TAG`, `SSO_SERVER_NAME`, `SSO_HTTP_PORT`, `SSO_HTTPS_PORT`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `GUNICORN_WORKERS`, `SSO_REQUIREMENTS` | | Host names and ports are all set through env |
+| Deployment parameters / compose only: `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, `SSO_IMAGE_TAG`, `GUNICORN_WORKERS`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR` | | Deployment plan §0. Nothing host-specific is built into code, compose or nginx. The derived app values (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
 
 With `SSO_DEBUG=False`, the process **refuses to start** (`ImproperlyConfigured` with a clear message) if any
 of these is true: `SSO_SECRET_KEY` or `SSO_ISSUER` is empty, a key file is missing or unreadable, or a key
@@ -189,22 +192,32 @@ Hand the secret to the service owner through the password manager. The service c
 
 **Production/staging** (`docker-compose.yml`): `web` (gunicorn, uid 10001, read-only root fs, keys mounted
 read-only at `/run/keys`), `redis` (internal network, no persistence), and `nginx` (the only published
-service, with ports from `SSO_HTTP_PORT` / `SSO_HTTPS_PORT`). MySQL is remote.
+service, with ports from `SSO_HTTP_PORT` / `SSO_HTTPS_PORT`). MySQL is remote. The image is Debian 13 slim
+because its `libmariadb3` ships the `caching_sha2_password` client plugin that MySQL 8.4 accounts need. The
+Dockerfile fails the build if the plugin is missing.
 ```bash
-cp .env.example .env && chmod 600 .env     # fill in. SSO_IMAGE_TAG and SSO_SERVER_NAME are required
+cp .env.example .env && chmod 600 .env     # fill in. SSO_IMAGE_TAG and SSO_HOSTNAME are required
 docker compose build && docker compose up -d && docker compose ps
 ```
 Daily cron on the host (deployment plan §10):
 `30 3 * * * cd /opt/sso && docker compose exec -T web python manage.py flushexpiredtokens`
 
-**Local dev with self-signed TLS** (`docker-compose.dev.yml`):
+**Local dev with self-signed TLS** (`docker-compose.dev.yml`). The order follows deployment plan §2.1:
 ```bash
-scripts/dev_setup.sh
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
-docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm web python manage.py migrate
-docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm web python manage.py createsuperuser
-# test page:  https://localhost:8443/demo/      demo API: https://localhost:8443/verifier/me
+scripts/dev_setup.sh                                  # keys, cert, .env, .env.test
+set -a; . ./.env.test; set +a
+alias dc='docker compose -f docker-compose.yml -f docker-compose.dev.yml'
+dc up -d --build db redis
+M="-e SSO_DBUSER=sso_migrator -e SSO_DBPWD=$SSO_TEST_MIGRATOR_PASSWORD"
+for app in contenttypes auth admin sessions; do dc run --rm $M web python manage.py migrate $app; done  # = myFinance's tables
+# optional: QA seed (qa/tests/fixtures/seed_test_data.py), as in §2.1 step 2
+dc run --rm $M web python manage.py migrate --plan     # must list only sso + token_blacklist
+dc run --rm $M web python manage.py migrate
+dc run --rm $M web python manage.py createsuperuser
+dc up -d --build
+# test page: https://localhost:8443/demo/   demo API: https://localhost:8443/verifier/me
 ```
+The web container itself runs as `sso_app` (DML only).
 `cp docker-compose.dev.yml docker-compose.override.yml` makes a plain `docker compose up` use the overlay.
 The override file is gitignored, so it can never reach a server checkout.
 
@@ -274,18 +287,27 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 ## 11. Open questions
 
 1. ~~MySQL version of production `dcWebUsers`~~ **Answered: MySQL 8.4** (team lead, 2026-10-10). Django 5.2
-   is supported, which matches the default pin. The 4.2 fallback is kept and tested but is not needed
-   unless that changes. Still to confirm: that the upgrade lands before go-live, and that `auth_user` is InnoDB.
-2. Public host name, ports and DB host/port are **undecided**. Everything is set through env
-   (`SSO_ISSUER`, `SSO_SERVER_NAME`, `SSO_ALLOWED_HOSTS`, `SSO_HTTP(S)_PORT`, `SSO_DBHOST`, `SSO_DBPORT`).
-   The domains in `.env.example` are placeholders.
-3. Password changes made **in myFinance** do not set `UserTokenRevocation` (it is a different process).
+   only is shipped (`requirements.lock`). The `requirements-django42*` fallback files are removed (deployment
+   plan R9). The suite still passes on 4.2 as a portability check. Still to confirm: that the upgrade lands
+   before go-live, and that `auth_user` is InnoDB.
+2. Public host name, domain, ports and DB host/port are **undecided** (deployment plan §0). Everything is
+   set through env (`SSO_HOSTNAME`, `SSO_DOMAIN`, `SSO_HTTP(S)_PORT`, `SSO_ISSUER`, `SSO_ALLOWED_HOSTS`,
+   `SSO_DBHOST`, `SSO_DBPORT`). `.env.example` uses `example.com` placeholders. Changing the issuer after
+   go-live invalidates every token.
+3. DB TLS: the runtime image's Connector/C 3.4 would verify server certificates by default; mysqlclient
+   2.3 maps `ssl_mode` onto that. `SSO_DB_SSL_MODE`/`SSO_DB_SSL_CA` exist (R28), but nothing has been tested
+   against a real MySQL yet. The local MySQL accounts do **not** use `REQUIRE SSL`, because the container's
+   auto-generated certificates are self-signed. Prod accounts should (plan §6.2), so the CA must be provided.
+4. Password changes made **in myFinance** do not set `UserTokenRevocation` (it is a different process).
    Options: myFinance writes the revocation row, or introspect compares a password-hash fingerprint.
    That fingerprint would need care, because the login rehash changes the hash.
-4. Should `/healthz` also check Redis and the keys (deployment plan Q16)? Should throttling fail open
+5. Should `/healthz` also check Redis and the keys (deployment plan Q16)? Should throttling fail open
    when Redis is down? Currently it fails closed (500).
-5. Is HSTS preload wanted for the domain?
-6. Should `ServiceClient.allowed_origins` feed CORS dynamically, or stay env-only (`SSO_CORS_ALLOWED_ORIGINS`)?
-7. Redis 7.2 (BSD) vs Valkey 8 for the cache (deployment plan Q14).
-8. Should the cookie-mode `Origin` check also cover `/login` (login-CSRF hardening)? It is not required by
+6. Is HSTS preload wanted for the domain?
+7. Should `ServiceClient.allowed_origins` feed CORS dynamically, or stay env-only (`SSO_CORS_ALLOWED_ORIGINS`)?
+8. Redis 7.2 (BSD) vs Valkey 8 for the cache (deployment plan Q14).
+9. Should the cookie-mode `Origin` check also cover `/login` (login-CSRF hardening)? It is not required by
    the addendum and is not implemented.
+10. QA's seed script (`qa/tests/fixtures/seed_test_data.py`) still needs the R27 guard
+    (`SSO_ALLOW_SYNTHETIC_SEED=1` plus a local DB host). `qa/tests/conftest.py` still defaults to a real-domain
+    origin (R10 note). Both files belong to QA, so this sprint did not change them.

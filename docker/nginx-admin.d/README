@@ -1,0 +1,5 @@
+Optional nginx snippets included inside the admin location (deployment plan Q12), e.g. a file
+"allow.conf" with:
+    allow 203.0.113.0/24;
+    deny all;
+Only *.conf files are included; this README is ignored. Empty = admin reachable from anywhere (still login-protected).

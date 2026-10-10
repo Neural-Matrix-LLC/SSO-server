@@ -1,4 +1,5 @@
 # Production / staging stack (spec §9.5, deployment plan §3 and §15 R18-R23).
+# Validate without printing secrets:  docker compose config --quiet
 # No DB service: MySQL dcWebUsers is remote. Migrations are operator-run, never automatic:
 #   docker compose run --rm web python manage.py migrate --plan   (review: only sso + token_blacklist)
 # All host names, ports and paths come from .env (see .env.example); nothing is hard-coded here.
@@ -15,13 +16,13 @@ services:
     image: sso-server:${SSO_IMAGE_TAG:?set SSO_IMAGE_TAG in .env}
     build:
       context: .
-      args:
-        REQUIREMENTS: ${SSO_REQUIREMENTS:-requirements.lock}
     env_file: .env
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
     volumes:
       - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
+      # optional MySQL server CA for verified DB TLS (SSO_DB_SSL_CA=/run/mysql-ca/ca.pem, R20/R28)
+      - ${SSO_MYSQL_CA_DIR:-./mysql-ca}:/run/mysql-ca:ro
     read_only: true
     tmpfs:
       - /tmp
@@ -70,14 +71,17 @@ services:
       - "${SSO_HTTPS_PORT:-443}:443"
     environment:
       NGINX_ENVSUBST_FILTER: "^SSO_"
-      SSO_SERVER_NAME: ${SSO_SERVER_NAME:?set SSO_SERVER_NAME in .env}
+      SSO_HOSTNAME: ${SSO_HOSTNAME:?set SSO_HOSTNAME in .env}
+      SSO_HTTPS_PORT: ${SSO_HTTPS_PORT:-443}
+      SSO_ADMIN_PATH: ${SSO_ADMIN_PATH:-sso-admin/}
       SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
       SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
-      SSO_HSTS_MAX_AGE: ${SSO_HSTS_MAX_AGE:-31536000}
     volumes:
       - ./docker/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ${SSO_CERTS_DIR:-./docker/certs}:/etc/nginx/certs:ro
       - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme:ro
+      # optional admin IP allow-list snippets (empty dir = no restriction)
+      - ${SSO_ADMIN_ALLOW_DIR:-./docker/nginx-admin.d}:/etc/nginx/sso-admin.d:ro
     networks:
       - edge
     depends_on:

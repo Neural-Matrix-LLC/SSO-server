@@ -169,3 +169,35 @@ def test_env_file_is_read(tmp_path):
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "from-env-file"
+
+
+def _db_options(extra: dict) -> subprocess.CompletedProcess:
+    e = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    e.update({"DJANGO_SETTINGS_MODULE": "ssoproject.settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "mysql",
+              "SSO_DBHOST": "db.internal", "SSO_DBPORT": "3307", **GOOD, **extra})
+    code = ("from django.conf import settings; import json; d = settings.DATABASES['default']; "
+            "print(json.dumps({'host': d['HOST'], 'port': d['PORT'], 'options': d['OPTIONS']}))")
+    return subprocess.run([sys.executable, "-c", code], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
+
+
+def test_mysql_settings_host_port_and_tls_options(tmp_path):
+    import json
+    r = _db_options({})
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"host": "db.internal", "port": "3307", "options": {"charset": "utf8mb4"}}
+    ca = tmp_path / "ca.pem"
+    ca.write_text("dummy")
+    r = _db_options({"SSO_DB_SSL_CA": str(ca)})
+    assert json.loads(r.stdout)["options"] == {"charset": "utf8mb4", "ssl": {"ca": str(ca)}, "ssl_mode": "VERIFY_CA"}
+    r = _db_options({"SSO_DB_SSL_MODE": "required"})
+    assert json.loads(r.stdout)["options"]["ssl_mode"] == "REQUIRED"
+
+
+@pytest.mark.parametrize("extra,message", [
+    ({"SSO_DB_SSL_MODE": "sometimes"}, "SSO_DB_SSL_MODE must be one of"),
+    ({"SSO_DB_SSL_MODE": "VERIFY_IDENTITY"}, "needs SSO_DB_SSL_CA"),
+    ({"SSO_DB_SSL_CA": "/nonexistent/ca.pem"}, "SSO_DB_SSL_CA file not found"),
+])
+def test_mysql_tls_settings_fail_fast(extra, message):
+    r = _db_options(extra)
+    assert r.returncode != 0 and message in r.stderr

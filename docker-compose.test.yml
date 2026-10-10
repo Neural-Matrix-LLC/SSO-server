@@ -1,23 +1,31 @@
-# Optional MySQL 8.4 integration run of the full pytest suite (addendum B.14).
-#   docker compose -f docker-compose.test.yml run --rm --build tests
-#   docker compose -f docker-compose.test.yml down -v
-# Throw-away container: the root password below is not a secret.
+# Local/QA MySQL 8.4 (addendum B.14, deployment plan §2.1 / R29). Passwords from the git-ignored .env.test:
+#   scripts/dev_setup.sh                         # creates .env.test with random passwords (once)
+#   docker compose --env-file .env.test -f docker-compose.test.yml run --rm --build tests
+#   docker compose --env-file .env.test -f docker-compose.test.yml down -v     # throw the data away
+# "tests" runs the full pytest suite on MySQL. It connects as root because pytest-django creates and
+# drops its own test_dcWebUsers database. The DML-only sso_app account is what the app uses in the dev stack
+# (docker-compose.dev.yml) and what QA checks (R17).
 name: sso-test
 
 services:
   mysql:
     image: mysql:8.4
+    # 8.4 defaults kept on purpose: caching_sha2_password, mysql_native_password disabled
     environment:
-      MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:-sso-test-only}
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
-    tmpfs:
-      - /var/lib/mysql
+      MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:?set it in .env.test}
+      MYSQL_DATABASE: dcWebUsers
+      SSO_TEST_APP_PASSWORD: ${SSO_TEST_APP_PASSWORD:?set it in .env.test}
+      SSO_TEST_MIGRATOR_PASSWORD: ${SSO_TEST_MIGRATOR_PASSWORD:?set it in .env.test}
+    volumes:
+      - sso-test-mysql:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    # no published port
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
       interval: 5s
       timeout: 5s
       retries: 30
-      start_period: 20s
+      start_period: 30s
 
   tests:
     build:
@@ -30,9 +38,12 @@ services:
       SSO_DBHOST: mysql
       SSO_DBPORT: "3306"
       SSO_DBUSER: root
-      SSO_DBPWD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:-sso-test-only}
+      SSO_DBPWD: ${SSO_TEST_MYSQL_ROOT_PASSWORD}
       SSO_TEST_DBNAME: test_dcWebUsers
     depends_on:
       mysql:
         condition: service_healthy
     command: ["pytest", "-q", "--cov-fail-under=90"]
+
+volumes:
+  sso-test-mysql: {}
