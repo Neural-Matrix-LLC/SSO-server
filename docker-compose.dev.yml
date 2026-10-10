@@ -1,0 +1,68 @@
+# LOCAL DEV overlay (deployment plan R24): self-signed TLS, a local MySQL 8.4 standing in for
+# dcWebUsers, the examples/ demo page and verifier. Never use on a server.
+#
+#   scripts/dev_setup.sh                       # keys, self-signed cert, .env from .env.dev.example
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm web python manage.py migrate
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm web python manage.py createsuperuser
+#   open https://localhost:${SSO_HTTPS_PORT}/demo/
+#
+# (cp docker-compose.dev.yml docker-compose.override.yml makes a plain "docker compose up" use it;
+#  the override file is gitignored so it can never reach a server checkout.)
+services:
+  web:
+    environment:
+      SSO_DB_ENGINE: mysql
+      SSO_DBHOST: db
+      SSO_DBPORT: "3306"
+      SSO_DBNAME: ${SSO_DEV_DBNAME:-dcWebUsers}
+      SSO_DBUSER: ${SSO_DEV_DBUSER:-sso_dev}
+      SSO_DBPWD: ${SSO_DEV_DBPWD:-sso-dev-only-password}
+      GUNICORN_WORKERS: "2"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: ${SSO_DEV_DBNAME:-dcWebUsers}
+      MYSQL_USER: ${SSO_DEV_DBUSER:-sso_dev}
+      MYSQL_PASSWORD: ${SSO_DEV_DBPWD:-sso-dev-only-password}
+      MYSQL_RANDOM_ROOT_PASSWORD: "yes"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - sso-dev-mysql:/var/lib/mysql
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$$MYSQL_USER -p$$MYSQL_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  verifier:
+    build:
+      context: ./examples/verifier
+    environment:
+      SSO_ISSUER: ${SSO_ISSUER}
+      SSO_AUDIENCE: ${SSO_AUDIENCE:-myfin-services}
+      # internal fetch; dev .env allows Host "web" and disables the SSL redirect
+      SSO_JWKS_URL: http://web:8000/.well-known/jwks.json
+    networks:
+      - edge
+    depends_on:
+      web:
+        condition: service_healthy
+
+  nginx:
+    volumes:
+      - ./docker/nginx-dev.d:/etc/nginx/sso.d:ro
+      - ./examples/frontend:/usr/share/nginx/demo:ro
+    depends_on:
+      verifier:
+        condition: service_started
+
+volumes:
+  sso-dev-mysql: {}

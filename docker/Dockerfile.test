@@ -1,0 +1,11 @@
+# Test image for docker-compose.test.yml (MySQL integration run). Not a production image.
+FROM python:3.12.15-slim-bookworm
+ARG DJANGO_SPEC="Django>=5.2,<5.3"
+ENV PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential pkg-config default-libmysqlclient-dev openssl \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY requirements-dev.txt ./
+RUN pip install -r requirements-dev.txt "mysqlclient>=2.2,<3" "redis>=5,<9" "${DJANGO_SPEC}"
+COPY . .

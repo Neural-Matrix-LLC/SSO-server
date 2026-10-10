@@ -1,0 +1,24 @@
+# Never send secrets or local state to the build context (deployment plan R3).
+.git
+.gitignore
+.venv*
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.coverage*
+htmlcov
+keys
+**/*.pem
+**/*.key
+**/*.crt
+.env
+.env.*
+*.sql
+*.sql.gz
+*.sqlite3
+docker/certs
+qa
+examples
+devops
+docs
+staticfiles

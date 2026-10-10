@@ -1,6 +1,7 @@
 # Test/dev dependencies. Install with:  pip install -r requirements-dev.txt
 # (mysqlclient is NOT needed for the default SQLite test run; use requirements.txt for MySQL.)
-Django>=5.2,<5.3
+# Range covers the 4.2 fallback too; pip picks 5.2. Narrow it with an extra spec, e.g. "Django>=4.2,<4.3".
+Django>=4.2,<5.3
 djangorestframework>=3.15,<4
 djangorestframework-simplejwt>=5.5,<6
 cryptography>=42
@@ -8,6 +9,7 @@ PyJWT>=2.8,<3
 django-cors-headers>=4.3,<5
 django-environ>=0.11,<1
 whitenoise>=6.6,<7
+redis>=5,<9
 pytest>=8
 pytest-django>=4.8
 pytest-cov>=5

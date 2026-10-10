@@ -1,0 +1,97 @@
+# Production / staging stack (spec §9.5, deployment plan §3 and §15 R18-R23).
+# No DB service: MySQL dcWebUsers is remote. Migrations are operator-run, never automatic:
+#   docker compose run --rm web python manage.py migrate --plan   (review: only sso + token_blacklist)
+# All host names, ports and paths come from .env (see .env.example); nothing is hard-coded here.
+name: sso
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  web:
+    image: sso-server:${SSO_IMAGE_TAG:?set SSO_IMAGE_TAG in .env}
+    build:
+      context: .
+      args:
+        REQUIREMENTS: ${SSO_REQUIREMENTS:-requirements.lock}
+    env_file: .env
+    environment:
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+    volumes:
+      - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # no "ports:": only nginx is published. Shared-nginx variant: "127.0.0.1:${SSO_WEB_LOCAL_PORT:-8001}:8000".
+    networks:
+      - edge
+      - backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  redis:
+    # Redis 7.2 is the last BSD-licensed line (deployment plan §5 / Q14: Valkey 8 is a drop-in alternative).
+    image: redis:7.2.5-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+
+  nginx:
+    image: nginx:1.28-alpine
+    ports:
+      - "${SSO_HTTP_PORT:-80}:80"
+      - "${SSO_HTTPS_PORT:-443}:443"
+    environment:
+      NGINX_ENVSUBST_FILTER: "^SSO_"
+      SSO_SERVER_NAME: ${SSO_SERVER_NAME:?set SSO_SERVER_NAME in .env}
+      SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
+      SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
+      SSO_HSTS_MAX_AGE: ${SSO_HSTS_MAX_AGE:-31536000}
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ${SSO_CERTS_DIR:-./docker/certs}:/etc/nginx/certs:ro
+      - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme:ro
+    networks:
+      - edge
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  edge: {}            # nginx <-> web; web also reaches the remote MySQL through it
+  backend:
+    internal: true    # redis is never reachable from outside

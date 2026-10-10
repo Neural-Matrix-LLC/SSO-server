@@ -1,0 +1,38 @@
+# Optional MySQL 8.4 integration run of the full pytest suite (addendum B.14).
+#   docker compose -f docker-compose.test.yml run --rm --build tests
+#   docker compose -f docker-compose.test.yml down -v
+# Throw-away container: the root password below is not a secret.
+name: sso-test
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:-sso-test-only}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+      args:
+        DJANGO_SPEC: ${SSO_TEST_DJANGO_SPEC:-Django>=5.2,<5.3}
+    environment:
+      SSO_DB_ENGINE: mysql
+      SSO_DBHOST: mysql
+      SSO_DBPORT: "3306"
+      SSO_DBUSER: root
+      SSO_DBPWD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:-sso-test-only}
+      SSO_TEST_DBNAME: test_dcWebUsers
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["pytest", "-q", "--cov-fail-under=90"]
