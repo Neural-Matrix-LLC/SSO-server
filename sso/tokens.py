@@ -1,0 +1,135 @@
+"""Token classes and a key-id aware token backend (spec §5, §9.3, addendum B.6/B.7).
+
+* Every JWT we sign carries ``kid`` in its header (the signing key's id).
+* Verification picks the public key by ``kid`` among *all* published keys, so tokens signed
+  with a previous key keep working during rotation. Only RS256 is accepted.
+* ``iss`` and ``aud`` are added on encode and enforced on decode (simplejwt TokenBackend).
+"""
+from __future__ import annotations
+
+import math
+import time
+from functools import lru_cache
+from typing import Any
+
+import jwt
+from django.conf import settings
+from django.contrib.auth.models import User
+from rest_framework_simplejwt.backends import TokenBackend
+from rest_framework_simplejwt.exceptions import TokenBackendError
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
+
+
+class KidTokenBackend(TokenBackend):
+    def __init__(self, keyset, **kwargs):
+        super().__init__(
+            "RS256",
+            signing_key=keyset.signing_pem,
+            verifying_key=keyset.signing_public.pem,
+            **kwargs,
+        )
+        self.keyset = keyset
+
+    def encode(self, payload: dict[str, Any]) -> str:
+        jwt_payload = payload.copy()
+        jwt_payload["aud"] = self.audience
+        jwt_payload["iss"] = self.issuer
+        return jwt.encode(
+            jwt_payload,
+            self.prepared_signing_key,
+            algorithm="RS256",
+            headers={"kid": self.keyset.signing_kid},
+        )
+
+    def get_verifying_key(self, token) -> Any:
+        try:
+            header = jwt.get_unverified_header(token)
+        except jwt.PyJWTError as exc:
+            raise TokenBackendError("Token is invalid") from exc
+        if header.get("alg") != "RS256":
+            raise TokenBackendError("Invalid algorithm specified")
+        pk = self.keyset.by_kid(header.get("kid") or "")
+        if pk is None:
+            raise TokenBackendError("Token is invalid")
+        return pk.key
+
+
+@lru_cache(maxsize=1)
+def get_token_backend() -> KidTokenBackend:
+    return KidTokenBackend(
+        settings.SSO_KEYSET,
+        audience=settings.SSO_AUDIENCE,
+        issuer=settings.SSO_ISSUER,
+        leeway=settings.SIMPLE_JWT.get("LEEWAY", 30),
+    )
+
+
+class _SSOBackendMixin:
+    @property
+    def token_backend(self) -> KidTokenBackend:  # overrides simplejwt's global backend
+        return get_token_backend()
+
+
+class SSOAccessToken(_SSOBackendMixin, AccessToken):
+    pass
+
+
+class SSORefreshToken(_SSOBackendMixin, RefreshToken):
+    access_token_class = SSOAccessToken
+    # Refresh tokens carry only the standard claims; profile claims go on the access token.
+
+
+def user_groups(user: User) -> list[str]:
+    return sorted(user.groups.values_list("name", flat=True))
+
+
+def revocation_epoch(user: User) -> int | None:
+    """Integer epoch second from which tokens are valid again, or None if never revoked.
+
+    ``revoked_at`` is rounded *up* to the next second: any token whose integer ``iat`` is
+    below it was issued no later than the revocation.
+    """
+    rev = getattr(user, "sso_token_revocation", None)
+    if rev is None:
+        return None
+    return math.ceil(rev.revoked_at.timestamp())
+
+
+def is_revoked(user: User, iat: int | float | None) -> bool:
+    epoch = revocation_epoch(user)
+    if epoch is None:
+        return False
+    if iat is None:
+        return True
+    return iat < epoch
+
+
+def _wait_past_revocation(user: User) -> None:
+    """New tokens issued in the same second as a revocation would look revoked; wait (<1 s)."""
+    epoch = revocation_epoch(user)
+    if epoch is None:
+        return
+    delay = epoch - time.time()
+    if 0 < delay <= 1.0:
+        time.sleep(delay + 0.001)
+
+
+def issue_token_pair(user: User) -> tuple[SSORefreshToken, SSOAccessToken]:
+    """Create a refresh token (recorded as outstanding) and an access token with profile claims."""
+    _wait_past_revocation(user)
+    refresh = SSORefreshToken.for_user(user)
+    access = refresh.access_token
+    access["username"] = user.get_username()
+    access["email"] = user.email or ""
+    access["is_staff"] = bool(user.is_staff)
+    access["groups"] = user_groups(user)
+    return refresh, access
+
+
+def access_ttl_seconds() -> int:
+    return int(settings.SSO_ACCESS_TTL.total_seconds())
+
+
+def refresh_ttl_seconds() -> int:
+    return int(settings.SSO_REFRESH_TTL.total_seconds())
+
