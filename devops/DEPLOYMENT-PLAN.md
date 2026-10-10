@@ -12,6 +12,9 @@
 ## Changelog
 | Version | Date | Change |
 |---|---|---|
+| v1.4 | 2026-10-10 | Local/QA/CI MySQL default aligned to **`mysql:8.0`** (prod runs 8.0 today; 8.4 supported) through the Developer's `MYSQL_IMAGE` variable (falls back to `QA_MYSQL_TAG`), in §2, §2.1, §6.4 and R29. New §15.1 **Accepted deviations (Developer)**: R19 (`IMAGE_TAG=latest` default + `build:` in compose, dev/local only; prod pins `sha-*`/`vX.Y.Z` and verifies the digest; CI never pushes `latest`), R2 (configurable `SSO_UID`/`SSO_GID`, default 10001; host key ownership must match), R29 (`MYSQL_IMAGE` default `mysql:8.0`). R2/R19/R29 and §4.2 point to them. |
+| v1.3 | 2026-10-10 | Q23 closed: Docker Hub repo `thomaschoi/sso-server` is **PUBLIC** (Thomas). The private-repo pull-token path is removed. The VPS pulls anonymously (rate-limited; an optional read-only token raises the limit), and the image is world-readable. New **hard CI secret gate** `image-secret-scan` (§7.1): trufflehog + Trivy secret scanner over the saved image, a per-layer file-name check (catches files deleted in later layers), and checks on `docker history` / config Env / Labels. Publish now depends on it. New pre-publish manual checklist (§7.2) and leaked-secret response (§7.3). Developer requirements R3 tightened; R30–R32 added (no build-time secrets via ARG/ENV, multi-stage with explicit final-stage COPY). |
+| v1.2 | 2026-10-10 | Thomas's update applied. **Prod MySQL stays on 8.0 for now, 8.4 later**: the prerequisites cover both (version check accepts 8.0.x ≥ 8.0.11 or 8.4.x; auth-plugin guidance per version; SSO accounts use `caching_sha2_password` on 8.0 too). A new §6.4 covers the 8.0 → 8.4 upgrade and the `mysql_native_password` risk. CI tests against `mysql:8.0` **and** `mysql:8.4` (matrix). G2 and Q21 reworded: go-live no longer waits for 8.4. 8.0's April 2026 EOL noted. **Python 3.13**: runtime `python:3.13-slim` (= Debian **trixie**, confirmed by digest on Docker Hub, 2026-10-10), CI `setup-python 3.13`, and a dependency checklist (unverified items marked). **Docker Hub**: image `${DOCKER_USER}/sso-server:${IMAGE_TAG}` with `DOCKER_USER=thomaschoi` (replaces GHCR and `SSO_IMAGE_TAG`). The publish step (commented out) uses `docker/login-action` with `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (access token). Rollout, rollback, compose refs and R1/R19 updated. New Q23: public vs private repo. |
 | v1.1 | 2026-10-10 | Thomas's answers applied. **MySQL 8.4 + Django 5.2 only**: the 4.2 fallback and CI matrix are dropped (supersedes addendum B.1). 8.4 notes added: auth plugin, TLS, client library, `mysqldump` client. **Ubuntu VPS** host section made concrete (Docker Engine + compose plugin, ufw, cron, unattended-upgrades). **Hostname, domain and ports parameterized** (`SSO_HOSTNAME`, `SSO_DOMAIN`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`); the decision is still pending (§0). **Local/QA environment** added: `mysql:8.4` container + synthetic users. The staging copy of `dcWebUsers` moved to the pre-go-live checklist. Open questions Q1, Q2 (host type), Q3 and Q7 resolved. Names aligned with the Developer's code as it now exists (`SSO_ADMIN_PATH`, `SSO_NUM_PROXIES`, `SSO_DBNAME`, kid-based multi-key verification in `sso/tokens.py`). CI: `mysql:8.4` service, plus a DB login check from inside the built image. |
 | v1.0 | 2026-10-10 | First plan. |
 
@@ -53,16 +56,16 @@ Consequences of the choices:
 ## 1. Architecture summary
 
 ```
-Internet ──${SSO_HTTPS_PORT}──▶ nginx :443 (TLS) ──http:8000──▶ web (gunicorn, 3 workers, Django 5.2, app "sso")
+Internet ──${SSO_HTTPS_PORT}──▶ nginx :443 (TLS) ──http:8000──▶ web (gunicorn, 3 workers, Py 3.13, Django 5.2)
          ──${SSO_HTTP_PORT}───▶ nginx :80 (ACME + 301)                  │            │
                                                                          │            └─▶ redis (throttle cache)
             Ubuntu VPS, Docker Engine + compose plugin, ufw              ▼                internal network only
-                                                       remote MySQL 8.4  `dcWebUsers` (shared with myFinance), TLS
+                                                       remote MySQL 8.0→8.4 `dcWebUsers` (shared with myFinance), TLS
 Host files: /opt/sso/.env (0600)  /opt/sso/keys/*.pem → /run/keys:ro  /opt/sso/certs  /etc/cron.d/sso-*
 ```
 
-- No DB container in staging or prod. MySQL is remote (spec §9.5). The `mysql:8.4` container exists **only** in
-  local/QA and CI (§2).
+- No DB container in staging or prod. MySQL is remote (spec §9.5). The `mysql:8.0` / `mysql:8.4` containers exist
+  **only** in local/QA and CI (§2).
 - Only nginx publishes ports. `web` and `redis` stay on the internal compose network.
 - No migrations run automatically. `migrate` is a backed-up, operator-run step (§6, §12).
 
@@ -70,10 +73,10 @@ Host files: /opt/sso/.env (0600)  /opt/sso/keys/*.pem → /run/keys:ro  /opt/sso
 
 | | dev (Developer) | **local / QA (sprint 1)** | staging (**pre-go-live**) | prod |
 |---|---|---|---|---|
-| Purpose | Unit tests, coding | QA black-box suite (`qa/tests`) and `examples/` end to end, on MySQL 8.4 | Rehearse the prod rollout on a **copy of real `dcWebUsers`** | Live |
+| Purpose | Unit tests, coding | QA black-box suite (`qa/tests`) and `examples/` end to end, on MySQL 8.0 **and** 8.4 | Rehearse the prod rollout on a **copy of real `dcWebUsers`** | Live |
 | Where | Developer box | Shared box / any Docker host, `docker compose -f docker-compose.test.yml` (+ the app stack) | Ubuntu VPS (same as prod, or a second VPS: Q20) | Ubuntu VPS |
 | Hostname | `localhost` | `localhost` (self-signed) | `${SSO_STAGING_HOSTNAME}` | `${SSO_HOSTNAME}` |
-| DB | SQLite (`SSO_DB_ENGINE=sqlite`; `settings_test.py` uses `:memory:`) | **`mysql:8.4` container**, schema `dcWebUsers`, **synthetic users only** (§2.1) | Separate MySQL 8.4 schema restored from a fresh `dcWebUsers` dump (§6.3) | Remote MySQL 8.4 `dcWebUsers` |
+| DB | SQLite (`SSO_DB_ENGINE=sqlite`; `settings_test.py` uses `:memory:`) | **`${MYSQL_IMAGE}` container** (default `mysql:8.0`; 8.4 supported), schema `dcWebUsers`, **synthetic users only** (§2.1) | Separate schema on the **same MySQL version as prod at that time**, restored from a fresh `dcWebUsers` dump (§6.3) | Remote MySQL `dcWebUsers`: 8.0 now, 8.4 after §6.4 |
 | TLS | none / self-signed | self-signed (addendum C) | same source as prod | §3.2 |
 | Cache | LocMem | Redis (proves shared-cache throttling) | Redis | Redis |
 | Keys | ephemeral (`SSO_DEBUG=True` generates one) / `settings_test.py` | throw-away pair (`scripts/gen_keys.sh`) | own pair | own pair. **Never shared across envs** |
@@ -83,14 +86,20 @@ Rules: each environment has its own issuer and keys. The same image tag moves lo
 holds real password hashes and emails (Thomas accepted a copy for pre-go-live), so it is protected **exactly like
 prod**: same host hardening, encrypted dump, and the schema is dropped after go-live unless kept on purpose (Q6).
 
-### 2.1 Local/QA: `mysql:8.4` container with synthetic users
-Thomas 2026-10-10: sprint-1 QA tests against a local `mysql:8.4` container with synthetic users.
+### 2.1 Local/QA: MySQL container (8.0 and 8.4) with synthetic users
+Thomas 2026-10-10: sprint-1 QA tests against a local `mysql:8.4` container with synthetic users. v1.2 update: prod
+stays on 8.0 for now, so QA runs the suite on **both** `mysql:8.0` (today's prod) and `mysql:8.4` (the upgrade target).
+It's selected with the Developer's `MYSQL_IMAGE` variable. The **default is `mysql:8.0`**, matching prod today (v1.4).
+`MYSQL_IMAGE=mysql:8.4` selects the upgrade target, and `QA_MYSQL_TAG=8.0|8.4` also works when `MYSQL_IMAGE` is
+unset. Each version gets its own throw-away volume (`SSO_TEST_MYSQL_VOLUME`).
 
 Container (in the Developer's `docker-compose.test.yml`, addendum B.14). Requirements:
-- `image: mysql:8.4` (pin to a patch version once chosen). `MYSQL_DATABASE=dcWebUsers`. Root password and app
+- `image: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}` (default `mysql:8.0`; pin patch versions once chosen, with 8.0
+  matching prod's patch level; see §15.1). `MYSQL_DATABASE=dcWebUsers`. Root password and app
   passwords come from a git-ignored `.env.test`. Data in a named volume that can be thrown away. Port bound to
-  `127.0.0.1:3307:3306` at most, or not published at all. No authentication overrides: keep 8.4 defaults
-  (`caching_sha2_password`, `mysql_native_password` disabled), so QA sees exactly prod's auth behaviour.
+  `127.0.0.1:3307:3306` at most, or not published at all. No authentication overrides: keep each version's defaults
+  (`caching_sha2_password` default on both; native password enabled on 8.0 and disabled on 8.4), so QA sees the
+  real auth behaviour of each.
 - An init script in `/docker-entrypoint-initdb.d/` (runs only on first start of an empty volume) creates the same two
   accounts as prod (§6.2): `sso_app` (DML only) and `sso_migrator` (DDL). QA then also proves the app runs with
   DML-only grants. `'%'` as the host part is acceptable **here only**.
@@ -111,7 +120,7 @@ Bringing the schema to a "looks like myFinance's `dcWebUsers`" state:
 - **Requirement (QA/Developer, R27):** the seed script needs a hard guard. It must refuse to run unless an explicit
   `SSO_ALLOW_SYNTHETIC_SEED=1` is set **and** `SSO_DBHOST` is a local/container host. Today it only says "NEVER run
   against production" in a comment.
-- Limitation: the container's charset/collation is the 8.4 default (`utf8mb4` / `utf8mb4_0900_ai_ci`). Prod
+- Limitation: the container's charset/collation is the MySQL 8 default (`utf8mb4` / `utf8mb4_0900_ai_ci`). Prod
   `dcWebUsers` may have older table collations from earlier MySQL versions. Staging (real dump) is where that gets
   verified.
 
@@ -235,12 +244,14 @@ The master copy of secrets lives in Thomas's password manager **[ASSUMPTION; Q10
    `.env.example`), `*.sql`, `*.sql.gz`. CI enforces this (§8).
 2. Permissions on the VPS:
    ```bash
-   sudo install -d -m 0700 -o 10001 -g 10001 /opt/sso/keys        # 10001 = container uid (§15 R2)
+   # 10001 = default container uid/gid. If SSO_UID/SSO_GID are set in .env, use those values instead (§15.1 R2).
+   sudo install -d -m 0700 -o 10001 -g 10001 /opt/sso/keys
    sudo chmod 0600 /opt/sso/keys/*.private.pem && sudo chmod 0644 /opt/sso/keys/*.public.pem
    sudo chown 10001:10001 /opt/sso/keys/*.pem
    sudo chown root:root /opt/sso/.env && sudo chmod 0600 /opt/sso/.env
    ```
-   `.env` is read by compose as root. The keys are opened by the app (uid 10001) at start-up.
+   `.env` is read by compose as root. The keys are opened by the app (uid `SSO_UID`,
+   default 10001) at start-up, so the key directory's and files' owner **must equal the configured `SSO_UID:SSO_GID`**.
 3. Keys are mounted **read-only** at `/run/keys` (spec §9.5).
 4. Generate keys **on the VPS**, never in CI. RSA 3072 recommended (spec allows 2048/3072; Q10). Name them by month:
    ```bash
@@ -269,54 +280,54 @@ The master copy of secrets lives in Thomas's password manager **[ASSUMPTION; Q10
 - **Client IP:** `SSO_NUM_PROXIES=1` (code default) together with nginx overwriting `X-Forwarded-For` (§3.3). If a
   CDN is added, increase it.
 
-## 6. Remote MySQL 8.4 `dcWebUsers` prerequisites
-Thomas 2026-10-10: production MySQL is moving to **8.4**, and the target is **Django 5.2 only**. Django 5.2
-supports MySQL ≥ 8.0.11, so 8.4 is within range. All SQL here is run **by Thomas or the DBA with the MySQL admin
-account**. DevOps has not connected.
+## 6. Remote MySQL `dcWebUsers` prerequisites (8.0 now, 8.4 later)
+Thomas 2026-10-10 (update): **production stays on MySQL 8.0 for now and moves to 8.4 later.** The SSO server must work
+on both, and CI tests both (§8). Django 5.2's documented minimum is **MySQL 8.0.11** ("Django supports MySQL 8.0.11
+and higher", Django 5.2 database docs, checked 2026-10-10). DevOps recommends the **latest 8.0 patch release**
+regardless, for security fixes. **MySQL 8.0 reached end of life in April 2026** (Oracle's announced EOL), so 8.0
+gets no further security fixes from Oracle. That's a reason not to postpone the 8.4 upgrade for long (Q21).
+All SQL here is run **by Thomas or the DBA with the MySQL admin account**. DevOps has not connected.
 
-### 6.0 MySQL 8.4 considerations (factual; verify on the real server)
-- **Authentication plugins.** `caching_sha2_password` is the default (since 8.0). In 8.4,
-  **`mysql_native_password` is deprecated and disabled by default**. Accounts that use it can't log in unless the
-  server is started with `--mysql-native-password=ON`, and it is removed entirely in 9.0. The
-  `default_authentication_plugin` variable is **removed** in 8.4; `authentication_policy` replaces it.
-  → Create the SSO accounts with `caching_sha2_password` (§6.2). Don't ask for native-password to be re-enabled.
-- **Client library.** `mysqlclient` links against the C client library in the image. On Debian-based
-  `python:3.12-slim`, `default-libmysqlclient-dev` resolves to **MariaDB Connector/C** (on Ubuntu it is Oracle's
-  libmysqlclient). Both ship a `caching_sha2_password` client plugin in current versions, but this is **verified, not
-  assumed**: CI logs in **from inside the built image** to a `mysql:8.4` service with a `caching_sha2_password` user
-  (§8, image job), and local/QA does the same (§2.1). If the plugin is missing in the runtime stage, the Dockerfile
-  must install the package that provides it (§15 R1).
-- **caching_sha2_password and TLS.** For an account that is not yet in the server's auth cache (for example after a
-  server restart), the full authentication over TCP needs either a **TLS connection** or RSA key exchange.
-  Connecting over TLS (below) avoids the RSA path entirely. That's another reason to use TLS.
-- **Server TLS.** MySQL 8.x supports TLSv1.2 and TLSv1.3 only. If the DBA configures no certificates, the server
-  auto-generates **self-signed** ones at data-directory initialization. Clients connect with "preferred" TLS by default:
-  encrypted, but **the server certificate is not verified**. For verification (VERIFY_CA / VERIFY_IDENTITY), the
-  DBA must provide the CA certificate, and the SSO DB connection must pass it. That needs a small settings addition,
-  for example `SSO_DB_SSL_CA` → `DATABASES.OPTIONS["ssl"] = {"ca": …}` (proposed; not in code yet, §15 R28). The SSO
-  accounts also get `REQUIRE SSL` (§6.2), so an unencrypted connection is refused server-side.
-  `require_secure_transport=ON` on the server is a DBA choice, and it would also affect myFinance (Q5).
-- **Foreign keys.** 8.4 adds `restrict_fk_on_non_standard_key=ON` by default, which forbids FKs referencing
-  non-unique keys. Django FKs (`token_blacklist_*` → `auth_user.id`, `sso_*` → `auth_user.id`) reference primary
-  keys, so this is not a problem.
-- **Defaults.** Charset `utf8mb4`, collation `utf8mb4_0900_ai_ci`. New SSO tables take the schema's default
-  charset. The connection uses `charset=utf8mb4` (code).
-- **Client tools.** Ubuntu 24.04's `mysql-client` package is 8.0.x. Prefer the 8.4 client from the official image for
-  dump/restore: `docker run --rm … mysql:8.4 mysqldump …` (§6.3).
-- **myFinance impact (not SSO's change, but the same DB):** if myFinance's DB account still uses
-  `mysql_native_password`, it **stops authenticating** after the move to 8.4. Its client library must also support
-  `caching_sha2_password`. Check this with the query in §6.1 before the upgrade (Q21).
+### 6.0 Version-specific notes (factual; verify on the real server)
+| Topic | MySQL 8.0.x (now) | MySQL 8.4.x (later) |
+|---|---|---|
+| Default auth plugin for new accounts | `caching_sha2_password` (default since 8.0.4) | `caching_sha2_password` |
+| `mysql_native_password` | **Enabled**, deprecated (since 8.0.34). Existing accounts using it keep working. | **Disabled by default**. Accounts using it **cannot log in** unless the server runs with `--mysql-native-password=ON`. Removed in 9.0. |
+| Config variable | `default_authentication_plugin` (deprecated since 8.0.27) and `authentication_policy` | `default_authentication_plugin` **removed**. Only `authentication_policy`. |
+| TLS | TLSv1.2/1.3 only (≥ 8.0.28). Auto-generated self-signed certs if none are configured. Client default "preferred" = encrypted, not verified. | same |
+| FK rule | n/a | `restrict_fk_on_non_standard_key=ON` (FKs must reference unique/PK keys). Django FKs reference PKs, so no impact. |
+| Default collation | `utf8mb4_0900_ai_ci` | same |
+| Client tools for dump/restore | `mysql:8.0` image (or a native 8.0 client) | `mysql:8.4` image. Ubuntu 24.04's `mysql-client` package is 8.0.x. |
 
-### 6.1 Version and compatibility check (expect 8.4.x)
+Auth-plugin guidance:
+- **On 8.0 and 8.4: create SSO's own accounts with `caching_sha2_password`** (§6.2). The SSO account then doesn't
+  need to change at the 8.4 upgrade.
+- On 8.0, don't use `mysql_native_password` for anything new, even though it still works. Existing myFinance
+  accounts on it are handled in §6.4 **before** the upgrade.
+- `caching_sha2_password` first-time (non-cached) authentication over TCP needs **TLS** or RSA key exchange. Using
+  TLS (`REQUIRE SSL` on the account) covers that on both versions.
+- **Client library:** on the Debian **trixie** base image (`python:3.13-slim`, §15 R1), `default-libmysqlclient-dev` is
+  provided by **MariaDB Connector/C**. Debian's file list for trixie's `libmariadb3` (11.8.x) includes
+  `plugin/caching_sha2_password.so` (packages.debian.org, checked 2026-10-10). That's packaging evidence only. CI
+  proves an actual login from inside the built image against **both** `mysql:8.0` and `mysql:8.4` (§8 image job),
+  and the runtime stage must keep `libmariadb3` with its plugin directory (R1).
+- **Verified DB TLS** (VERIFY_CA / VERIFY_IDENTITY) needs the DBA's CA cert and a settings hook (proposed R28,
+  `SSO_DB_SSL_CA`). Without it, the connection is encrypted but the server isn't authenticated.
+
+### 6.1 Version and compatibility check (accept 8.0.x ≥ 8.0.11 or 8.4.x)
 ```sql
-SELECT VERSION();                         -- expect 8.4.x (8.4 LTS). Anything else: stop and re-check this plan.
-SELECT @@version_comment;                 -- expect "MySQL Community Server - GPL" (or Enterprise)
-SELECT @@authentication_policy;           -- 8.4 default '*,,' => caching_sha2_password for new accounts
+SELECT VERSION();                 -- accept 8.0.x with x >= 11 (recommend latest 8.0 patch) OR 8.4.x; anything else: stop
+SELECT @@version_comment;         -- "MySQL Community Server - GPL" (or Enterprise)
+SELECT @@authentication_policy;   -- both versions
+-- 8.0 only (the variable no longer exists on 8.4 and errors there):
+--   SELECT @@default_authentication_plugin;      -- expect caching_sha2_password
 SELECT PLUGIN_NAME, PLUGIN_STATUS FROM information_schema.PLUGINS
- WHERE PLUGIN_NAME IN ('caching_sha2_password','mysql_native_password');   -- native: absent/disabled on default 8.4
-SELECT user, host, plugin FROM mysql.user WHERE user NOT LIKE 'mysql.%';    -- myFinance account must NOT be mysql_native_password
-SELECT @@require_secure_transport, @@tls_version, @@ssl_ca, @@ssl_cert;     -- TLS posture
-SHOW SESSION STATUS LIKE 'Ssl_version';                                      -- run from a TLS session: non-empty
+ WHERE PLUGIN_NAME IN ('caching_sha2_password','mysql_native_password');
+   -- 8.0: both ACTIVE. 8.4 default: native absent/DISABLED.
+SELECT user, host, plugin FROM mysql.user WHERE user NOT LIKE 'mysql.%' ORDER BY plugin, user;
+   -- inventory for §6.4; on 8.4 any mysql_native_password row is an account that cannot log in
+SELECT @@require_secure_transport, @@tls_version, @@ssl_ca, @@ssl_cert;
+SHOW SESSION STATUS LIKE 'Ssl_version';            -- non-empty when this session uses TLS
 SELECT @@character_set_server, @@collation_server, @@default_storage_engine, @@sql_mode, @@time_zone;
 SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA
  WHERE SCHEMA_NAME = 'dcWebUsers';
@@ -328,12 +339,17 @@ SELECT app, COUNT(*) FROM dcWebUsers.django_migrations
  WHERE app IN ('sso','token_blacklist') GROUP BY app;                     -- expect no rows
 SELECT COUNT(*) AS users, SUM(is_active) AS active FROM dcWebUsers.auth_user;  -- baseline (Request #2)
 ```
-Go/no-go: the version is 8.4.x, every table is InnoDB, the SSO apps aren't present yet, and the myFinance account
-isn't on `mysql_native_password`. If MySQL is still mid-upgrade, the SSO go-live waits for 8.4 to be in place
-(gate G2, §12).
+Go/no-go for the SSO first migrate:
+- the version is 8.0.x (≥ 8.0.11) or 8.4.x;
+- every table is InnoDB;
+- the SSO apps aren't present yet;
+- the SSO accounts (§6.2) are on `caching_sha2_password`.
 
-### 6.2 Dedicated DB accounts (least privilege; spec §4.9)
-Two accounts, so runtime credentials never hold DDL. Both use `caching_sha2_password` with TLS required.
+The myFinance accounts' plugin is **not** an SSO go-live condition on 8.0. It's a gate for the **8.4 upgrade** (§6.4).
+
+### 6.2 Dedicated DB accounts (least privilege; spec §4.9). Same SQL on 8.0 and 8.4
+Two accounts, so runtime credentials never hold DDL. Both use `caching_sha2_password` **explicitly**, with TLS
+required, even on 8.0.
 ```sql
 -- Runtime account (in /opt/sso/.env)
 CREATE USER 'sso_app'@'<sso_vps_ip>'
@@ -358,18 +374,19 @@ ALTER USER 'sso_migrator'@'<sso_vps_ip>' ACCOUNT LOCK;
 SHOW GRANTS FOR 'sso_app'@'<sso_vps_ip>';
 SHOW GRANTS FOR 'sso_migrator'@'<sso_vps_ip>';
 SELECT user, host, plugin, ssl_type, account_locked FROM mysql.user WHERE user LIKE 'sso\_%';
+                               -- plugin must read caching_sha2_password for both
 ```
 - Never use `'%'` in prod. `<sso_vps_ip>` is the VPS egress IP (Q5).
 - Runtime needs `UPDATE auth_user` (for `last_login` and the PBKDF2 re-hash, spec §4.3), DML on `token_blacklist_*` /
   `sso_*`, and `INSERT` on `django_admin_log` / `django_session`. The spec prescribes DB-wide DML; table-level grants
-  are optional hardening (Q15).
+  are optional (Q15).
 - `migrate`'s post-migrate step inserts `django_content_type` / `auth_permission` rows for `sso` and
-  `token_blacklist` into the shared tables. That's expected.
+  `token_blacklist`. That's expected.
 - Staging gets its own accounts (`sso_app_stg`, `sso_migrator_stg`) on its own schema.
 
 ### 6.3 Backup before the first migrate (spec §4.6, §9.5)
-Use the **8.4 client** (via the official image) and a client options file, so the password never appears on the
-command line:
+Use a client of the **same major.minor as the server**, via the official image: `MYSQL_CLIENT_TAG=8.0` today, `8.4`
+after the upgrade. Pass credentials in a client options file so the password never appears on the command line:
 ```bash
 # ~/.my-dcweb.cnf (chmod 600)
 # [client]
@@ -380,14 +397,14 @@ command line:
 # ssl-mode=VERIFY_IDENTITY        # or REQUIRED if no CA is available (Q5)
 # ssl-ca=/cfg/ca.pem              # path inside the container below
 
+MYSQL_CLIENT_TAG=8.0              # = server major.minor (8.0 now, 8.4 after §6.4)
 TS=$(date +%Y%m%dT%H%M%S)
 docker run --rm -i --network host \
   -v ~/.my-dcweb.cnf:/cfg/my.cnf:ro -v ~/mysql-ca/ca.pem:/cfg/ca.pem:ro \
-  mysql:8.4 mysqldump --defaults-extra-file=/cfg/my.cnf \
+  mysql:${MYSQL_CLIENT_TAG} mysqldump --defaults-extra-file=/cfg/my.cnf \
     --single-transaction --quick --routines --triggers --events --hex-blob \
     --no-tablespaces --set-gtid-purged=OFF --default-character-set=utf8mb4 \
     dcWebUsers | gzip -9 > dcWebUsers-pre-sso-$TS.sql.gz
-# (If the native 8.4 client is installed: the same mysqldump flags with --defaults-extra-file=~/.my-dcweb.cnf.)
 
 gzip -t dcWebUsers-pre-sso-$TS.sql.gz
 zcat dcWebUsers-pre-sso-$TS.sql.gz | tail -n 1                          # "-- Dump completed on …"
@@ -396,33 +413,164 @@ sha256sum dcWebUsers-pre-sso-$TS.sql.gz > dcWebUsers-pre-sso-$TS.sql.gz.sha256
 chmod 600 dcWebUsers-pre-sso-$TS.sql.gz*
 ```
 - The dump holds every password hash and email. Encrypt it (`gpg --symmetric` / `age`), store it off-host, and keep
-  it at least 30 days after go-live (Q6).
+  it ≥ 30 days after go-live (Q6).
 - A backup user, if not the admin: `SELECT, LOCK TABLES, SHOW VIEW, TRIGGER, EVENT` (`--no-tablespaces` avoids
   `PROCESS`).
-- **The same command produces the staging copy** (pre-go-live, §12 G4). Restore it into the staging schema. That
-  restore doubles as the restore test.
+- **The same command produces the staging copy** (pre-go-live, §12 G4). Restoring it is the restore test.
 
-## 7. Release artefact and tagging
-- Image `sso-server`: `sha-<12 hex>` per main build, `vMAJOR.MINOR.PATCH` per git tag. Deploys use the immutable
-  `SSO_IMAGE_TAG` and **never `latest`**. Record tag + digest in `/opt/sso/DEPLOYED`.
-- Registry TBD (Q8). There's no push until Thomas approves and a GitHub login exists (addendum D). Interim: build on
-  the VPS from a tagged checkout.
+### 6.4 Upgrading `dcWebUsers` from MySQL 8.0 to 8.4 (later; DBA-run, separate change)
+The main risk: **any account still on `mysql_native_password` stops authenticating on 8.4** (default-disabled
+plugin). That includes myFinance's DB account, cron/backup users and admin tools. SSO's own accounts are already on
+`caching_sha2_password` (§6.2), so SSO needs no account change, only a re-test.
+
+1. **Inventory (on 8.0, weeks before):**
+   ```sql
+   SELECT user, host, plugin, ssl_type, account_locked FROM mysql.user
+    WHERE user NOT LIKE 'mysql.%' ORDER BY plugin, user;
+   ```
+   Every row with `plugin = 'mysql_native_password'` needs an owner and a migration slot. (`mysql.*` system accounts
+   are managed by the server.)
+2. **Verify each client before changing anything.** On staging, or with a temporary test account on the real server,
+   created `IDENTIFIED WITH caching_sha2_password … REQUIRE SSL`, check that:
+   - **myFinance** (Django 4.1 + its `mysqlclient` / C client library) connects, logs a user in, and runs its
+     cron/management commands;
+   - **SSO** connects from the deployed image (already proven in CI against 8.0 and 8.4, §8);
+   - backup tooling, admin GUIs and any other script that touches `dcWebUsers` connect.
+   A client that fails needs a newer client library first (for example a rebuilt myFinance image). Don't re-enable
+   native passwords.
+3. **Migrate accounts to `caching_sha2_password` on 8.0** (still the old server, so it can be rolled back). The
+   existing native hash can't be converted, so **a password must be supplied**: either the current one (if known) or
+   a new one, with the client config updated at the same time:
+   ```sql
+   ALTER USER '<user>'@'<host>' IDENTIFIED WITH caching_sha2_password BY '<password>';
+   -- optional, recommended for remote clients:
+   ALTER USER '<user>'@'<host>' REQUIRE SSL;
+   SELECT user, host, plugin FROM mysql.user WHERE user = '<user>';   -- now caching_sha2_password
+   ```
+   After each change, restart or reconnect that client and confirm it works. Rollback on 8.0:
+   `ALTER USER … IDENTIFIED WITH mysql_native_password BY '<password>'` (still possible on 8.0, not after the
+   upgrade).
+4. **Gate:** the inventory query returns **no** `mysql_native_password` rows except ones knowingly left behind
+   (documented, with the owner aware they'll break).
+5. **Upgrade** (the DBA's procedure; outside SSO's scope). Take a full backup first (same as §6.3, plus whatever the
+   DBA's server-level backup is), and follow Oracle's 8.0 → 8.4 upgrade checks (for example MySQL Shell's upgrade
+   checker utility). Plan a maintenance window for myFinance **and** SSO.
+6. **After the upgrade:** re-run §6.1 (expect 8.4.x, native plugin disabled). Run the P8 SSO smoke tests and a
+   myFinance login. Switch the dump client to `MYSQL_CLIENT_TAG=8.4`, and change the `MYSQL_IMAGE` default (QA/dev compose) to
+   `mysql:8.4`. Keep 8.0 in the CI matrix until no environment runs it.
+7. **Escape hatch, temporary only:** starting 8.4 with `--mysql-native-password=ON` lets lagging native accounts log
+   in again. It's a DBA decision, it should be time-boxed, and it is no option on 9.x.
+
+## 7. Release artefact, image naming and tagging (Docker Hub)
+Thomas 2026-10-10: images are published to **Docker Hub** as **`${DOCKER_USER}/sso-server:${IMAGE_TAG}`** with
+`DOCKER_USER=thomaschoi`. GHCR is no longer the plan.
+- Tags: `sha-<12 hex>` for every main-branch build, `vMAJOR.MINOR.PATCH` for every git tag. Deploys pin an immutable
+  `IMAGE_TAG` and **never use `latest`**. Optional: pin by digest (`thomaschoi/sso-server@sha256:…`). After a deploy,
+  record tag + digest in `/opt/sso/DEPLOYED` (`docker image inspect --format '{{index .RepoDigests 0}}' …`).
+- In `/opt/sso/.env` on the VPS: `DOCKER_USER=thomaschoi` and `IMAGE_TAG=<tag>`. Compose interpolates them (R19).
+- CI pushes with the GitHub Actions secrets `DOCKERHUB_USERNAME` (= `thomaschoi`) and `DOCKERHUB_TOKEN`. The latter
+  is a **Docker Hub personal access token**, not the account password, with the minimum scope (Read & Write; no
+  Delete). The publish step stays **commented out** in the draft (§8).
+- **The repository is PUBLIC** (Thomas 2026-10-10, Q23 closed). Consequences:
+  - **Anyone can pull and read the image**, including every layer, the build history and the config. So the image
+    must never contain anything confidential. Even a file deleted in a later layer still ships in the earlier one.
+    This is enforced by the hard CI gate in §7.1, the manual check in §7.2 and Developer requirements R3/R30–R32.
+  - **VPS pulls need no credentials.** `docker compose pull` works anonymously, but it is subject to Docker Hub's
+    **anonymous pull rate limits** (counted per source IP; check Docker's current published limits, which have
+    changed over time). Deploys pull rarely, so this is normally fine. Optionally, log in on the VPS with a
+    **read-only** Docker Hub access token (`docker login -u thomaschoi`, token pasted at the prompt). That raises the
+    limit to the authenticated tier. The credential then lives in root's `~/.docker/config.json` (0600; a credential
+    helper is better). It must be **separate from CI's Read & Write `DOCKERHUB_TOKEN`**.
+  - Recommended: set the Docker Hub repo description/README to say the image needs runtime config and keys and has
+    no defaults that work for anyone else.
+- Until a GitHub repo and the CI Docker Hub token exist (addendum D), the interim option is to build on the VPS from a tagged
+  checkout with the same name: `docker build -t thomaschoi/sso-server:<tag> .`
 - Django 5.2 only: `requirements-django42.txt` is no longer needed (Developer may delete it, §15 R9).
+
+### 7.1 Hard secret gate before publishing (CI job `image-secret-scan`)
+Publish **depends on** this job. Any finding fails the build. Allowlist entries are reviewed in PRs and live in the
+pipeline file.
+1. **Secret scanners over the saved image** (`docker save` tarball, so every layer is covered, not just the final
+   filesystem):
+   - `trufflehog docker --image file://image.tar --fail` (exits non-zero on findings);
+   - Trivy with `scanners: secret` against the same tarball (`input: image.tar`), `exit-code: 1`.
+2. **Per-layer forbidden-file check.** Iterate over **every layer tarball** listed in the saved image's `manifest.json`
+   and fail if any entry matches `*.pem`, `*.key`, `id_rsa*` / `id_ed25519*` / `id_ecdsa*`, `.env` / `.env.*`,
+   `*.sqlite3`, `*.sql`, `*.sql.gz`, `*.dump`, `*.bak` or `dcWebUsers*`. The only exceptions are an explicit allowlist
+   of public CA bundles (`etc/ssl/certs/`, `usr/share/ca-certificates/`, `…/certifi/cacert.pem`). The layers are also
+   grepped for `-----BEGIN … PRIVATE KEY-----`, **including inside allowlisted paths**. Whiteout entries (`.wh.*`)
+   are reported too: they mean something was deleted in a later layer, which the earlier layer still carries.
+3. **History and config check.** `docker history --no-trunc` (every `CreatedBy`, including the `|N KEY=value` build-arg
+   prefix BuildKit records for RUN steps) plus the image config `Env` and `Labels` must contain no secret-looking
+   assignments (`*SECRET*=`, `*PASSWORD*=`, `*PASSWD*=`, `*TOKEN*=`, `*API_KEY*=`, `*PRIVATE*=`, `*CREDENTIAL*=`,
+   `SSO_DBPWD=`, `EMAIL_PWD=`). They must also contain no `ARG` with such a name. The allowlist covers known-public
+   base-image values (e.g. the Python image's `GPG_KEY`, a public signing-key fingerprint, and `PYTHON_SHA256`).
+4. The vulnerability scan (Trivy `vuln`) stays in `image-build`. The secret gate is a separate, required job.
+
+### 7.2 Pre-publish manual checklist (before the first push, and on every `v*` release)
+The commented `publish` job is bound to a GitHub **environment** `dockerhub-publish` with a required reviewer
+(Thomas), so a human ticks this before the push runs:
+- [ ] `image-secret-scan` is green for **this exact** `sha-…` tag (not a rebuild).
+- [ ] `docker history --no-trunc thomaschoi/sso-server:<tag>` and `docker image inspect` (Env, Labels) reviewed by
+      eye: no secrets, no internal hostnames or IPs worth hiding, no build args with values.
+- [ ] The Dockerfile diff since the last release was reviewed for new `ARG`/`ENV`/`COPY`/`ADD` lines, and
+      `.dockerignore` is unchanged or still excludes everything in R3.
+- [ ] The tag is `sha-…` / `vX.Y.Z`, never `latest`. The repo is `docker.io/thomaschoi/sso-server`.
+- [ ] Thomas has confirmed once that publishing the application code inside a public image is OK (Q25; first push only).
+
+### 7.3 Response if a secret is ever pushed
+A public image may already have been pulled (or mirrored or cached), so **treat the secret as compromised. Deleting
+the tag is not enough.**
+1. **Stop the spread:** disable the `publish` job / environment, then **delete the affected tag(s)** on Docker Hub,
+   plus any other tag pointing at the same digest (UI: repo → Tags → delete; requires an owner login or a token
+   with Delete scope, which CI's token deliberately lacks).
+2. **Rotate every exposed secret**, whatever leaked:
+   - **JWT signing key**: run the **emergency rotation, §11.3** (new key only; every user logs in again).
+   - `SSO_SECRET_KEY`: replace it and recreate `web`. This invalidates admin sessions and CSRF tokens.
+   - DB passwords: `ALTER USER 'sso_app'@'<sso_vps_ip>' IDENTIFIED WITH caching_sha2_password BY '<new>'` (the same
+     for `sso_migrator`), then update `.env` and recreate.
+   - `ServiceClient` secrets (rotate via admin; tell their owners), Docker Hub tokens, `EMAIL_*`, DNS/ACME tokens, TLS
+     private key (reissue the cert).
+3. **Rebuild clean**: fix the Dockerfile/`.dockerignore`, build a new tag, pass §7.1 and §7.2, publish, and redeploy
+   with `IMAGE_TAG=<new>`. If the secret also entered **git history**, purge it there too, and treat it as leaked
+   anyway.
+4. **Review** DB, admin and auth logs for use of the leaked secret since the push time. Record the incident (what, when
+   pushed, when deleted, what rotated).
 
 ## 8. CI pipeline (draft: `devops/ci/pipeline.yml`)
 **[ASSUMPTION]** GitHub Actions. The file is stored under `devops/ci/` and **inactive** until it's moved to
-`.github/workflows/` after approval.
+`.github/workflows/` after approval. It uses Python **3.13** (`actions/setup-python`), matching the runtime image.
 1. **lint**: ruff check + format, gitleaks, "no key/env/dump files tracked".
-2. **unit** (SQLite, Django 5.2 only): `makemigrations --check --dry-run` (addendum B.11), `pytest` with
-   `--cov-fail-under=90` (addendum C). `settings_test.py` generates its own throw-away keys.
-3. **integration-mysql**: `mysql:8.4` service with default auth (`caching_sha2_password`). Asserts the plugin, then
-   migrates the Django built-ins and checks `migrate --plan` lists only `sso`/`token_blacklist`. Then `migrate` and
-   pytest with `SSO_DB_ENGINE=mysql`.
-4. **deploy-check**: `manage.py check --deploy --fail-level WARNING` with prod-like env, `pip-audit`.
-5. **image**: build; non-root uid 10001; no secrets in the image. Then **DB login from inside the image** to a
-   `mysql:8.4` service as a `caching_sha2_password` user (proves the runtime client library, §6.0), `migrate`,
-   `/healthz` = 200 with a `Host` header, and a Trivy scan.
-6. **publish**: commented out until a registry is approved. No CD: deploys are manual (§12).
+2. **unit** (SQLite, Django 5.2, Python 3.13): `makemigrations --check --dry-run` (addendum B.11) and `pytest` with
+   `--cov-fail-under=90` (addendum C).
+3. **integration-mysql**: a **matrix over `mysql:8.0` and `mysql:8.4`**. Each run asserts the server version and that
+   the default auth plugin is `caching_sha2_password`. It then migrates the Django built-ins, checks
+   `migrate --plan` lists only `sso`/`token_blacklist`, runs `migrate`, and runs pytest with `SSO_DB_ENGINE=mysql`.
+4. **deploy-check**: `manage.py check --deploy --fail-level WARNING` with prod-like env, and `pip-audit`.
+5. **image-build**: builds `thomaschoi/sso-server:sha-<12hex>` once. Checks Python 3.13/trixie, non-root uid 10001 (the default build;
+   §15.1 R2),
+   and no secret files in the final filesystem. Runs a Trivy vulnerability scan, then saves the image as an artifact.
+6. **image-db-smoke** (matrix 8.0, 8.4): logs in **from inside the image** as a `caching_sha2_password` user (§6.0),
+   runs `migrate`, and checks `/healthz` with a `Host` header.
+7. **image-secret-scan** (**hard gate**, §7.1): trufflehog + Trivy secret scanning over the saved image, the per-layer
+   forbidden-file check, and the history/config/Env/Labels check.
+8. **publish**: commented out. It `needs: [image-build, image-db-smoke, image-secret-scan]` and runs in the
+   `dockerhub-publish` environment with a required reviewer (§7.2). It uses `docker/login-action` with the
+   `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets, then pushes `sha-…` (main) and `v…` (tags) to
+   `docker.io/thomaschoi/sso-server` (**public**). Enable only after Thomas approves. **No CD.** Deploys are manual
+   (§12).
+
+Python 3.13 dependency checks (**not yet verified by running anything**; this is what CI/QA must prove):
+- `mysqlclient` builds from source on Linux against MariaDB Connector/C. Its PyPI metadata (2.3.0) lists Python 3.13.
+  The CI build plus the in-image DB login are the real test.
+- `gunicorn`, `cryptography`, `Django 5.2`, `djangorestframework`, `djangorestframework-simplejwt`, `PyJWT`,
+  `django-cors-headers`, `django-environ`, `whitenoise`, `redis`: make sure the **resolved** versions in a 3.13
+  environment install and pass the full suite. PyPI classifiers (seen for gunicorn 26.2.0 and cryptography
+  50.0.2) are a hint, not proof. `pip-audit` runs on the same environment.
+- Python 3.13 removed some long-deprecated stdlib modules (PEP 594, e.g. `cgi`, `crypt`, `telnetlib`). The unit +
+  integration suites under 3.13 will surface any transitive use.
+- Pin the resolved set (lock file or `pip-compile` with hashes, R9) once it's green, so the image and CI use the same
+  versions.
 
 ## 9. Monitoring, `/healthz` and alerting
 ### 9.1 `/healthz`
@@ -484,7 +632,7 @@ change.
 
 ### 11.2 Steps (example: old `sso-2026-10`, new `sso-2027-10`)
 1. Pre-check: `curl -s ${SSO_ISSUER}/.well-known/jwks.json | jq '.keys[].kid'` shows one kid (OLD_KID). Record
-   `SSO_IMAGE_TAG`. Monitoring is green.
+   `IMAGE_TAG`. Monitoring is green.
 2. Generate the pair on the VPS (§4.2), fix ownership/permissions, compute NEW_KID:
    `openssl pkey -pubin -in /opt/sso/keys/sso-2027-10.public.pem -outform DER | sha256sum | cut -c1-16`.
 3. T0: set `SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/sso-2026-10.public.pem,/run/keys/sso-2027-10.public.pem` (signing
@@ -507,17 +655,21 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
 3. Optionally blacklist all outstanding refresh tokens and set `UserTokenRevocation` (introspect then reports old
    tokens inactive).
 4. Investigate. If the VPS was compromised, also rotate `SSO_SECRET_KEY` and the DB passwords.
+5. If the key leaked through a **published image**, also follow §7.3 (delete the tag, rotate everything that was in
+   it, treat it as compromised).
 
 ## 12. Rollout steps
 
 ### 12.1 Pre-go-live checklist (gates)
 - [ ] **G1 Parameters decided** (§0): `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, staging
       hostname. That fixes the cert option (§3.2) and the issuer.
-- [ ] **G2 MySQL 8.4 live** for `dcWebUsers`, with §6.1 output saved (8.4.x, InnoDB, myFinance account not on native
-      password).
-- [ ] **G3 Sprint-1 DoD met** (addendum C), including the QA suite green against **local `mysql:8.4` + synthetic users**
-      (§2.1). The image is built by CI or on the VPS at a tag.
-- [ ] **G4 Staging copy of `dcWebUsers`**: fresh dump (§6.3) restored into a separate staging schema on 8.4, using
+- [ ] **G2 Prod MySQL passes §6.1** with output saved: **8.0.x (≥ 8.0.11) or 8.4.x**, all InnoDB, no `sso`/
+      `token_blacklist` migrations yet, and SSO accounts created with `caching_sha2_password` + TLS. Go-live does
+      **not** wait for the 8.4 upgrade. That's a separate change with its own gate (§6.4 step 4).
+- [ ] **G3 Sprint-1 DoD met** (addendum C), including the QA suite green against **local `mysql:8.0` and `mysql:8.4` +
+      synthetic users** (§2.1), and the CI matrix green on both. The image is built by CI or on the VPS at a tag.
+- [ ] **G4 Staging copy of `dcWebUsers`**: fresh dump (§6.3) restored into a separate staging schema on prod's MySQL
+      version, using
       staging accounts. This is the pre-go-live step Thomas asked for.
 - [ ] **G5 Full rehearsal of P1–P10 on staging** against that copy. It must show that only `sso`/`token_blacklist`
       migrations apply and that real legacy hashes log in. Also test myFinance-style login against the staging copy
@@ -531,6 +683,9 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
 - **P2 DNS + TLS**: A/AAAA record for `${SSO_HOSTNAME}` → VPS. Obtain the cert (§3.2). Check with
   `openssl s_client -connect ${SSO_HOSTNAME}:${SSO_HTTPS_PORT} -servername ${SSO_HOSTNAME}`.
 - **P3 Keys** (§4.2).
+- **P3b Image**: `docker compose pull web` for `${DOCKER_USER}/sso-server:${IMAGE_TAG}`. The public repo pulls
+  anonymously, subject to anonymous rate limits; an optional read-only token login is described in §7. Or build
+  locally under the same name (§7). Check that the pulled digest matches the one that passed §7.1.
 - **P4 DB accounts**: run §6.1 and save the output, create the accounts (§6.2), then check connectivity from the VPS:
   `docker compose run --rm web python manage.py check --database default`.
   This also proves `caching_sha2_password` + TLS from the image.
@@ -561,13 +716,18 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
   `SSO_ISSUER`/`SSO_JWKS_URL` to service developers. Drop or retain the staging copy as decided (Q6).
 
 Later releases: tag → local/QA → staging → backup if there are migrations → `migrate --plan` review → migrate →
-`SSO_IMAGE_TAG=<new>` + `docker compose up -d` → P8 subset. Migrations must be backward-compatible with the previous
+set `IMAGE_TAG=<new>` (`sha-*`/`vX.Y.Z`) in `.env` → `docker compose pull web` → verify the digest equals the one that
+passed §7.1 → `docker compose up -d` → P8 subset. Migrations must be backward-compatible with the previous
 image (expand-only). With a single `web` container, `up -d` causes a few seconds of 502s (Q13).
 
 ## 13. Rollback steps (use the lowest level that works)
 ### 13.1 Level 1: previous image (no DB change)
 ```bash
-cd /opt/sso && sed -i 's/^SSO_IMAGE_TAG=.*/SSO_IMAGE_TAG=<previous tag from DEPLOYED>/' .env && docker compose up -d
+cd /opt/sso
+sed -i 's/^IMAGE_TAG=.*/IMAGE_TAG=<previous tag from DEPLOYED>/' .env
+docker compose pull web       # thomaschoi/sso-server:<previous tag>; usually still cached locally
+docker compose up -d
+docker compose images web     # confirm the tag/digest matches DEPLOYED's previous entry
 ```
 Then run the P8 smoke tests. This is safe because migrations are backward-compatible. Keys and tokens are unchanged.
 
@@ -604,7 +764,7 @@ stopped.
 sha256sum -c dcWebUsers-pre-sso-<TS>.sql.gz.sha256
 zcat dcWebUsers-pre-sso-<TS>.sql.gz | docker run --rm -i --network host \
   -v ~/.my-dcweb.cnf:/cfg/my.cnf:ro -v ~/mysql-ca/ca.pem:/cfg/ca.pem:ro \
-  mysql:8.4 mysql --defaults-extra-file=/cfg/my.cnf dcWebUsers
+  mysql:${MYSQL_CLIENT_TAG} mysql --defaults-extra-file=/cfg/my.cnf dcWebUsers   # client = server major.minor
 # 3. SELECT COUNT(*) FROM auth_user == P5 baseline; log in to myFinance
 ```
 The dump has no `CREATE DATABASE`, so tables created after the dump (SSO's) remain. Drop them as in §13.3.
@@ -629,12 +789,28 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 "Must" items block deployment. "Done in code" marks what's already met in the repo as of 2026-10-10.
 
 **Dockerfile**
-- R1. **Must**: `python:3.12-slim` (pinned), multi-stage. The builder has `build-essential pkg-config
-  default-libmysqlclient-dev`. The runtime stage has only the runtime client library, **including its
-  `caching_sha2_password` client plugin** (§6.0; the CI image job proves it), and no compilers.
-- R2. **Must**: run as a non-root user with **fixed uid/gid 10001**.
-- R3. **Must not** contain keys, `.env`, certs or dumps. `.dockerignore` excludes `keys/ *.pem .env* *.sql* .git
-  .venv qa/ examples/`.
+- R1. **Must**: `python:3.13-slim-trixie`, multi-stage. As of 2026-10-10, `python:3.13-slim` equals the trixie image by
+  digest. Name the codename explicitly and pin a patch version (e.g. `3.13.13-slim-trixie`) or a digest. The builder
+  has `build-essential pkg-config default-libmysqlclient-dev`. The runtime stage has only the runtime client library
+  (`libmariadb3`, **including its `caching_sha2_password` plugin** under `/usr/lib/<arch>/libmariadb3/plugin/`; §6.0;
+  the CI image job proves it on MySQL 8.0 and 8.4), and no compilers.
+- R2. **Must**: run as a non-root user, uid/gid **10001 by default**. Configurable via `SSO_UID`/`SSO_GID`: accepted
+  deviation, see §15.1. Never 0.
+- R3. **Must not** contain keys, `.env`, certs, dumps or databases. **The image is public** (§7). `.dockerignore`
+  **must** exclude at least: `.env` and `.env.*` (allow `.env.example` only if the image needs it, which it shouldn't),
+  `keys/`, `*.pem`, `*.key`, `id_rsa*`, `.git/`, `.github/`, `.venv/`, `*.sql`, `*.sql.gz`, `*.dump`, `*.bak`,
+  `*.sqlite3`, `db.sqlite3`, `staticfiles/`, `docker/certs/`, `qa/` (including any fixtures or dumps with real data),
+  `examples/`, `devops/`, `.pytest_cache/`, `.coverage`, `__pycache__/`. CI's §7.1 gate enforces the result.
+- R30. **No secrets at build time via `ARG` or `ENV`.** They persist in the image history or config and are public.
+  The Dockerfile has no `ARG`/`ENV` holding passwords, tokens or keys. If a build step ever genuinely needs a secret
+  (e.g. a private package index), use **BuildKit `RUN --mount=type=secret,id=…`**, which doesn't persist in layers or
+  history. Runtime secrets come only from `env_file` and the `/run/keys` mount (§4).
+- R31. **Multi-stage build** (builder with compilers and `-dev` packages → slim runtime). Nothing from the builder
+  reaches the runtime except explicitly copied artefacts (e.g. the installed virtualenv / wheels).
+- R32. **The final stage copies only explicit paths.** For example `COPY --chown=10001:10001 manage.py ./`,
+  `COPY ssoproject/ ssoproject/`, `COPY sso/ sso/`, and the venv from the builder. **No `COPY . .`** in the final stage
+  (it defeats a mistaken `.dockerignore`), and no `ADD` of remote URLs. Don't create-then-delete secret files in a
+  `RUN` step, because deleted files still ship in earlier layers.
 - R4. **Must**: `collectstatic` at build. WhiteNoise is already in the middleware (done in code).
 - R5. **Must**: gunicorn `0.0.0.0:8000`, `--workers ${GUNICORN_WORKERS:-3}`, `--timeout 30`,
   `--worker-tmp-dir /dev/shm`, `--access-logfile -`, `--forwarded-allow-ips '*'` (safe only because `web` isn't
@@ -645,7 +821,7 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
   (`/healthz` is already exempt from the SSL redirect). Python one-liner. Interval 30 s, timeout 5 s, retries 3,
   start_period 20 s.
 - R8. Should run with a `read_only: true` root filesystem plus `tmpfs: /tmp`.
-- R9. Should pin requirements exactly or by hash. **Django 5.2 only**: drop `requirements-django42.txt` and the
+- R9. Should pin requirements exactly or by hash, **resolved under Python 3.13** (§8 checklist). **Django 5.2 only**: drop `requirements-django42.txt` and the
   "fallback" comment in `requirements.txt` (Thomas 2026-10-10).
 
 **Settings / app behaviour**
@@ -653,8 +829,8 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
   `SSO_SECRET_KEY, SSO_DEBUG, SSO_ALLOWED_HOSTS, SSO_CSRF_TRUSTED_ORIGINS, SSO_DB_ENGINE, SSO_DBNAME, SSO_DBHOST,
   SSO_DBPORT, SSO_DBUSER, SSO_DBPWD, SSO_ISSUER, SSO_AUDIENCE, SSO_JWT_PRIVATE_KEY_PATH, SSO_JWT_PUBLIC_KEY_PATHS,
   SSO_ACCESS_TTL_MIN, SSO_REFRESH_TTL_DAYS, SSO_CORS_ALLOWED_ORIGINS, SSO_COOKIE_DOMAIN, SSO_CACHE_URL, SSO_NUM_PROXIES,
-  SSO_ADMIN_PATH`, plus compose-only `SSO_HOSTNAME, SSO_DOMAIN, SSO_HTTPS_PORT, SSO_HTTP_PORT, SSO_IMAGE_TAG,
-  GUNICORN_WORKERS`. (QA's `qa/tests/conftest.py` still defaults `SSO_ALLOWED_ORIGIN` to a `thomas-choi.com`
+  SSO_ADMIN_PATH`, plus compose-only `SSO_HOSTNAME, SSO_DOMAIN, SSO_HTTPS_PORT, SSO_HTTP_PORT, DOCKER_USER,
+  IMAGE_TAG, GUNICORN_WORKERS`. (QA's `qa/tests/conftest.py` still defaults `SSO_ALLOWED_ORIGIN` to a `thomas-choi.com`
   origin; QA should parameterize it too.)
 - R11. `SSO_NUM_PROXIES=1`: done in code.
 - R12. Cache from `SSO_CACHE_URL` with `KEY_PREFIX` `sso`: done in code.
@@ -669,8 +845,10 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
   mount.
 
 **docker-compose.yml (staging/prod)**
-- R18. `web`, `nginx`, `redis`. **No DB service.** The `mysql:8.4` container lives only in `docker-compose.test.yml`.
-- R19. `image: sso-server:${SSO_IMAGE_TAG:?set SSO_IMAGE_TAG}`, `env_file: .env`.
+- R18. `web`, `nginx`, `redis`. **No DB service.** MySQL containers live only in `docker-compose.test.yml`.
+- R19. `image: ${DOCKER_USER:?set DOCKER_USER}/sso-server:${IMAGE_TAG:?set IMAGE_TAG}` (Docker Hub;
+  `DOCKER_USER=thomaschoi`), `env_file: .env`. Production never runs `latest`. The Developer's compose defaults to
+  `IMAGE_TAG=latest` and keeps `build:`: accepted deviation for local/dev use, see §15.1. Prod `.env` pins the tag.
 - R20. Volumes: `./keys:/run/keys:ro` (web), certs `:ro` + ACME webroot (nginx), optional `./mysql-ca:/run/mysql-ca:ro`
   (web).
 - R21. **Only nginx publishes ports:** `"${SSO_HTTPS_PORT:-443}:443"` and `"${SSO_HTTP_PORT:-80}:80"`. No `ports:` on
@@ -682,7 +860,8 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 - R24. Dev/self-signed overrides go in an override file or profile, never in the prod file.
 
 **docker-compose.test.yml (local/QA)**
-- R29. `mysql:8.4` with default auth settings. `MYSQL_DATABASE=dcWebUsers`. An init script creates
+- R29. `${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}`. **Default `mysql:8.0`** (prod today); 8.4 supported (accepted
+  deviation from the earlier `8.4` default, see §15.1). Default auth settings. `MYSQL_DATABASE=dcWebUsers`. An init script creates
   `sso_app`/`sso_migrator` with prod-equivalent grants. Passwords come from a git-ignored `.env.test`. No published
   port, or `127.0.0.1` only. Healthcheck with `mysqladmin ping`. Throw-away volume.
 - R27. The synthetic seed (`qa/tests/fixtures/seed_test_data.py`) gets a hard guard (`SSO_ALLOW_SYNTHETIC_SEED=1` + local
@@ -697,6 +876,16 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 - R26. `umask 077`, RSA 3072 (or a parameter), writes `<name>.private.pem`/`<name>.public.pem`, prints the kid using the
   same DER-SPKI method as `sso/keys.py`, and refuses to overwrite existing files.
 
+### 15.1 Accepted deviations (Developer)
+Agreed on 2026-10-10. The Developer's files differ from the original requirement text, and these differences are
+accepted with the conditions below.
+
+| Req. | Developer's implementation | Accepted for | Conditions |
+|---|---|---|---|
+| R19 | `docker-compose.yml`: `image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}`, and `build:` kept in the main compose file | Local and dev use | **Production `/opt/sso/.env` must pin `IMAGE_TAG` to `sha-<12hex>` or `vX.Y.Z`.** An exported shell variable overrides `.env`, so check there's no stray `export IMAGE_TAG`. Rollout (§12 P3b / later releases) **verifies the pulled digest** against the one that passed §7.1 and records it in `DEPLOYED`. On the VPS, use `docker compose pull`/`up -d`, never `up --build`. **CI never pushes `latest`** (publish job pushes only `sha-*` and `v*`). |
+| R2 | uid/gid configurable via build args and compose `SSO_UID`/`SSO_GID` (default **10001**; the Dockerfile rejects 0 and non-numeric values) | All environments | The **host key directory and key files must be owned by the configured `SSO_UID:SSO_GID`** (§4.2). Published images are built with the default 10001 (the CI check asserts it). A non-default uid means a local build on that host. |
+| R29 | `MYSQL_IMAGE` defaults to **`mysql:8.0`** (`QA_MYSQL_TAG` as fallback) in test/dev compose | Local/QA/dev | 8.4 stays supported and tested (`MYSQL_IMAGE=mysql:8.4`, CI matrix). Change the default to 8.4 after the prod upgrade (§6.4 step 6). |
+
 ## 16. Open questions
 IDs are kept stable from v1.0. Resolved items are listed separately.
 
@@ -710,7 +899,8 @@ IDs are kept stable from v1.0. Resolved items are listed separately.
    only-encrypted (§6.0)? Is `require_secure_transport` planned (it affects myFinance too)?
 6. **DB admin and backups:** who runs the §6 SQL and the dumps? Where are dumps stored and for how long? Is there an
    ongoing `dcWebUsers` backup? Is the staging copy dropped after go-live?
-8. **CI/registry:** GitHub Actions + GHCR assumed. When will the repo exist? Until then, build on the VPS?
+8. **CI:** GitHub Actions assumed. When will the GitHub repo exist, and when will the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`
+   secrets be created? Until then, build on the VPS? (The registry itself is resolved: Docker Hub, see below.)
 9. **Monitoring tool and alert channel** (free/self-hosted; email to Thomas?).
 10. **Keys:** RSA 3072 OK? Yearly rotation? No private-key backup? Password manager as master store?
 12. **Admin path value** (code default `sso-admin/`). Should it be IP-allowlisted at nginx?
@@ -725,21 +915,29 @@ IDs are kept stable from v1.0. Resolved items are listed separately.
 19. **Logs:** retention and destination?
 20. **New: Ubuntu release** on the VPS (24.04 LTS assumed)? VPS provider and size? A separate VPS for staging, or
     staging on the prod VPS?
-21. **New: MySQL 8.4 migration timing and myFinance compatibility.** When does `dcWebUsers` move to 8.4? Does
-    myFinance's DB account use `mysql_native_password` (it would stop working on 8.4 by default)? Does its client
-    library support `caching_sha2_password`? myFinance runs Django 4.1, whose official MySQL support predates 8.4.
-    Has myFinance been tested on 8.4?
-22. **New: parameters in §0** (`SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, staging hostname).
+21. **MySQL 8.0 → 8.4 upgrade (separate from SSO go-live).** When is the upgrade planned? 8.0 has been past EOL since April
+    2026. Which accounts in `SELECT user, host, plugin FROM mysql.user` still use `mysql_native_password`
+    (myFinance's especially)? Who owns migrating them with `ALTER USER … IDENTIFIED WITH caching_sha2_password`, and
+    their clients' config? Has myFinance (Django 4.1, whose official MySQL support predates 8.4) been verified against
+    8.4 with a `caching_sha2_password` account (§6.4 step 2)?
+22. **Parameters in §0** (`SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, staging hostname).
     The decision is pending (see Q3 below). It's needed before gate G1.
+25. **New: OK to publish the source as part of a public image?** The image contains the `sso` application code
+    (no secrets). Confirm once with Thomas before the first push (§7.2 checklist).
 
 ### 16.2 Resolved
-1. ~~MySQL version~~. **MySQL 8.4; Django 5.2 only.** The 4.2 fallback and CI matrix are dropped (Thomas 2026-10-10).
-   The check SQL is in §6.1. 8.4 considerations are in §6.0.
+1. ~~MySQL version~~. **Django 5.2 only (4.2 fallback dropped). Prod MySQL is 8.0 now, 8.4 later** (Thomas
+   2026-10-10, v1.2 update). Both versions are supported and tested (§6, §8). Upgrade timing is tracked in Q21.
+8b. ~~Registry~~. **Docker Hub, `thomaschoi/sso-server`** (Thomas 2026-10-10).
+23. ~~Docker Hub repo visibility~~. **PUBLIC** (Thomas 2026-10-10). VPS pulls are anonymous (rate-limited); an
+    optional read-only token raises the limit. The image is world-readable, so the hard secret gate (§7.1),
+    checklist (§7.2) and leak response (§7.3) apply.
+24. ~~Python version~~. **Python 3.13**, `python:3.13-slim` (Debian trixie) (Thomas 2026-10-10).
 2. (part) ~~Host type~~. **Docker on an Ubuntu VPS** (Thomas 2026-10-10). The concrete baseline is in §3.0. Still open:
    same VPS as myFinance (Q2 above) and Ubuntu release (Q20).
 3. ~~Real hostname / DNS~~. **Parameterized, decision pending** (Thomas 2026-10-10). See §0 and Q22. Who manages DNS
    is still to be answered with that decision.
-7. ~~Real data in staging~~. **Sprint-1 QA uses a local `mysql:8.4` container with synthetic users (§2.1). A staging
+7. ~~Real data in staging~~. **Sprint-1 QA uses a local MySQL container (`MYSQL_IMAGE`, default `mysql:8.0`; 8.4 supported) with synthetic users (§2.1). A staging
    copy of `dcWebUsers` is a pre-go-live step** (gate G4), protected like prod (Thomas 2026-10-10).
 11. ~~Multi-key verification~~. **Implemented in `sso/tokens.py`**, with the singular-env fallback in settings. Only a
     staging rehearsal remains (G6).

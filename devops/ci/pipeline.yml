@@ -1,13 +1,16 @@
 # =============================================================================
-# DRAFT, NOT ACTIVE (v1.1, 2026-10-10). CI pipeline for sso-server (GitHub Actions syntax).
-# Proposal by DevOps; see devops/DEPLOYMENT-PLAN.md §8.
+# DRAFT, NOT ACTIVE (v1.4, 2026-10-10). CI pipeline for sso-server (GitHub Actions syntax).
+# Proposal by DevOps; see devops/DEPLOYMENT-PLAN.md §7-§8.
 # It lives under devops/ci/ on purpose and will NOT run from here. To activate
 # (after Thomas approves and the GitHub repo exists, addendum D), copy it to
 # .github/workflows/ci.yml and resolve the TODOs.
 # No deploy step: deployments are manual (plan §12). No runtime secrets in CI.
-# v1.1: Django 5.2 only (4.2 matrix dropped, Thomas 2026-10-10); MySQL service = mysql:8.4
-#       with default auth (caching_sha2_password; mysql_native_password disabled by default);
-#       the image job now logs in to MySQL 8.4 from inside the built image.
+# v1.2: Python 3.13 (runtime image python:3.13-slim-trixie); MySQL matrix 8.0 + 8.4
+#       (prod is 8.0 now, 8.4 later); image name ${DOCKER_USER}/sso-server:${IMAGE_TAG}
+#       on Docker Hub (DOCKER_USER=thomaschoi). The publish job is COMMENTED OUT.
+# v1.3: the Docker Hub repo is PUBLIC -> hard secret gate `image-secret-scan`
+#       (scanners + per-layer file check + history/config check). Publish needs it,
+#       plus a manual approval via the `dockerhub-publish` environment (plan §7.1-§7.2).
 # =============================================================================
 name: ci
 
@@ -25,8 +28,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PYTHON_VERSION: "3.12"
-  MYSQL_IMAGE: "mysql:8.4"   # TODO: pin the patch version used in prod (8.4.x)
+  PYTHON_VERSION: "3.13"
+  DOCKER_USER: thomaschoi
+  IMAGE_NAME: thomaschoi/sso-server   # = ${DOCKER_USER}/sso-server (docker.io)
 
 jobs:
   lint:
@@ -48,7 +52,7 @@ jobs:
             echo "Tracked secret-like files found"; exit 1; fi
 
   unit:
-    # Django 5.2 only. ssoproject/settings_test.py generates throw-away keys and uses in-memory SQLite.
+    # Django 5.2, Python 3.13. ssoproject/settings_test.py generates throw-away keys + in-memory SQLite.
     needs: lint
     runs-on: ubuntu-24.04
     env:
@@ -58,6 +62,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
       - run: pip install -r requirements-dev.txt
+      - run: pip freeze   # record the resolved set under 3.13 (plan §8 dependency checklist)
       - name: No pending migrations (addendum B11)
         run: DJANGO_SETTINGS_MODULE=ssoproject.settings_test python manage.py makemigrations --check --dry-run
       - name: Tests + coverage gate (addendum C; pytest.ini already adds --cov=sso)
@@ -66,9 +71,13 @@ jobs:
   integration-mysql:
     needs: lint
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["8.0", "8.4"]   # 8.0 = prod today and the MYSQL_IMAGE default; 8.4 supported (plan §6, §15.1). TODO: pin patches
     services:
       mysql:
-        image: mysql:8.4          # keep in sync with env.MYSQL_IMAGE (services can't read env)
+        image: mysql:${{ matrix.mysql }}
         env:
           MYSQL_ROOT_PASSWORD: ci-root
           MYSQL_DATABASE: dcWebUsers
@@ -87,12 +96,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "${{ env.PYTHON_VERSION }}", cache: pip }
-      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config default-libmysqlclient-dev mysql-client
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config default-libmysqlclient-dev
       - run: pip install -r requirements.txt -r requirements-dev.txt
-      - name: Assert MySQL 8.4 with default auth plugin
+      - name: Assert server version and default auth plugin
         run: |
-          mysql -h127.0.0.1 -uroot -pci-root -N -e "SELECT VERSION(); SELECT plugin FROM mysql.user WHERE user='root' AND host='%';" | tee mysql-info.txt
-          grep -q '^8\.4\.' mysql-info.txt
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -N \
+            -e "SELECT VERSION(); SELECT plugin FROM mysql.user WHERE user='root' AND host='%';" | tee mysql-info.txt
+          grep -q "^${{ matrix.mysql }}\." mysql-info.txt
           grep -q 'caching_sha2_password' mysql-info.txt
       # Mimic myFinance's existing dcWebUsers: built-in apps first (plan §2.1), then check the plan.
       - name: Migrate plan must only touch sso + token_blacklist
@@ -103,7 +113,7 @@ jobs:
           if grep -E '^\s*(auth|contenttypes|admin|sessions)\.' plan.txt; then
             echo "Unexpected migrations for shared apps"; exit 1; fi
           python manage.py migrate
-      - name: Tests on MySQL 8.4
+      - name: Tests on MySQL ${{ matrix.mysql }}
         run: pytest --no-cov   # settings_test honours SSO_DB_ENGINE=mysql
 
   deploy-check:
@@ -134,37 +144,77 @@ jobs:
       - run: python manage.py check --deploy --fail-level WARNING
       - run: pip-audit -r requirements.txt
 
-  image:
+  image-build:
     needs: [unit, integration-mysql, deploy-check]
     runs-on: ubuntu-24.04
-    services:
-      mysql:
-        image: mysql:8.4
-        env:
-          MYSQL_ROOT_PASSWORD: ci-root
-          MYSQL_DATABASE: dcWebUsers
-          MYSQL_USER: sso_ci            # created with the 8.4 default plugin caching_sha2_password
-          MYSQL_PASSWORD: ci-pass
-        ports: ["3306:3306"]
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root"
-          --health-interval=5s --health-timeout=5s --health-retries=30
+    outputs:
+      sha_tag: ${{ steps.tags.outputs.sha }}
+      ver_tag: ${{ steps.tags.outputs.ver }}
     steps:
       - uses: actions/checkout@v4
-      - name: Compute tags
+      - name: Compute tags (IMAGE_TAG = sha-<12hex>; vX.Y.Z on git tags; never latest)
         id: tags
         run: |
           echo "sha=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "ver=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"; fi
       - name: Build
-        run: docker build -t sso-server:${{ steps.tags.outputs.sha }} .
+        run: docker build -t "$IMAGE_NAME:${{ steps.tags.outputs.sha }}" .
+      - name: Base image is Python 3.13 on Debian trixie
+        run: |
+          docker run --rm --entrypoint sh "$IMAGE_NAME:${{ steps.tags.outputs.sha }}" -c \
+            'python -c "import sys; assert sys.version_info[:2]==(3,13), sys.version" && grep -q "VERSION_CODENAME=trixie" /etc/os-release'
       - name: Image must not contain secrets and must run as uid 10001
         run: |
-          IMG=sso-server:${{ steps.tags.outputs.sha }}
+          IMG="$IMAGE_NAME:${{ steps.tags.outputs.sha }}"
           U="$(docker image inspect -f '{{.Config.User}}' "$IMG")"
+          # Published images use the default SSO_UID/SSO_GID=10001 (plan §15.1 R2). Never root.
           [ "$U" = "10001:10001" ] || [ "$U" = "10001" ] || { echo "image user is '$U'"; exit 1; }
           docker run --rm --entrypoint sh "$IMG" -c \
             '! find / -xdev \( -name "*.pem" -path "*keys*" -o -name ".env" -o -name "*.sql*" \) 2>/dev/null | grep -q .'
+      - name: Vulnerability scan
+        uses: aquasecurity/trivy-action@0.28.0   # TODO: pin to a commit SHA
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Save image for the DB-smoke matrix (and the future publish job)
+        run: docker save "$IMAGE_NAME:${{ steps.tags.outputs.sha }}" | gzip > image.tar.gz
+      - uses: actions/upload-artifact@v4
+        with: { name: sso-image, path: image.tar.gz, retention-days: 3 }
+
+  image-db-smoke:
+    # Proves the runtime client library (MariaDB Connector/C on trixie) logs in with
+    # caching_sha2_password on both MySQL versions (plan §6.0), then migrate + /healthz.
+    needs: image-build
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        mysql: ["8.0", "8.4"]
+    services:
+      mysql:
+        image: mysql:${{ matrix.mysql }}
+        env:
+          MYSQL_ROOT_PASSWORD: ci-root
+          MYSQL_DATABASE: dcWebUsers
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+    env:
+      IMG: thomaschoi/sso-server:${{ needs.image-build.outputs.sha_tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: sso-image }
+      - run: gunzip -c image.tar.gz | docker load
+      - name: Create a least-privilege-style account explicitly on caching_sha2_password (as plan §6.2)
+        run: |
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -e "
+            CREATE USER 'sso_ci'@'%' IDENTIFIED WITH caching_sha2_password BY 'ci-pass';
+            GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON dcWebUsers.* TO 'sso_ci'@'%';"
+          docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -N \
+            -e "SELECT user, plugin FROM mysql.user WHERE user='sso_ci'" | grep caching_sha2_password
       - name: Throw-away keys + env for the container
         run: |
           mkdir -p ci-keys && umask 077
@@ -187,40 +237,113 @@ jobs:
           SSO_JWT_PRIVATE_KEY_PATH=/run/keys/private.pem
           SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/public.pem
           ENV
-      - name: DB login from inside the image (caching_sha2_password on MySQL 8.4, plan §6.0)
+      - name: DB login from inside the image (MySQL ${{ matrix.mysql }})
         run: |
-          docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -N \
-            -e "SELECT user, plugin FROM mysql.user WHERE user='sso_ci'" | grep caching_sha2_password
           docker run --rm --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" \
-            sso-server:${{ steps.tags.outputs.sha }} python manage.py check --database default
+            "$IMG" python manage.py check --database default
       - name: Migrate + container smoke (/healthz with Host header, plan R7)
         run: |
-          IMG=sso-server:${{ steps.tags.outputs.sha }}
           docker run --rm --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" "$IMG" python manage.py migrate
           docker run -d --name sso --network host --env-file ci.env -v "$PWD/ci-keys:/run/keys:ro" "$IMG"
           for i in $(seq 1 30); do
             curl -fsS -H 'Host: sso.ci.invalid' http://127.0.0.1:8000/healthz && exit 0
             sleep 2; done
           docker logs sso; exit 1
-      - name: Vulnerability scan
+
+  image-secret-scan:
+    # HARD GATE (plan §7.1). The image is published to a PUBLIC repo: anything in any
+    # layer, the history or the config is world-readable. Any finding fails the build.
+    needs: image-build
+    runs-on: ubuntu-24.04
+    env:
+      IMG: thomaschoi/sso-server:${{ needs.image-build.outputs.sha_tag }}
+      # Reviewed allowlists (change only via PR review):
+      ALLOW_PATHS: '^(etc/ssl/certs/|usr/share/ca-certificates/|usr/lib/ssl/|.*/site-packages/certifi/cacert\.pem$|.*/pip/_vendor/certifi/cacert\.pem$)'
+      ALLOW_HISTORY: '(GPG_KEY=|PYTHON_SHA256=)'
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: sso-image }
+      - name: Unpack saved image (every layer, not just the final filesystem)
+        run: |
+          gunzip -c image.tar.gz > image.tar
+          docker load -i image.tar
+          mkdir -p img && tar -xf image.tar -C img
+          jq -r '.[0].Layers[]' img/manifest.json > layers.txt
+          wc -l layers.txt
+      - name: trufflehog over the image tarball
+        run: |
+          # TODO: pin the trufflehog image to a version/digest
+          docker run --rm -v "$PWD:/w:ro" trufflesecurity/trufflehog:latest \
+            docker --image file:///w/image.tar --fail --no-update --results=verified,unknown
+      - name: Trivy secret scanner over the image tarball
         uses: aquasecurity/trivy-action@0.28.0   # TODO: pin to a commit SHA
         with:
-          image-ref: sso-server:${{ steps.tags.outputs.sha }}
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
+          input: image.tar
+          scanners: secret
           exit-code: "1"
-      # ---------------------------------------------------------------------
-      # PUBLISH, DISABLED in this draft. Enable only after a registry is
-      # approved (plan Q8). Tags: sha-<12hex> on main, vX.Y.Z on tags. Never latest.
-      # ---------------------------------------------------------------------
-      # - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-      #   uses: docker/login-action@v3
-      #   with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
-      # - if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-      #   run: |
-      #     R=ghcr.io/<owner>/sso-server
-      #     docker tag sso-server:${{ steps.tags.outputs.sha }} $R:${{ steps.tags.outputs.sha }}
-      #     docker push $R:${{ steps.tags.outputs.sha }}
-      #     if [ -n "${{ steps.tags.outputs.ver }}" ]; then
-      #       docker tag sso-server:${{ steps.tags.outputs.sha }} $R:${{ steps.tags.outputs.ver }}
-      #       docker push $R:${{ steps.tags.outputs.ver }}; fi
+      - name: Forbidden files in ANY layer (deleted-later files still ship)
+        run: |
+          fail=0
+          while read -r layer; do
+            tar -tf "img/$layer" > entries.txt          # GNU tar auto-detects compression
+            # report whiteouts: something was deleted in this layer but exists in an earlier one
+            grep -E '(^|/)\.wh\.' entries.txt | sed "s|^|WHITEOUT in $layer: |" || true
+            hits=$(grep -iE '(\.pem|\.key|\.sqlite3|\.sql|\.sql\.gz|\.dump|\.bak)$|(^|/)id_(rsa|ed25519|ecdsa)[^/]*$|(^|/)\.env($|\.[^/]*$)|(^|/)dcWebUsers[^/]*$' entries.txt \
+                   | grep -vE "$ALLOW_PATHS" || true)
+            if [ -n "$hits" ]; then echo "::error::forbidden files in layer $layer:"; echo "$hits"; fail=1; fi
+            # private-key material anywhere in the layer, including allowlisted paths
+            mkdir -p l && tar -xf "img/$layer" -C l 2>/dev/null || true
+            if grep -rlIE -- '-----BEGIN ([A-Z0-9]+ )?PRIVATE KEY-----' l; then
+              echo "::error::private key material in layer $layer"; fail=1; fi
+            rm -rf l
+          done < layers.txt
+          exit $fail
+      - name: History, Env and Labels contain no secret-looking values or build args
+        run: |
+          PAT='(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL|SSO_DBPWD|EMAIL_PWD|DOCKERHUB)[A-Z0-9_]*='
+          docker history --no-trunc --format '{{.CreatedBy}}' "$IMG" > history.txt
+          docker image inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$IMG" > env.txt
+          docker image inspect -f '{{json .Config.Labels}}' "$IMG" > labels.txt
+          cat history.txt
+          fail=0
+          for f in history.txt env.txt labels.txt; do
+            if grep -iE "$PAT" "$f" | grep -vE "$ALLOW_HISTORY"; then
+              echo "::error::secret-looking assignment in $f"; fail=1; fi
+          done
+          # build args recorded by BuildKit as '|N NAME=value ...' or 'ARG NAME=value'
+          if grep -iE '(^\|[0-9]+ .*|ARG [^ ]*)'"$PAT" history.txt; then
+            echo "::error::secret-looking build arg in history"; fail=1; fi
+          exit $fail
+
+  # ---------------------------------------------------------------------------
+  # PUBLISH TO DOCKER HUB, DISABLED in this draft. Enable only after Thomas
+  # approves and the Docker Hub repo exists. The repo is PUBLIC (plan §7, Q23 closed):
+  # publish depends on the hard secret gate and a required reviewer (environment).
+  # Secrets (GitHub Actions): DOCKERHUB_USERNAME = thomaschoi,
+  #   DOCKERHUB_TOKEN = a Docker Hub personal ACCESS TOKEN (Read & Write, no Delete),
+  #   never the account password.
+  # Pushes ${DOCKER_USER}/sso-server:sha-<12hex> on main and :vX.Y.Z on tags. Never latest.
+  # ---------------------------------------------------------------------------
+  # publish:
+  #   needs: [image-build, image-db-smoke, image-secret-scan]   # secret gate is mandatory
+  #   environment: dockerhub-publish   # required reviewer = Thomas; ticks plan §7.2 checklist
+  #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+  #   runs-on: ubuntu-24.04
+  #   steps:
+  #     - uses: actions/download-artifact@v4
+  #       with: { name: sso-image }
+  #     - run: gunzip -c image.tar.gz | docker load
+  #     - uses: docker/login-action@v3          # TODO: pin to a commit SHA
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_TOKEN }}
+  #     - name: Push
+  #       env:
+  #         SHA_TAG: ${{ needs.image-build.outputs.sha_tag }}
+  #         VER_TAG: ${{ needs.image-build.outputs.ver_tag }}
+  #       run: |
+  #         docker push "$IMAGE_NAME:$SHA_TAG"
+  #         if [ -n "$VER_TAG" ]; then
+  #           docker tag "$IMAGE_NAME:$SHA_TAG" "$IMAGE_NAME:$VER_TAG"
+  #           docker push "$IMAGE_NAME:$VER_TAG"
+  #         fi
