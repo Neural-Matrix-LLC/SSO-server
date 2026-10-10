@@ -117,7 +117,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_CORS_ALLOWED_ORIGINS` | — | Front-end origins. Also the allow-list for the cookie-mode `Origin` check |
 | `SSO_COOKIE_DOMAIN` | host-only | e.g. `.example.com` so sibling sub-domains share the cookie |
 | `SSO_CACHE_URL` | none (`locmemcache://` only when `SSO_DEBUG=True`) | Throttle counters, shared by all gunicorn workers. **Required when `SSO_DEBUG=False`**: empty, `locmemcache://` or `dummycache://` stop the server at startup (`ImproperlyConfigured`), and `manage.py check` reports `sso.E001` if `CACHES` is overridden to one of them. `docker-compose.yml` defaults it to `redis://redis:6379/0`; on a single host without Redis use `filecache:///path`. Keys are prefixed with `sso` |
-| `SSO_NUM_PROXIES` | `0` | DRF `NUM_PROXIES`. `0` ignores `X-Forwarded-For` (safe when gunicorn is reached directly). `docker-compose.yml` sets `1`: nginx **overwrites** `X-Forwarded-For` and `web` is not published, so the right-most entry is the real client IP. Never set `1` when clients can reach gunicorn directly or the proxy appends to a client-supplied header: they could then pick their own IP and bypass the per-IP throttle |
+| `SSO_NUM_PROXIES` | `0` | DRF `NUM_PROXIES`. `0` ignores `X-Forwarded-For` (safe when gunicorn is reached directly). `docker-compose.yml` defaults it to `1` (overridable from `.env`): nginx **overwrites** `X-Forwarded-For` and `web` is not published, so the right-most entry is the real client IP. Never set `1` when clients can reach gunicorn directly or the proxy appends to a client-supplied header: they could then pick their own IP and bypass the per-IP throttle |
 | `SSO_FORWARDED_ALLOW_IPS` | `127.0.0.1` (image) | gunicorn `--forwarded-allow-ips`: comma list of IPs/CIDRs whose `X-Forwarded-Proto` is trusted. Compose sets it to the `edge` network (`SSO_EDGE_SUBNET`, default `172.31.250.0/24`), where nginx is the only other container. Never `*` |
 | `SSO_ADMIN_PATH` | `sso-admin/` | Admin is not served at `/admin/` |
 | `SSO_SSL_REDIRECT`, `SSO_HSTS_SECONDS`, `SSO_COOKIE_SECURE`, `SSO_THROTTLE_*`, `SSO_LOG_LEVEL` | secure defaults | Overrides for dev and tuning |
@@ -201,6 +201,19 @@ Dockerfile fails the build if the plugin is missing.
 cp .env.example .env && chmod 600 .env     # fill in. SSO_IMAGE_TAG and SSO_HOSTNAME are required
 docker compose build && docker compose up -d && docker compose ps
 ```
+**Proxy trust and the shared-host-nginx variant.** `SSO_NUM_PROXIES` defaults to `1` in compose and can be
+set in `.env`. If a host-level nginx sits in front of the compose nginx, that host nginx **must overwrite**
+`X-Forwarded-For` (`proxy_set_header X-Forwarded-For $remote_addr;`), not append to it with
+`$proxy_add_x_forwarded_for`. Otherwise a client can put any IP in the header and get around the per-IP
+throttle. Set `SSO_NUM_PROXIES` to match the number of trusted hops, and add the host nginx's address to
+`SSO_FORWARDED_ALLOW_IPS` if it talks to gunicorn directly.
+
+**Throttle counters aren't atomic.** DRF's throttles read and then write the cache entry, so a parallel burst
+across gunicorn workers can let one extra request (roughly one per worker) through before the limit
+applies. In compose, nginx `limit_req` on the login location (`docker/nginx.conf`: 30 r/min per IP,
+burst 10, 429) puts a hard per-IP bound in front of it. Deployments without that nginx should add an
+equivalent limit at their proxy.
+
 Daily cron on the host (deployment plan §10):
 `30 3 * * * cd /opt/sso && docker compose exec -T web python manage.py flushexpiredtokens`
 

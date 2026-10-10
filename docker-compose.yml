@@ -19,8 +19,9 @@ services:
     env_file: .env
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
-      # nginx (the only proxy) overwrites X-Forwarded-For; trust exactly that one hop (QA defect 4)
-      SSO_NUM_PROXIES: "1"
+      # nginx (the only proxy) overwrites X-Forwarded-For; trust exactly that one hop (QA defect 4).
+      # Overridable from .env (e.g. 2 behind a host nginx that also OVERWRITES the header; README §7)
+      SSO_NUM_PROXIES: ${SSO_NUM_PROXIES:-1}
       # gunicorn trusts X-Forwarded-Proto only from the edge network, where nginx lives
       SSO_FORWARDED_ALLOW_IPS: ${SSO_FORWARDED_ALLOW_IPS:-${SSO_EDGE_SUBNET:-172.31.250.0/24}}
       # shared throttle cache; settings refuse a per-process cache when SSO_DEBUG=False (QA defect 5)
