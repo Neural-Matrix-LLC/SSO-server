@@ -1,4 +1,5 @@
-# LOCAL DEV overlay (deployment plan R24): self-signed TLS, a local MySQL 8.4 standing in for
+# LOCAL DEV overlay (deployment plan R24): self-signed TLS, a local MySQL (MYSQL_IMAGE, default mysql:8.0 like
+# production today; mysql:8.4 also supported, use a fresh volume: SSO_DEV_MYSQL_VOLUME) standing in for
 # dcWebUsers (same accounts as prod: sso_app = DML, sso_migrator = DDL), the examples/ demo page and
 # the verifier. Never use on a server. Order follows deployment plan §2.1:
 #
@@ -32,7 +33,7 @@ services:
         condition: service_healthy
 
   db:
-    image: mysql:8.4
+    image: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}
     environment:
       MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:?run scripts/dev_setup.sh}
       MYSQL_DATABASE: dcWebUsers
@@ -73,4 +74,6 @@ services:
         condition: service_started
 
 volumes:
-  sso-dev-mysql: {}
+  sso-dev-mysql:
+    # one volume per MySQL version (8.0 cannot open an 8.4 data dir)
+    name: ${SSO_DEV_MYSQL_VOLUME:-sso-dev-mysql-8.0}

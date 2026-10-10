@@ -46,11 +46,11 @@ but nothing uses it.
 | `examples/frontend/` | `index.html` test page plus the spec §7.2 `auth.js` (SSO base URL configurable) |
 | `scripts/gen_keys.sh` | RSA key pair (default 3072-bit). Prints the `kid`. Refuses to overwrite |
 | `scripts/gen_selfsigned_cert.sh`, `scripts/dev_setup.sh` | Local dev TLS cert, keys and `.env` |
-| `scripts/test_both_django.sh` | Runs the suite on Django 5.2 (shipped) and Django 4.2 (portability check only) |
-| `Dockerfile`, `.dockerignore`, `docker/healthcheck.py` | Production image (multi-stage, uid 10001, no keys inside) |
+| `scripts/test_both_django.sh` | Runs the suite on Django 5.2 (shipped) and Django 4.2 (portability check only); `PYTHON=` picks the interpreter |
+| `Dockerfile`, `.dockerignore`, `docker/healthcheck.py` | Production image (Python 3.13 / Debian trixie, multi-stage, non-root `SSO_UID:SSO_GID` default 10001, no keys inside) |
 | `docker-compose.yml` | Production/staging: `web` + `redis` + `nginx`. No DB container |
-| `docker-compose.dev.yml`, `docker/nginx-dev.d/` | Local overlay: self-signed TLS, MySQL 8.4 (sso_app/sso_migrator), demo page, verifier |
-| `docker-compose.test.yml`, `docker/Dockerfile.test` | Local/QA MySQL 8.4 and a pytest run against it |
+| `docker-compose.dev.yml`, `docker/nginx-dev.d/` | Local overlay: self-signed TLS, MySQL `MYSQL_IMAGE` (default 8.0, 8.4 supported; sso_app/sso_migrator), demo page, verifier |
+| `docker-compose.test.yml`, `docker/Dockerfile.test` | Local/QA MySQL (`MYSQL_IMAGE`, default `mysql:8.0`, also meant for `mysql:8.4`) and a pytest run against it, incl. `sso/tests/test_mysql_integration.py` |
 | `docker/mysql-init/01-sso-accounts.sh` | Local MySQL init: creates `sso_app` (DML only) and `sso_migrator` (DDL) like prod |
 | `docker/nginx.conf` | nginx template: TLS 1.2/1.3, port-aware redirect, 444 default server, proxy headers, ACME, admin allow-list hook, login rate limit |
 | `docker/nginx-admin.d/`, `mysql-ca/` | Mount points for the optional admin allow-list and the DB CA certificate |
@@ -60,19 +60,31 @@ but nothing uses it.
 ## 2. Local setup and tests
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+python3.13 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt     # Python 3.13 (= the image)
 .venv/bin/pytest                      # SQLite, prints the coverage report for sso/
 scripts/test_both_django.sh           # Django 5.2 (.venv) and Django 4.2 (.venv-dj42), both with --cov-fail-under=90
+PYTHON=python3.13 scripts/test_both_django.sh   # explicit interpreter -> .venv-py<version>-dj52 / -dj42
 ```
+Without a system 3.13, `uv python install 3.13` gives one (no sudo); pass its path as `PYTHON=`. A venv built
+with another Python version is never reused; the script stops and says so.
 The tests need no database server and no key files. `ssoproject/settings_test.py` generates throw-away keys.
 `mysqlclient` is needed only for MySQL (`requirements.txt`, the Docker image, `docker-compose.test.yml`).
 
-MySQL 8.4 integration run (needs Docker; passwords come from the git-ignored `.env.test`):
+MySQL integration run (needs Docker; passwords come from the git-ignored `.env.test`). Production is on
+MySQL **8.0** today and moves to **8.4** later, so run it on both. `MYSQL_IMAGE` picks the server
+(default `mysql:8.0`; `QA_MYSQL_TAG=8.0|8.4` from the deployment plan also works). Each version needs its own
+data volume (`SSO_TEST_MYSQL_VOLUME`): 8.0 cannot open an 8.4 data directory, and 8.4 upgrades an 8.0 one in place.
 ```bash
 scripts/dev_setup.sh          # creates .env.test once (random passwords)
-docker compose --env-file .env.test -f docker-compose.test.yml run --rm --build tests
-docker compose --env-file .env.test -f docker-compose.test.yml down -v
+T='docker compose --env-file .env.test -f docker-compose.test.yml'
+$T run --rm --build tests                                                          # MySQL 8.0
+MYSQL_IMAGE=mysql:8.4 SSO_TEST_MYSQL_VOLUME=sso-test-mysql-8.4 $T run --rm --build tests   # MySQL 8.4
+$T down -v                    # throw the 8.0 data away (repeat with the 8.4 variables for 8.4)
 ```
+`sso/tests/test_mysql_integration.py` (skipped on SQLite) then checks the server version (8.0.x ≥ 8.0.11 or
+8.4.x, and that it matches `MYSQL_IMAGE`), that the init-script accounts use `caching_sha2_password`, that
+the client library logs in with them, that `sso_app` has DML grants only, and that `SSO_DB_SSL_MODE=REQUIRED`
+works against the server's auto-generated certificates. The init script's SQL is valid on 8.0.4+ and 8.4.
 
 Run the server locally without Docker (SQLite, plain HTTP):
 ```bash
@@ -121,7 +133,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_FORWARDED_ALLOW_IPS` | `127.0.0.1` (image) | gunicorn `--forwarded-allow-ips`: comma list of IPs/CIDRs whose `X-Forwarded-Proto` is trusted. Compose sets it to the `edge` network (`SSO_EDGE_SUBNET`, default `172.31.250.0/24`), where nginx is the only other container. Never `*` |
 | `SSO_ADMIN_PATH` | `sso-admin/` | Admin is not served at `/admin/` |
 | `SSO_SSL_REDIRECT`, `SSO_HSTS_SECONDS`, `SSO_COOKIE_SECURE`, `SSO_THROTTLE_*`, `SSO_LOG_LEVEL` | secure defaults | Overrides for dev and tuning |
-| Deployment parameters / compose only: `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, `SSO_IMAGE_TAG`, `GUNICORN_WORKERS`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR`, `SSO_EDGE_SUBNET` (fixed subnet of the nginx↔web network; change it if it collides with a host network) | | Deployment plan §0. Nothing host-specific is built into code, compose or nginx. The derived app values (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
+| Deployment parameters / compose only: `SSO_DOMAIN`, `SSO_HOSTNAME`, `SSO_HTTPS_PORT`, `SSO_HTTP_PORT`, `DOCKER_USER` (default `thomaschoi`), `IMAGE_TAG` (default `latest`; pin e.g. `0.1.0` on servers), `SSO_UID`/`SSO_GID` (container user, default `10001`, never 0), `MYSQL_IMAGE` / `SSO_TEST_MYSQL_VOLUME` / `SSO_DEV_MYSQL_VOLUME` (test/dev MySQL), `GUNICORN_WORKERS`, `SSO_KEYS_DIR`, `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR`, `SSO_EDGE_SUBNET` (fixed subnet of the nginx↔web network; change it if it collides with a host network) | | Deployment plan §0. Nothing host-specific is built into code, compose or nginx. The derived app values (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
 
 With `SSO_DEBUG=False`, the process **refuses to start** (`ImproperlyConfigured` with a clear message) if any
 of these is true: `SSO_SECRET_KEY` or `SSO_ISSUER` is empty, a key file is missing or unreadable, or a key
@@ -131,7 +143,7 @@ is not RSA or is under 2048 bits.
 
 ```bash
 scripts/gen_keys.sh /opt/sso/keys sso-2026-10          # 3072-bit default. Prints kid=<16 hex>
-sudo chown 10001:10001 /opt/sso/keys/sso-2026-10.*.pem  # the container user must be able to read the key
+sudo chown 10001:10001 /opt/sso/keys/sso-2026-10.*.pem  # = SSO_UID:SSO_GID; the container user must read the key
 ```
 The script uses `umask 077`, writes `<name>.private.pem` (0600) and `<name>.public.pem`, and never
 overwrites existing files. Its `kid` (`openssl pkey -pubin -outform DER | sha256sum | cut -c1-16`) is
@@ -192,15 +204,28 @@ Hand the secret to the service owner through the password manager. The service c
 
 ## 7. Docker
 
-**Production/staging** (`docker-compose.yml`): `web` (gunicorn, uid 10001, read-only root fs, keys mounted
+**Production/staging** (`docker-compose.yml`): `web` (gunicorn, non-root `SSO_UID:SSO_GID`, read-only root fs, keys mounted
 read-only at `/run/keys`), `redis` (internal network, no persistence), and `nginx` (the only published
-service, with ports from `SSO_HTTP_PORT` / `SSO_HTTPS_PORT`). MySQL is remote. The image is Debian 13 slim
-because its `libmariadb3` ships the `caching_sha2_password` client plugin that MySQL 8.4 accounts need. The
-Dockerfile fails the build if the plugin is missing.
+service, with ports from `SSO_HTTP_PORT` / `SSO_HTTPS_PORT`). MySQL is remote (8.0 now, 8.4 later). The
+image is `python:3.13.16-slim-trixie` (Debian 13) because its `libmariadb3` ships the `caching_sha2_password`
+client plugin, the default auth plugin for new accounts on both MySQL 8.0 and 8.4. The Dockerfile fails the
+build if the plugin is missing.
 ```bash
-cp .env.example .env && chmod 600 .env     # fill in. SSO_IMAGE_TAG and SSO_HOSTNAME are required
+cp .env.example .env && chmod 600 .env     # fill in. SSO_HOSTNAME is required; set IMAGE_TAG (e.g. 0.1.0)
+docker compose config --images             # -> thomaschoi/sso-server:<IMAGE_TAG>; check before up
 docker compose build && docker compose up -d && docker compose ps
 ```
+**Image name.** `image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}`. Compose takes these (and every
+other `${...}` in the file) from `.env`, but an **exported shell variable of the same name wins** over `.env`;
+`docker compose config --images` shows the result. Pin `IMAGE_TAG` on servers rather than relying on `latest`.
+
+**Container user.** `web` runs as `SSO_UID:SSO_GID` (default `10001:10001`): the same values are the image build
+args (the user is created at build time) and compose's `user:`. Set them to the owner of the host key files so the
+private key can stay `0600`; the build refuses 0 (root) and a uid that already exists in the base image. If you
+change them, rebuild (`docker compose build`) so the image's user matches `user:`. (The app files are root-owned
+and read-only, so a mismatch would still run; it just leaves the uid without a passwd entry.) A pre-built image
+pulled from Docker Hub has the default 10001: keep `SSO_UID`/`SSO_GID` unset and chown the keys to 10001. There is no root entrypoint that drops privileges: the
+container starts as the unprivileged user and never needs root (keys are read-only mounts, the root fs is read-only).
 **Proxy trust and the shared-host-nginx variant.** `SSO_NUM_PROXIES` defaults to `1` in compose and can be
 set in `.env`. If a host-level nginx sits in front of the compose nginx, that host nginx **must overwrite**
 `X-Forwarded-For` (`proxy_set_header X-Forwarded-For $remote_addr;`), not append to it with
@@ -305,10 +330,11 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 
 ## 11. Open questions
 
-1. ~~MySQL version of production `dcWebUsers`~~ **Answered: MySQL 8.4** (team lead, 2026-10-10). Django 5.2
-   only is shipped (`requirements.lock`). The `requirements-django42*` fallback files are removed (deployment
-   plan R9). The suite still passes on 4.2 as a portability check. Still to confirm: that the upgrade lands
-   before go-live, and that `auth_user` is InnoDB.
+1. ~~MySQL version of production `dcWebUsers`~~ **Answered (updated): MySQL 8.0 now, 8.4 later** (team lead,
+   2026-10-10). The code, init script and settings are written for both; the test compose defaults to `mysql:8.0`.
+   MySQL 8.0 reached end of life in April 2026 (the `mysql:8.0` image was last updated 2026-05), so the 8.4
+   upgrade should not wait long. Django 5.2 only is shipped (`requirements.lock`); the suite still passes on 4.2
+   as a portability check. Still to confirm: prod's exact 8.0 patch level (≥ 8.0.11) and that `auth_user` is InnoDB.
 2. Public host name, domain, ports and DB host/port are **undecided** (deployment plan §0). Everything is
    set through env (`SSO_HOSTNAME`, `SSO_DOMAIN`, `SSO_HTTP(S)_PORT`, `SSO_ISSUER`, `SSO_ALLOWED_HOSTS`,
    `SSO_DBHOST`, `SSO_DBPORT`). `.env.example` uses `example.com` placeholders. Changing the issuer after
