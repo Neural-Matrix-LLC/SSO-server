@@ -346,6 +346,13 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | DEPLOY-12 | `flushexpiredtokens` cron documented and runs (§9.6) | M |
 | DEPLOY-13 | suite passes on the Django 5.2 pin and on a Django 4.2 build (B1) | M |
 | DEPLOY-14 | the Developer's `pytest` run: all §11 tests exist and pass, ≥ 90% line coverage on `sso/` (addendum §C) | M (review) |
+| DEPLOY-15 | image name: `web.image` = `${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}`; resolves to `thomaschoi/sso-server:latest` (unset or empty tag) and `acme/sso-server:0.1.1` with overrides; `.env.example` sets `DOCKER_USER=thomaschoi` and pins a non-`latest` `IMAGE_TAG`; no shipped file still uses `SSO_IMAGE_TAG` | A |
+| DEPLOY-16 | non-root uid/gid: `ARG SSO_UID=10001` / `SSO_GID=10001` declared **inside** the runtime stage; final `USER ${SSO_UID}:${SSO_GID}`, never root/0; `useradd` uses the args with `nologin`; app files `COPY --chown=root:root`; compose `build.args` and `user:` use the same variables/defaults (10001:10001, override 1500:1500); `.env.example` values numeric and ≠ 0 | A |
+| DEPLOY-16b | the Dockerfile's own uid/gid validation lines executed in `sh`: 10001/1500/1000:100 accepted; 0 (uid or gid), `abc`, empty, `-1`, `1e3` rejected | A |
+| DEPLOY-17 | `MYSQL_IMAGE` in `docker-compose.test.yml` (`mysql`) and `docker-compose.dev.yml` (`db`): default = the README's documented default (`mysql:8.0` at f22b2e0); `MYSQL_IMAGE=mysql:8.4`/`mysql:8.0` and `QA_MYSQL_TAG=8.4`/`8.0` select it; `MYSQL_IMAGE` wins over `QA_MYSQL_TAG`; data volume name parameterized per version with a default matching the default version | A |
+| DEPLOY-17b | `SSO_TEST_EXPECT_MYSQL` uses the same expression as the MySQL image; `sso/tests/test_mysql_integration.py` accepts 8.0 and 8.4 and checks `caching_sha2_password`; init script sets `caching_sha2_password` and never `mysql_native_password` | A |
+| DEPLOY-18 | Python 3.13: `ARG PYTHON_IMAGE=python:3.13.16-slim-trixie`; `docker/Dockerfile.test` and `examples/verifier/Dockerfile` on the same base; any pinned digest is 64 hex; no `python:3.10-3.12` left outside `qa/`/`devops/` | A |
+| DEPLOY-19 | defect 4/5 guards: no `--forwarded-allow-ips '*'`; gunicorn uses `${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}`; `SSO_NUM_PROXIES` code default 0, compose default 1; compose `SSO_CACHE_URL` default `redis://redis:6379/0`; `web` not published; nginx overwrites XFF | A |
 | DOC-01 | `SSO-server.md` has a front-end integration section usable without help (§7) (R-06) | M |
 | DOC-02 | `SSO-server.md` has a back-end verification section (§8) (R-07) | M |
 | DOC-03 | Clarity review: QA built the automated client and verifier from the docs alone; every place we had to guess is listed in §6 (R-08) | M |
@@ -378,7 +385,7 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | `test_security_cookies_origin.py` | SEC-20..28 |
 | `test_zz_throttle.py` | SEC-30..35, ERR-14 |
 | `test_e2e.py` | E2E-01..08 |
-| `test_deploy_files.py` | DEPLOY-01..08 |
+| `test_deploy_files.py` | DEPLOY-01..08, DEPLOY-15..19 |
 
 ### 4.1 Case counts
 | Area | Automated (A/A\*) | Skipped pending spec (S) | Manual (M) | Total |
@@ -394,8 +401,8 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | Legacy PBKDF2 | 7 | 0 | 2 | 9 |
 | Security | 34 (SEC-01..28, 30..35) | 0 | 4 | 38 |
 | End-to-end | 9 | 0 | 4 | 13 |
-| Deployment / docs | 9 | 0 | 9 | 18 |
-| **Total** | **156** | **2** | **24** | **182** |
+| Deployment / docs | 16 | 0 | 9 | 25 |
+| **Total** | **163** | **2** | **24** | **189** |
 
 pytest collects 211 items because of parametrization (`pytest --collect-only` passes with no errors).
 

@@ -177,3 +177,65 @@ None. The functional log has 0 tracebacks. There are 0 JWTs (`eyJ`) and 0 test p
 
 ## R6. Blocked / not executed (unchanged)
 BLOCKED (Docker/MySQL not available): E2E-10 compose + TLS via nginx; the MySQL 8.4 integration run (grants, caching_sha2_password, collation, Q-27, DB TLS); LEGACY-09 restored `dcWebUsers` copy; SEC-36 nginx checks (incl. defect 4 in situ through nginx); SEC-38 container hardening; DEPLOY-13 suite against MySQL. Not executed: LEGACY-08 (no myFinance), E2E-09 interactive browser run, DEPLOY-14 developer pytest/coverage (it writes outside `qa/`). Still open for Philip: Q-06, Q-09 (proposal to harden LOGOUT-ALL-07), login-CSRF on `/login`, Q-18, Q-22.
+
+---
+
+# Regression @ f22b2e0
+
+| | |
+|---|---|
+| Build under test | branch `sso-server-sprint1` @ `f22b2e0` (`5737b5a` image name / `SSO_UID`/`SSO_GID` / Python 3.13.16, `f22b2e0` `MYSQL_IMAGE` 8.0 + 8.4; on top of `038da9c` docs and `283d2c6` QA/DevOps files). The main checkout was already on this branch at `f22b2e0`, so **no checkout or worktree was needed**. The only uncommitted changes are someone's edits to `devops/DEPLOYMENT-PLAN.md` and `devops/ci/pipeline.yml`; they were left untouched |
+| Diff vs `6e1b479` (outside `qa/`, `devops/`) | 17 files, +263/−60: Dockerfile (base `python:3.13.16-slim-trixie`, runtime `ARG SSO_UID/SSO_GID=10001` with numeric/non-root validation, `USER ${SSO_UID}:${SSO_GID}`); compose `web.image ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}` (replaces `SSO_IMAGE_TAG`), `build.args` + `user:` from the same vars, `SSO_NUM_PROXIES: ${SSO_NUM_PROXIES:-1}`; test/dev compose `image: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}` with per-version named volumes; `Dockerfile.test` and verifier Dockerfile on 3.13.16; `.env.example`/README/dev_setup/gen_keys/`test_both_django.sh` (`PYTHON=` → `.venv-py<ver>-dj52/42`); new `sso/tests/test_mysql_integration.py`; `.gitignore` now ignores `qa/run/`. **No application code changes** (`sso/`, `ssoproject/` unchanged apart from tests) |
+| Python | **CPython 3.13.16** (uv build `~/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu`, the same interpreter as the Developer's `.venv-py3.13.16-dj52`). That venv has no gunicorn or requests, so QA built `qa/.venv-py3.13.16` from it with `requirements.lock` (all 15 pins exactly; mysqlclient left out because there's no MySQL) + verifier + QA test requirements (`qa/run/regression-venv-freeze.txt`). Confirmed: the `start_sso.sh` log line `QA start_sso: Python 3.13.16 …`, and `/proc/<pid>/exe` of the gunicorn master and worker (both phases) and of the uvicorn verifier → `…/cpython-3.13.16…/python3.13` (`qa/run/regression-interpreter.txt`). The verifier log starts with `QA verifier: Python 3.13.16`. pytest also ran on 3.13.16 (`python -VV` at the top of each pytest log) |
+| Environment | As in the retest: fresh throw-away SQLite `qa/run/sso-regression.sqlite3` (migrated + seeded, 33 users), `SSO_DEBUG=False`, `SSO_NUM_PROXIES=0`, 1 worker, file cache per phase (`/tmp/qa-cache-regression-{func,throttle}`), verifier demo on :8001. `PYTHONWARNINGS=default::DeprecationWarning,default::PendingDeprecationWarning` for server/verifier/manage; pytest with `-X dev -W default` |
+| Raw output | `qa/run/regression-pytest-{functional,throttle,static}.log`, `regression-junit-{functional,throttle,static}.xml`, `regression-sso-server-{functional,throttle}.log`, `regression-verifier.log`, `regression-migrate.log`, `regression-seed.log`, `regression-manual-checks.txt`, `regression-sso-demo-defect5.log`, `regression-interpreter.txt`, `regression-venv-freeze.txt` |
+
+## G1. Summary
+
+| | Count |
+|---|---|
+| pytest items | 229 (224 functional/security/static + 5 throttle). New: DEPLOY-15, 16, 16b ×9, 17 ×2, 17b, 18, 19 (= 16 items) |
+| **Passed** | **227** (222 + 5) |
+| **Failed / errors** | **0 / 0** |
+| **Skipped** | 2 (LOGOUT-07 Q-06, LOGOUT-ALL-07 Q-09; unchanged) |
+| Static deploy tests (`-m static`, separate run after a QA-side warning fix) | **31/31 passed**, 0 warnings |
+| E2E-13 (JWKS refetch limit) | PASS |
+| Manual sanity on 3.13.16 | fail-fast (no cache, locmem, empty secret) OK; 3 workers + filecache: 10 accepted / 30 × 429 with 40 different spoofed XFF values |
+| Regressions | **none** |
+
+## G2. Static deploy tests incl. the new parameters
+
+| ID | Result | What was checked |
+|---|---|---|
+| DEPLOY-01..07 | PASS | unchanged checks. **DEPLOY-03 was fixed by QA**: it flagged `devops/DEPLOYMENT-PLAN.md` (working tree), whose text *mentions* `-----BEGIN … PRIVATE KEY-----`. The check now requires a real PEM block (BEGIN line + base64). Verified that it still detects `qa/run/keys/qa-test.private.pem` and ignores the doc mention. No private key is tracked; `qa/run/` (test keys, `sso.env`) is git-ignored and untracked |
+| DEPLOY-08 | PASS | `makemigrations --check` on 3.13.16 |
+| **DEPLOY-15** image name | PASS | `${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}`. Resolves to `thomaschoi/sso-server:latest` (tag unset or empty) and `acme/sso-server:0.1.1` with overrides. `.env.example`: `DOCKER_USER=thomaschoi`, `IMAGE_TAG=0.1.0`. No shipped file still uses `SSO_IMAGE_TAG` |
+| **DEPLOY-16** uid/gid | PASS | `ARG SSO_UID=10001`/`SSO_GID=10001` inside the runtime stage (`Dockerfile:24-25`). Final `USER ${SSO_UID}:${SSO_GID}` (`:59`), with no root USER. `useradd --uid/--gid` from the args with nologin (`:42`). App files `--chown=root:root` (`:48-51`). Compose `build.args` and `user:` use the same vars/defaults (`docker-compose.yml:20-24`) → `10001:10001`, override `1500:1500`. `.env.example` 10001/10001 |
+| **DEPLOY-16b** uid/gid validation | PASS (9 cases) | The Dockerfile's own lines `:37-38` run in `sh`: 10001, 1500, 1000:100 accepted; uid 0, gid 0, `abc`, empty, `-1`, `1e3` rejected |
+| **DEPLOY-17** MYSQL_IMAGE (test + dev compose) | PASS | Default `mysql:8.0` (= README). `MYSQL_IMAGE=mysql:8.4`/`mysql:8.0` and `QA_MYSQL_TAG=8.4`/`8.0` both select; `MYSQL_IMAGE` wins over `QA_MYSQL_TAG`. Volumes `${SSO_TEST_MYSQL_VOLUME:-sso-test-mysql-8.0}` / `${SSO_DEV_MYSQL_VOLUME:-sso-dev-mysql-8.0}`. See G4 #1 on the default |
+| **DEPLOY-17b** | PASS | `SSO_TEST_EXPECT_MYSQL` is the same expression as the image. The integration test accepts 8.0 and 8.4 and checks `caching_sha2_password`. The init script sets `caching_sha2_password` and never `mysql_native_password` |
+| **DEPLOY-18** Python 3.13 | PASS | `ARG PYTHON_IMAGE=python:3.13.16-slim-trixie`. `docker/Dockerfile.test` and `examples/verifier/Dockerfile` use the same base. Digest comment is 64 hex. No `python:3.10–3.12` left outside `qa/`/`devops/` |
+| **DEPLOY-19** defect 4/5 guards | PASS | no `--forwarded-allow-ips '*'`; `${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}`; code `SSO_NUM_PROXIES` default 0, compose default 1; compose `SSO_CACHE_URL` default `redis://redis:6379/0`; `web` not published; nginx `X-Forwarded-For $remote_addr` |
+
+Not verifiable without Docker (BLOCKED): that the image actually builds on 3.13.16 with the args, `docker compose config --images`, that the container runs as the uid, and that a MySQL 8.0/8.4 login works.
+
+## G3. Warnings (Python 3.13.16)
+- **DeprecationWarning / PendingDeprecationWarning / RemovedInDjango\*: none.** That covers the server (both phases), the verifier, migrate, seed and pytest, with warnings enabled.
+- `CacheKeyWarning` (Info, not a regression): `sso/throttles.py:52` keys the per-username throttle on the raw lowercased username (up to 254 chars). A long username in LOGIN tests gives a key over 250 chars, and Django warns it would fail on memcached. There's no effect on Redis or the file cache. The fix would be to hash the ident if memcached is ever used.
+- `UserWarning: No directory at …/staticfiles/` (Info, environment): WhiteNoise, because `collectstatic` isn't run outside the image (the Dockerfile runs it at build time).
+- `ResourceWarning` ×95 under `-X dev` in **QA's own** `test_deploy_files.py` (unclosed files). Fixed in QA (`_text()` helper); the static re-run shows 0 warnings.
+- `check --deploy` W004/W008 (HSTS, SSL redirect) are expected for the plain-HTTP QA config (`SSO_HSTS_SECONDS=0`, `SSO_SSL_REDIRECT=False`).
+
+## G4. Observations (no test failed)
+1. **Low (docs / decision): the MYSQL_IMAGE default is inconsistent across documents.** Code and README default to `mysql:8.0` (`docker-compose.test.yml:18`, `docker-compose.dev.yml:36`, README §2 "default `mysql:8.0`", "prod 8.0 today"). The uncommitted DevOps draft `devops/DEPLOYMENT-PLAN.md` §2.1 and R29 still say `mysql:${QA_MYSQL_TAG:-8.4}` (lines 94, 853). The QA request for this round also assumed "defaults to 8.4". Both versions are selectable, and DEPLOY-17 asserts the compose default equals the README's documented default (8.0 today). Philip/DevOps need to pick one, after which the other document should be aligned.
+2. **Low: `SSO_UID=0` with a pulled image runs the container as root.** The Dockerfile rejects 0 only at **build** time. `docker-compose.yml:24` `user: "${SSO_UID:-10001}:${SSO_GID:-10001}"` passes any value at **run** time, so `SSO_UID=0` in `.env` with a pre-built Docker Hub image would give a root container. `.env.example` says "Never 0", but nothing enforces it. Suggested fix: a startup check (e.g. in settings or `docker/healthcheck.py`: refuse if `os.getuid()==0` and not DEBUG).
+3. **Info:** the Developer's `.venv-py3.13.16-dj52` (from `requirements-dev.txt`) has no gunicorn, so the documented `.venv/bin/gunicorn` dev command in README needs `pip install gunicorn` (or `requirements.txt`) in that venv. The pins in `requirements.lock` install cleanly on 3.13.16, which confirms the lock's claim apart from mysqlclient.
+
+## G5. QA-side changes (inside `qa/` only)
+- `tests/test_deploy_files.py`: new DEPLOY-15/16/16b/17/17b/18/19 (with a small compose `${…}` interpolator). DEPLOY-03 now matches real PEM blocks only. File reads are closed (`_text()`).
+- `TEST-PLAN.md`: DEPLOY-15..19 rows; totals 163 A / 2 S / 24 M = 189.
+- `run/start_sso.sh`, `run/manage.sh`: `SSO_VENV` selects the venv (default `.venv`); the server log's first line records the interpreter. `run/sso.env`: `SSO_VENV=qa/.venv-py3.13.16`, `PYTHONWARNINGS`, DB `sso-regression.sqlite3`, cache `filecache:///tmp/qa-cache-regression`. `run/regression.env` (`SSO_ACCESS_LOG`). New venv `qa/.venv-py3.13.16`.
+- All servers stopped (8000, 8001, 8003). `/tmp/qa-cache*` removed.
+
+## G6. Blocked / not executed (unchanged)
+BLOCKED (no Docker/MySQL): E2E-10 compose + TLS via nginx; the MySQL integration run on **8.0 and 8.4** (`docker-compose.test.yml` incl. `test_mysql_integration.py`: version, `caching_sha2_password`, grants, TLS); building the image with `SSO_UID/SSO_GID` and checking the runtime uid; `docker compose config --images`; LEGACY-09; SEC-36 (nginx); SEC-38 (container hardening); DEPLOY-13 against MySQL. Not executed: LEGACY-08 (no myFinance), E2E-09 (browser), DEPLOY-14 (Developer pytest/coverage, writes outside `qa/`).
