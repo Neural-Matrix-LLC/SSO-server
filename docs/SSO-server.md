@@ -109,7 +109,9 @@ Payload:
 - `sub` is `auth_user.id` as a string. Services should key their data on `sub`, not `username`.
 - `groups` are Django group names. **Authorization uses groups**: a service decides what a group may do.
 - `perms` (v1.1, docs/sso-integration-design.md A2): the user's `application.*` permissions only (direct + via
-  groups; superusers get all `application.*`; inactive users none), sorted. An app checks its own permission,
+  groups; superusers get all `application.*` unless `SSO_SUPERUSER_ALL_APPS=false`; inactive users none),
+  sorted, always present (`[]` when none). Login/refresh also accept ServiceClient Basic auth + `client_ip`
+  for server-side callers (README §6a). An app checks its own permission,
   e.g. `application.app1`. Recomputed on every refresh.
 - Keep the token small: no full permissions list (only `application.*`), no personal data beyond the above.
 

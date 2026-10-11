@@ -123,6 +123,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_ALLOWED_HOSTS` | — | Comma list. The first entry is also the Host header the container healthcheck sends |
 | `SSO_ISSUER` | — | **Required.** The public base URL, which becomes the JWT `iss` and the root of the discovery URLs. No domain is built into the code |
 | `SSO_AUDIENCE` | `myfin-services` | JWT `aud` (access and refresh tokens) |
+| `SSO_SUPERUSER_ALL_APPS` | `true` | Superusers get every `application.*` permission in `perms` (Django's rule). `false`: only explicit grants (§6a). Pending Thomas's confirmation |
 | `SSO_DB_ENGINE` | `mysql` | `mysql` or `sqlite` |
 | `SSO_DBHOST` / `SSO_DBPORT` / `SSO_DBNAME` / `SSO_DBUSER` / `SSO_DBPWD` | `127.0.0.1` / `3306` / `dcWebUsers` / — / — | MySQL connection (runtime account `sso_app`, DML only) |
 | `SSO_DB_SSL_CA` / `SSO_DB_SSL_MODE` | — / — | Optional DB TLS. With a CA, the mode defaults to `VERIFY_CA`. Modes: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY`. A missing CA file stops start-up |
@@ -285,17 +286,31 @@ One permission per application, checked by that application in the access token'
   Idempotent (re-running only updates the description, grants are kept). Codename `^[a-z][a-z0-9_]{1,62}$`.
 * **See them:** admin → Applications → "Application permissions" (read-only list with grant counts) and
   "Application permission records" (the SSO-side registry).
-* Tokens export only `application.*` permissions, never the full Django permission list.
+* Tokens export only `application.*` permissions, never the full Django permission list. `perms` is always
+  present (`[]` when the user has none).
+* Superusers: every `application.*` permission while `SSO_SUPERUSER_ALL_APPS=true` (default); set it to
+  `false` to make superusers need explicit grants too.
+* Grant revocation takes effect at the next refresh, i.e. up to the access-token lifetime (15 min); accepted.
+
+**Server-side logins (apps like llm-wiki-svc).** An app that calls `/api/v1/auth/login` and `/refresh` from
+its server would make every one of its users share the app's per-IP throttle. Register it as a ServiceClient
+(§6) and have it send HTTP Basic `client_id:client_secret` plus `"client_ip": "<end user's IP>"` in the JSON
+body: then the per-IP throttle and the login log use `client_ip`. Without valid Basic auth (missing, wrong
+secret, inactive client) `client_ip` is ignored and the request is handled as before, from the caller's
+address. A non-IP `client_ip` is ignored (logged). The per-username throttle is unchanged.
 
 > **WARNING: shared `django_content_type` / `auth_permission`.** These tables belong to myFinance as much as
 > to SSO. Running **`manage.py remove_stale_contenttypes` in myFinance** (which does not know the
 > `application` app) deletes the `application.applicationaccess` content type, and the database
 > CASCADE-deletes every `application.*` permission **and every user/group grant of them**: everybody loses access
-> to every app at once. SSO keeps its own registry of the permissions (`sso_application_permission_record`) and its
-> post-migrate step recreates any missing permission on the next `manage.py migrate` (logging an ERROR
-> "ALL GRANTS ... WERE LOST" on logger `sso.application`), **but the grants cannot be recovered**: re-assign them
-> (or restore `auth_user_user_permissions` / `auth_group_permissions` from the backup). Tell the myFinance
-> maintainers never to run `remove_stale_contenttypes` (or to answer "no" for `application`).
+> to every app at once. On the next `manage.py migrate`, SSO's post-migrate step recreates the **code-defined**
+> permissions (`application.app1`) and logs an ERROR "ALL GRANTS ... WERE LOST" on logger `sso.application`,
+> listing every lost permission. **Command-created permissions (`create_app_permission`, e.g. app2) are not
+> recreated** (design v1.1, Q-13): they are named in that ERROR once (SSO's registry,
+> `sso_application_permission_record`, remembers them) and you re-run `create_app_permission` for those still
+> wanted. **Grants cannot be recovered** either way: re-assign them (or restore `auth_user_user_permissions` /
+> `auth_group_permissions` from the backup). Tell the myFinance maintainers never to run
+> `remove_stale_contenttypes` (or to answer "no" for `application`).
 
 ## 8. API summary
 
