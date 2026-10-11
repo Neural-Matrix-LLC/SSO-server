@@ -204,3 +204,16 @@ dedicated ports, users with and without `application.app1` (direct and via group
 - Invalid `client_ip` with valid service credentials → 400 `invalid_request` (Q-28).
 - Cookie Max-Age = remaining absolute lifetime (Q-26). Idle timeout `SESSION_IDLE_HOURS` default 12 (Q-27).
 - An invalid explicit Bearer → 401 even if a valid cookie is present (Q-31). Missing `kid` → reject (Q-14).
+
+### Implementation notes (Developer, 2026-10-10, after QA round 1) — descriptive, not new decisions
+- `/mcp` accepts a Bearer token only (an SSO access token with the permission; the static token in `both`, and in
+  `static` + `SSO_PROTECT_READS=true`). The `llmwiki_session` cookie is never accepted there, so `/mcp` has no
+  CSRF surface (a browser cannot attach an `Authorization` header cross-site). QA open question 9.
+- `last_seen` is written at most once a minute (to avoid a write per request), so the `SESSION_IDLE_HOURS` idle
+  timeout can be off by up to 60 s. The absolute lifetime (`created_at`) is exact.
+- `GET /login` while already signed in answers 303 to the sanitised `next` (default `/dashboard`; off-site or
+  unsafe `next` values fall back to `/dashboard`) instead of showing the form (Q-08).
+- A failed re-login (wrong password, no permission, unknown user, SSO error) keeps the existing session: the
+  session row and cookie are untouched; only a successful login sets a new session cookie (Q-10).
+- `Cache-Control: no-store` on every `/login`, `/logout` and `/dashboard` response in `sso`/`both` (Q-20); not in
+  `static`, whose `/dashboard` stays byte-for-byte unchanged.
