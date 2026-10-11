@@ -214,6 +214,9 @@ dedicated ports, users with and without `application.app1` (direct and via group
 - `GET /login` while already signed in answers 303 to the sanitised `next` (default `/dashboard`; off-site or
   unsafe `next` values fall back to `/dashboard`) instead of showing the form (Q-08).
 - A failed re-login (wrong password, no permission, unknown user, SSO error) keeps the existing session: the
-  session row and cookie are untouched; only a successful login sets a new session cookie (Q-10).
+  session row and cookie are untouched (Q-10).
+- A successful login while a session cookie is present rotates the session: the old row is deleted, a new
+  session id, cookie and CSRF value are issued, and the old refresh token is logged out at the SSO best effort
+  (a failure or SSO outage is logged and does not block the login). The old cookie stops working at once.
 - `Cache-Control: no-store` on every `/login`, `/logout` and `/dashboard` response in `sso`/`both` (Q-20); not in
   `static`, whose `/dashboard` stays byte-for-byte unchanged.
