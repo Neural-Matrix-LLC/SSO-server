@@ -149,3 +149,58 @@ dedicated ports, users with and without `application.app1` (direct and via group
 - README/docs: new env vars, how to grant `application.app1`, how to add `app2`, local dev recipe running both
   services, and the shared-content-type warning.
 - Nothing pushed; Philip reviews, QA tests, then Philip pushes the two feature branches.
+
+---------------------------------------------------------------------------------------------------------
+## v1.1 changes (Philip, after QA design review 2026-10-10) — these override v1.0 above
+
+1. **MCP is protected (QA D-01).** `/mcp` is mounted outside the router, so wrap the mounted MCP ASGI app in an
+   auth middleware using the same rules as `require_auth`: in `sso` mode SSO token + permission; in `both`
+   mode SSO token or static token. In `static` mode behaviour is unchanged (still open) but log a WARNING at
+   startup ("MCP is unauthenticated in AUTH_MODE=static"). Supersedes "no MCP code change needed".
+2. **Server-side sessions (D-02, D-04, D-05, D-13).** Replace the signed-cookie design: cookie
+   `llmwiki_session` holds only a random 256-bit session id; tokens live server-side in SQLite
+   (`SESSION_DB_PATH`, default `<data dir>/sessions.sqlite3`), columns: id hash (SHA-256), username, sub,
+   access, refresh, access_exp, csrf, created_at, last_seen. Logout and refresh failure delete the row.
+   Absolute lifetime `SESSION_MAX_AGE_HOURS` (default 168); no sliding beyond it. Prune expired rows on start
+   and hourly.
+   Refresh race: a per-session lock (process-local asyncio lock + `BEGIN IMMEDIATE` row update) so only one
+   refresh runs; concurrent requests wait and reuse the new access token. Document that multiple uvicorn
+   workers share the SQLite file, so the DB transaction is the real guard.
+3. **CSRF on cookie writes (D-06, Q-04).** Any non-GET request authenticated by the session cookie must send
+   `X-CSRF-Token` equal to the session's csrf value (exposed to the dashboard page in a meta tag); forms use a
+   hidden field. Bearer-authenticated requests are exempt.
+4. **Per-user throttling at SSO (D-03).** SSO-server: `/api/v1/auth/login` and `/refresh` accept HTTP Basic auth
+   from a registered, active `ServiceClient` plus a JSON field `client_ip`; only then the IP throttle and login log
+   use `client_ip` (validated as an IP) instead of the caller address. Without valid Basic auth the field is
+   ignored. llm-wiki gets `SSO_CLIENT_ID` / `SSO_CLIENT_SECRET` (required in sso/both mode) and sends the
+   browser's IP. Per-username throttle unchanged.
+5. **Static mode is byte-for-byte unchanged (D-07, D-08, Q-01).** In `static` mode: no `/login`/`/logout` routes
+   (404), same 401 bodies and headers as today, `SSO_PROTECT_READS` still applies (requires the static token).
+   Revert edits to existing tests (e.g. tests/unit/test_layering.py) unless a test is genuinely wrong — then
+   explain it in the report.
+6. **Static token fallback in `both` mode (D-09, Q-16).** Try SSO verification when the bearer parses as a JWT;
+   if verification fails, fall back to the constant-time static compare. In `sso`/`both` mode refuse to start if
+   `INGEST_API_TOKEN` is `changeme` or shorter than 24 chars; in `static` mode only warn.
+7. **Session edge cases.** SSO unreachable/5xx during refresh: keep the session; if the access token is still
+   valid continue, else 503 "Login service unavailable" (HTML) / 503 JSON — do not clear the session (Q-05).
+   Refresh that no longer carries the permission → delete session, 403 page (Q-06). HTML route with an invalid
+   explicit Bearer → 401; no credentials at all → 303 to `/login` (Q-07).
+8. **SSO claim details.** `perms` is always present, `[]` when none (Q-11). Superusers get every
+   `application.*` permission, which is Django's normal rule (D-11/Q-17) — pending Thomas's confirmation, keep
+   it but make it switchable on the SSO server with `SSO_SUPERUSER_ALL_APPS` (default true). Post-migrate
+   recreates only code-defined permissions (app1); command-created ones are documented (Q-13).
+9. `SESSION_SECRET` is no longer needed (server-side sessions); drop it. Grant revocation can take up to the
+   access lifetime (15 min) — documented, accepted (D-10).
+
+### v1.2 clarifications (Philip, 2026-10-10, after QA plan v1.1)
+- Session DB file mode 0600, its directory 0700 if created by us; refuse to start if the file is group/world-readable (D-16).
+- Client IP (C-11/Q-25): `CLIENT_IP_HEADER` (default empty = peer address; e.g. `cf-connecting-ip` or `x-forwarded-for`)
+  is honoured only when the peer is in `TRUSTED_PROXY_IPS` (CIDR list). Document cloudflared + uvicorn `--proxy-headers`.
+- `static` + `SSO_PROTECT_READS=true` also requires the static token on `/mcp` (C-12).
+- CSRF applies to POST/PUT/PATCH/DELETE only (C-13); failure → 403 `{"error":"csrf_failed"}` (Q-30).
+- SSO unreachable → 503 everywhere, login included (C-14).
+- Wrong service credentials: SSO answers 401 `invalid_client` (no silent fallback); llm-wiki logs an error and shows
+  "Login service misconfigured" 503 (C-19). Leaked secret risk accepted; per-username throttle still applies; rotate via admin (C-18).
+- Invalid `client_ip` with valid service credentials → 400 `invalid_request` (Q-28).
+- Cookie Max-Age = remaining absolute lifetime (Q-26). Idle timeout `SESSION_IDLE_HOURS` default 12 (Q-27).
+- An invalid explicit Bearer → 401 even if a valid cookie is present (Q-31). Missing `kid` → reject (Q-14).
