@@ -49,6 +49,9 @@ if not SSO_ISSUER:
         raise ImproperlyConfigured("SSO_ISSUER is empty (the public base URL, e.g. https://sso.example.com).")
     SSO_ISSUER = "http://localhost:8000"
 SSO_AUDIENCE = env.str("SSO_AUDIENCE", default="myfin-services")
+# Superusers get every application.* permission in the perms claim (Django's rule). false = only explicit
+# grants count for them too (docs/sso-integration-design.md v1.1 item 8; pending Thomas's confirmation).
+SSO_SUPERUSER_ALL_APPS = env.bool("SSO_SUPERUSER_ALL_APPS", default=True)
 
 ALLOWED_HOSTS = env.list("SSO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"] if DEBUG else [])
 CSRF_TRUSTED_ORIGINS = env.list("SSO_CSRF_TRUSTED_ORIGINS", default=[])

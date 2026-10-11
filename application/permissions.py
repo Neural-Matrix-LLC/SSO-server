@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 import re
 
+from django.conf import settings
 from django.contrib.auth.models import Permission
+from django.db.models import Q
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
@@ -43,28 +45,39 @@ def ensure_permission(codename: str, name: str, using: str = "default") -> tuple
 
 
 def sync_permissions(using: str = "default") -> list[str]:
-    """Recreate missing ``application.*`` permissions from the model Meta and the SSO-side registry.
+    """After migrate: recreate the code-defined permissions (``ApplicationAccess.Meta.permissions``,
+    i.e. app1) and report every ``application.*`` permission that was lost (design v1.1 item 8).
 
-    Returns the codenames whose permission row had to be (re)created after it was known before, i.e. whose
-    grants were lost. Each one is logged as an error.
+    Command-created permissions (``create_app_permission``) are NOT recreated: they are reported, and their
+    registry record is dropped so the report appears once; re-run ``create_app_permission`` to restore one.
+    Returns the codenames whose permission row had been deleted (their grants are gone). Logged as ERROR.
     """
-    wanted = {code: name for code, name in ApplicationAccess._meta.permissions}
+    code_defined = {code: name for code, name in ApplicationAccess._meta.permissions}
     records = {r.codename: r for r in ApplicationPermissionRecord.objects.using(using).all()}
-    for code, rec in records.items():
-        wanted.setdefault(code, rec.name)
-    lost = []
     ct = anchor_content_type(using)
-    for code, name in sorted(wanted.items()):
+    lost, not_recreated = [], []
+    for code, name in sorted(code_defined.items()):
         before = records.get(code)
-        perm, created = ensure_permission(code, name, using=using)
+        perm, _ = ensure_permission(code, name, using=using)
         if before is not None and before.permission_id is not None and before.permission_id != perm.pk:
             lost.append(code)
+    existing = set(Permission.objects.db_manager(using).filter(content_type=ct).values_list("codename", flat=True))
+    for code, rec in sorted(records.items()):
+        if code in code_defined or code in existing:
+            continue
+        lost.append(code)
+        not_recreated.append(code)
+        rec.delete()
     if lost:
         logger.error(
-            "application permissions %s were deleted and have been recreated (content type id %s). ALL GRANTS OF "
-            "THESE PERMISSIONS WERE LOST and must be re-assigned. Likely cause: remove_stale_contenttypes run in "
-            "myFinance on the shared dcWebUsers database (README 'Application permissions').",
-            ", ".join(PREFIX + c for c in lost), ct.pk)
+            "application permissions %s were deleted (content type id %s now). ALL GRANTS OF THESE PERMISSIONS "
+            "WERE LOST and must be re-assigned. Recreated: %s. Not recreated (command-created; run "
+            "manage.py create_app_permission again if still wanted): %s. Likely cause: "
+            "remove_stale_contenttypes run in myFinance on the shared dcWebUsers database "
+            "(README 'Application permissions').",
+            ", ".join(PREFIX + c for c in lost), ct.pk,
+            ", ".join(PREFIX + c for c in lost if c not in not_recreated) or "-",
+            ", ".join(PREFIX + c for c in not_recreated) or "-")
     return lost
 
 
@@ -74,7 +87,18 @@ def sync_after_migrate(sender, using="default", **kwargs) -> None:
 
 
 def user_app_perms(user) -> list[str]:
-    """Sorted ``application.*`` permissions of a user (direct + groups; superuser = all; inactive = none)."""
+    """Sorted ``application.*`` permissions of a user: direct + via groups; inactive users none.
+
+    Superusers get every ``application.*`` permission (Django's rule) while ``SSO_SUPERUSER_ALL_APPS`` is
+    true (default; design v1.1 item 8, pending Thomas's confirmation). With it false a superuser needs
+    explicit grants like everybody else.
+    """
     if user is None or not getattr(user, "is_active", False):
         return []
+    if user.is_superuser and not getattr(settings, "SSO_SUPERUSER_ALL_APPS", True):
+        codes = (Permission.objects.filter(Q(user=user) | Q(group__user=user),
+                                           content_type__app_label="application",
+                                           content_type__model="applicationaccess")
+                 .values_list("codename", flat=True).distinct())
+        return sorted(PREFIX + c for c in codes)
     return sorted(p for p in user.get_all_permissions() if p.startswith(PREFIX))

@@ -74,6 +74,24 @@ def test_superuser_gets_all_and_only_application_perms(make_user):
     assert user_app_perms(u) == ["application.app1", "application.app2"]  # no auth.*/sso.* permissions
 
 
+def test_superuser_all_apps_switch_off(make_user, settings):
+    """SSO_SUPERUSER_ALL_APPS=false: a superuser needs explicit grants like everybody else."""
+    settings.SSO_SUPERUSER_ALL_APPS = False
+    ensure_permission("app2", "Can use app2")
+    u = make_user(is_superuser=True, groups=("wiki",))
+    assert user_app_perms(u) == []
+    Group.objects.get(name="wiki").permissions.add(app_perm("app2"))
+    u.user_permissions.add(app_perm("app1"), app_perm("app2"))
+    assert user_app_perms(type(u).objects.get(pk=u.pk)) == ["application.app1", "application.app2"]
+
+
+def test_superuser_all_apps_in_the_token(api, make_user, settings):
+    make_user(is_superuser=True)
+    assert access_claims(login(api).json()["access_token"])["perms"] == ["application.app1"]
+    settings.SSO_SUPERUSER_ALL_APPS = False
+    assert access_claims(login(api).json()["access_token"])["perms"] == []
+
+
 def test_inactive_user_gets_none(make_user):
     u = make_user(is_active=False, is_superuser=True)
     u.user_permissions.add(app_perm())
@@ -188,7 +206,8 @@ def test_create_app_permission_rejects_empty_description():
 
 
 # ---------------------------------------------------------------- A3: remove_stale_contenttypes in myFinance
-def test_sync_recreates_permissions_after_content_type_deleted(make_user, caplog):
+def test_sync_recreates_only_code_defined_permissions_after_content_type_deleted(make_user, caplog):
+    """v1.1 item 8 (Q-13): app1 (Meta) is recreated; command-created app2 is reported, not recreated."""
     ensure_permission("app2", "Can use app2")
     u = make_user()
     u.user_permissions.add(app_perm("app1"), app_perm("app2"))
@@ -199,13 +218,25 @@ def test_sync_recreates_permissions_after_content_type_deleted(make_user, caplog
     caplog.set_level(logging.ERROR, logger="sso.application")
     lost = sync_permissions()
     assert lost == ["app1", "app2"]
-    assert app_perm("app1") and app_perm("app2").name == "Can use app2"  # recreated from Meta + registry
+    assert app_perm("app1")
+    assert not Permission.objects.filter(content_type__app_label="application", codename="app2").exists()
     assert "ALL GRANTS OF THESE PERMISSIONS WERE LOST" in caplog.text
+    assert "Not recreated (command-created; run manage.py create_app_permission again" in caplog.text
+    assert "application.app2" in caplog.text
+    assert not ApplicationPermissionRecord.objects.filter(codename="app2").exists()  # reported once
     assert user_app_perms(type(u).objects.get(pk=u.pk)) == []  # grants are gone; must be re-assigned
     # a second run is quiet
     caplog.clear()
     assert sync_permissions() == []
     assert caplog.text == ""
+    call_command("create_app_permission", "app2", "Can use app2")  # the documented way back
+    assert app_perm("app2")
+
+
+def test_sync_keeps_existing_command_created_permissions(make_user):
+    ensure_permission("app2", "Can use app2")
+    assert sync_permissions() == []
+    assert app_perm("app2") and ApplicationPermissionRecord.objects.filter(codename="app2").exists()
 
 
 def test_migrate_runs_the_sync(make_user, caplog):
@@ -214,8 +245,9 @@ def test_migrate_runs_the_sync(make_user, caplog):
     ContentType.objects.clear_cache()
     caplog.set_level(logging.ERROR, logger="sso.application")
     call_command("migrate", "application", verbosity=0)
-    assert app_perm("app1") and app_perm("app2")
-    assert "application.app1, application.app2" in caplog.text
+    assert app_perm("app1")
+    assert not Permission.objects.filter(content_type__app_label="application", codename="app2").exists()
+    assert "application.app1, application.app2 were deleted" in caplog.text
 
 
 def test_admin_lists_only_application_permissions(make_user, client):

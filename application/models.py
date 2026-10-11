@@ -31,9 +31,9 @@ class ApplicationPermissionRecord(models.Model):
     """SSO-side registry of every ``application.*`` permission (design A3).
 
     Lives in an SSO-owned table, so it survives a ``remove_stale_contenttypes`` run in myFinance. After
-    each ``migrate``, missing permissions are recreated from it. ``permission_id`` is a plain integer (no
-    foreign key, so it is not cascade-deleted); a mismatch means the permission row was deleted and
-    recreated, i.e. the grants were lost, and is logged loudly.
+    each ``migrate`` it is used to REPORT lost permissions (design v1.1 item 8: only the code-defined ones
+    are recreated). ``permission_id`` is a plain integer (no foreign key, so it is not cascade-deleted); a
+    mismatch means the permission row was deleted and recreated, i.e. the grants were lost.
     """
 
     codename = models.CharField(max_length=100, unique=True)
