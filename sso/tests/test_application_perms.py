@@ -68,28 +68,90 @@ def test_perm_via_group_and_sorted(make_user):
     assert user_app_perms(u) == ["application.app1", "application.app2"]
 
 
-def test_superuser_gets_all_and_only_application_perms(make_user):
+def test_superuser_without_grants_gets_no_perms(make_user):
+    """Default (SSO_SUPERUSER_ALL_APPS=false): superusers administer users, no automatic app access."""
+    from django.conf import settings
+
+    assert settings.SSO_SUPERUSER_ALL_APPS is False
+    ensure_permission("app2", "Can use app2")
+    u = make_user(is_superuser=True, is_staff=True)
+    assert u.has_perm("application.app1")  # Django's rule, which perms must NOT follow
+    assert user_app_perms(u) == []
+
+
+def _service_basic() -> dict:
+    c = ServiceClient(client_id="wiki", name="llm-wiki")
+    c.set_secret("s3cr3t-value")
+    c.save()
+    return {"HTTP_AUTHORIZATION": "Basic " + base64.b64encode(b"wiki:s3cr3t-value").decode()}
+
+
+def test_superuser_with_no_grants_is_denied_in_token_me_and_introspect(api, make_user):
+    make_user(is_superuser=True, is_staff=True)
+    r = login(api)
+    body = r.json()
+    assert body["user"]["perms"] == []
+    assert access_claims(body["access_token"])["perms"] == []
+    assert api.get("/api/v1/auth/me", **bearer(body["access_token"])).json()["perms"] == []
+    r = api.post("/api/v1/auth/introspect", {"token": body["access_token"]}, format="json",
+                 **_service_basic())
+    assert r.status_code == 200 and r.json()["active"] is True and r.json()["perms"] == []
+    new = refresh(api, body["refresh_token"]).json()["access_token"]
+    assert access_claims(new)["perms"] == []
+
+
+@pytest.mark.parametrize("via", ["user", "group"])
+def test_superuser_with_an_explicit_grant_gets_exactly_that(make_user, api, via):
+    ensure_permission("app2", "Can use app2")
+    ensure_permission("app3", "Can use app3")
+    u = make_user(is_superuser=True, groups=("wiki",))
+    if via == "user":
+        u.user_permissions.add(app_perm("app2"))
+    else:
+        Group.objects.get(name="wiki").permissions.add(app_perm("app2"))
+    assert user_app_perms(type(u).objects.get(pk=u.pk)) == ["application.app2"]
+    assert access_claims(login(api).json()["access_token"])["perms"] == ["application.app2"]
+
+
+def test_superuser_grants_via_user_and_group_are_merged_once(make_user):
+    u = make_user(is_superuser=True, groups=("wiki", "other"))
+    Group.objects.get(name="wiki").permissions.add(app_perm())
+    Group.objects.get(name="other").permissions.add(app_perm())
+    u.user_permissions.add(app_perm())
+    u.user_permissions.add(Permission.objects.get(codename="change_user"))  # not application.*
+    assert user_app_perms(type(u).objects.get(pk=u.pk)) == ["application.app1"]
+
+
+def test_flag_true_restores_all_apps_for_superusers(api, make_user, settings):
+    settings.SSO_SUPERUSER_ALL_APPS = True
     ensure_permission("app2", "Can use app2")
     u = make_user(is_superuser=True)
     assert user_app_perms(u) == ["application.app1", "application.app2"]  # no auth.*/sso.* permissions
-
-
-def test_superuser_all_apps_switch_off(make_user, settings):
-    """SSO_SUPERUSER_ALL_APPS=false: a superuser needs explicit grants like everybody else."""
-    settings.SSO_SUPERUSER_ALL_APPS = False
-    ensure_permission("app2", "Can use app2")
-    u = make_user(is_superuser=True, groups=("wiki",))
-    assert user_app_perms(u) == []
-    Group.objects.get(name="wiki").permissions.add(app_perm("app2"))
-    u.user_permissions.add(app_perm("app1"), app_perm("app2"))
-    assert user_app_perms(type(u).objects.get(pk=u.pk)) == ["application.app1", "application.app2"]
-
-
-def test_superuser_all_apps_in_the_token(api, make_user, settings):
-    make_user(is_superuser=True)
-    assert access_claims(login(api).json()["access_token"])["perms"] == ["application.app1"]
+    assert access_claims(login(api).json()["access_token"])["perms"] == [
+        "application.app1", "application.app2"]
     settings.SSO_SUPERUSER_ALL_APPS = False
     assert access_claims(login(api).json()["access_token"])["perms"] == []
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_normal_users_are_unaffected_by_the_flag(make_user, settings, flag):
+    settings.SSO_SUPERUSER_ALL_APPS = flag
+    ensure_permission("app2", "Can use app2")
+    u = make_user(groups=("readers",))
+    assert user_app_perms(u) == []
+    Group.objects.get(name="readers").permissions.add(app_perm("app2"))
+    u.user_permissions.add(app_perm("app1"))
+    u = type(u).objects.get(pk=u.pk)
+    assert user_app_perms(u) == ["application.app1", "application.app2"]
+    assert user_app_perms(u) == sorted(p for p in u.get_all_permissions() if p.startswith("application."))
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_inactive_superuser_gets_none(make_user, settings, flag):
+    settings.SSO_SUPERUSER_ALL_APPS = flag
+    u = make_user(is_active=False, is_superuser=True)
+    u.user_permissions.add(app_perm())
+    assert user_app_perms(u) == []
 
 
 def test_inactive_user_gets_none(make_user):

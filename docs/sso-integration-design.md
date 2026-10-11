@@ -220,3 +220,11 @@ dedicated ports, users with and without `application.app1` (direct and via group
   (a failure or SSO outage is logged and does not block the login). The old cookie stops working at once.
 - `Cache-Control: no-store` on every `/login`, `/logout` and `/dashboard` response in `sso`/`both` (Q-20); not in
   `static`, whose `/dashboard` stays byte-for-byte unchanged.
+
+### Superusers and app access (decision relayed by Philip, 2026-10-11) — overrides v1.1 item 8's default
+- Superusers are for administering `dcWebUsers`, not for automatic app access. `SSO_SUPERUSER_ALL_APPS` now
+  defaults to **false**; the flag is kept (the design never said to remove it) as an explicit opt-in to the old rule.
+- `perms` (tokens, `/me`, `/introspect`, the login `user` object) is computed from real permission rows: the user's
+  `user_permissions` plus their groups' permissions, filtered to the `application` app. This replaces A2's
+  `get_all_permissions()` formula, which (like `has_perm()`) returns everything for a superuser; no app-access
+  check uses either. Normal users get the same result as before; inactive users still get `[]`.

@@ -123,7 +123,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_ALLOWED_HOSTS` | — | Comma list. The first entry is also the Host header the container healthcheck sends |
 | `SSO_ISSUER` | — | **Required.** The public base URL, which becomes the JWT `iss` and the root of the discovery URLs. No domain is built into the code |
 | `SSO_AUDIENCE` | `myfin-services` | JWT `aud` (access and refresh tokens) |
-| `SSO_SUPERUSER_ALL_APPS` | `true` | Superusers get every `application.*` permission in `perms` (Django's rule). `false`: only explicit grants (§6a). Pending Thomas's confirmation |
+| `SSO_SUPERUSER_ALL_APPS` | `false` | Superusers administer users; like everybody else they get only their explicit `application.*` grants (user or group) in `perms` (§6a). `true` (opt-in): every active superuser gets all `application.*` permissions |
 | `SSO_DB_ENGINE` | `mysql` | `mysql` or `sqlite` |
 | `SSO_DBHOST` / `SSO_DBPORT` / `SSO_DBNAME` / `SSO_DBUSER` / `SSO_DBPWD` | `127.0.0.1` / `3306` / `dcWebUsers` / — / — | MySQL connection (runtime account `sso_app`, DML only) |
 | `SSO_DB_SSL_CA` / `SSO_DB_SSL_MODE` | — / — | Optional DB TLS. With a CA, the mode defaults to `VERIFY_CA`. Modes: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY`. A missing CA file stops start-up |
@@ -288,8 +288,10 @@ One permission per application, checked by that application in the access token'
   "Application permission records" (the SSO-side registry).
 * Tokens export only `application.*` permissions, never the full Django permission list. `perms` is always
   present (`[]` when the user has none).
-* Superusers: every `application.*` permission while `SSO_SUPERUSER_ALL_APPS=true` (default); set it to
-  `false` to make superusers need explicit grants too.
+* Superusers administer `dcWebUsers`; they get **no automatic app access**. `perms` is computed from real
+  permission rows (the user's own grants plus their groups', filtered to `application.*`), never from
+  Django's `get_all_permissions()` / `has_perm()`, which return everything for a superuser. Grant a
+  superuser an app like any other user. `SSO_SUPERUSER_ALL_APPS=true` restores the old all-apps rule.
 * Grant revocation takes effect at the next refresh, i.e. up to the access-token lifetime (15 min); accepted.
 
 **Server-side logins (apps like llm-wiki-svc).** An app that calls `/api/v1/auth/login` and `/refresh` from

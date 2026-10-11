@@ -51,7 +51,9 @@ if not SSO_ISSUER:
 SSO_AUDIENCE = env.str("SSO_AUDIENCE", default="myfin-services")
 # Superusers get every application.* permission in the perms claim (Django's rule). false = only explicit
 # grants count for them too (docs/sso-integration-design.md v1.1 item 8; pending Thomas's confirmation).
-SSO_SUPERUSER_ALL_APPS = env.bool("SSO_SUPERUSER_ALL_APPS", default=True)
+# Superusers administer users; they get app access only through explicit grants unless this is
+# set to true (old Django-style "superuser has everything" rule). Decision relayed 2026-10-11.
+SSO_SUPERUSER_ALL_APPS = env.bool("SSO_SUPERUSER_ALL_APPS", default=False)
 
 ALLOWED_HOSTS = env.list("SSO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"] if DEBUG else [])
 CSRF_TRUSTED_ORIGINS = env.list("SSO_CSRF_TRUSTED_ORIGINS", default=[])

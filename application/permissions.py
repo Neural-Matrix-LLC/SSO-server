@@ -87,18 +87,19 @@ def sync_after_migrate(sender, using="default", **kwargs) -> None:
 
 
 def user_app_perms(user) -> list[str]:
-    """Sorted ``application.*`` permissions of a user: direct + via groups; inactive users none.
+    """Sorted ``application.*`` permissions of a user, from real permission rows: the user's own
+    ``user_permissions`` plus those of their groups, filtered to the ``application`` app. Inactive
+    users (and None) get none.
 
-    Superusers get every ``application.*`` permission (Django's rule) while ``SSO_SUPERUSER_ALL_APPS`` is
-    true (default; design v1.1 item 8, pending Thomas's confirmation). With it false a superuser needs
-    explicit grants like everybody else.
+    Superusers are for administering users, not for app access (decision relayed 2026-10-11): by
+    default a superuser gets exactly their explicit grants like everybody else. Django's
+    ``get_all_permissions()`` / ``has_perm()`` are deliberately not used, since both return
+    everything for a superuser. ``SSO_SUPERUSER_ALL_APPS=true`` (opt-in, default false) restores
+    the old rule: an active superuser gets every ``application.*`` permission.
     """
     if user is None or not getattr(user, "is_active", False):
         return []
-    if user.is_superuser and not getattr(settings, "SSO_SUPERUSER_ALL_APPS", True):
-        codes = (Permission.objects.filter(Q(user=user) | Q(group__user=user),
-                                           content_type__app_label="application",
-                                           content_type__model="applicationaccess")
-                 .values_list("codename", flat=True).distinct())
-        return sorted(PREFIX + c for c in codes)
-    return sorted(p for p in user.get_all_permissions() if p.startswith(PREFIX))
+    perms = Permission.objects.filter(content_type__app_label="application")
+    if not (user.is_superuser and getattr(settings, "SSO_SUPERUSER_ALL_APPS", False)):
+        perms = perms.filter(Q(user=user) | Q(group__user=user))
+    return sorted({PREFIX + c for c in perms.values_list("codename", flat=True)})
