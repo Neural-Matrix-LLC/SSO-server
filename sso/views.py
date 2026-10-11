@@ -14,6 +14,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
+from application.permissions import user_app_perms
+
 from .authentication import ServiceClientBasicAuthentication, ServicePrincipal, SSOAccessTokenAuthentication
 from .errors import AccountInactive, InvalidClient, InvalidCredentials, InvalidRequest, OriginNotAllowed, TokenInvalid
 from .logs import log_login, log_token_event
@@ -242,6 +244,7 @@ class IntrospectView(APIView):
                 "email": user.email or "",
                 "is_staff": bool(user.is_staff),
                 "groups": user_groups(user),
+                "perms": user_app_perms(user),  # fresh from the DB (design A2)
                 "token_type": "access",
                 "iat": token.get("iat"),
                 "exp": token.get("exp"),

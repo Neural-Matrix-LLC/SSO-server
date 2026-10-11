@@ -1,8 +1,11 @@
 [run]
-source = sso
+source =
+    sso
+    application
 omit =
     sso/tests/*
     sso/migrations/*
+    application/migrations/*
 branch = False
 
 [report]

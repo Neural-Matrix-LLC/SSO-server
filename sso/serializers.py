@@ -6,19 +6,25 @@ from django.contrib.auth.models import User
 from rest_framework import serializers
 
 from .logs import log_stored_hash_error
+from application.permissions import user_app_perms
+
 from .tokens import user_groups
 
 
 class UserSerializer(serializers.ModelSerializer):
     groups = serializers.SerializerMethodField()
+    perms = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ["id", "username", "email", "first_name", "last_name", "is_staff", "groups"]
+        fields = ["id", "username", "email", "first_name", "last_name", "is_staff", "groups", "perms"]
         read_only_fields = fields
 
     def get_groups(self, user: User) -> list[str]:
         return user_groups(user)
+
+    def get_perms(self, user: User) -> list[str]:
+        return user_app_perms(user)
 
 
 class LoginSerializer(serializers.Serializer):

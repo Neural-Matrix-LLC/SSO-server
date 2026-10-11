@@ -19,6 +19,8 @@ from rest_framework_simplejwt.backends import TokenBackend
 from rest_framework_simplejwt.exceptions import TokenBackendError
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
+from application.permissions import user_app_perms
+
 
 class KidTokenBackend(TokenBackend):
     def __init__(self, keyset, **kwargs):
@@ -123,6 +125,8 @@ def issue_token_pair(user: User) -> tuple[SSORefreshToken, SSOAccessToken]:
     access["email"] = user.email or ""
     access["is_staff"] = bool(user.is_staff)
     access["groups"] = user_groups(user)
+    # application.* permissions only (design A2); recomputed on every refresh
+    access["perms"] = user_app_perms(user)
     return refresh, access
 
 

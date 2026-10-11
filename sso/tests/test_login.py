@@ -23,7 +23,7 @@ def test_login_ok_native_with_legacy_django41_hash(api, user):
     assert "sso_refresh" not in r.cookies  # native: no cookie
     assert body["user"] == {"id": user.pk, "username": "thomas", "email": "thomas@example.org",
                             "first_name": "Tom", "last_name": "Choi", "is_staff": False,
-                            "groups": ["beta", "trader"]}
+                            "groups": ["beta", "trader"], "perms": []}
     assert r["Cache-Control"] == "no-store"
     user.refresh_from_db()
     assert user.last_login is not None

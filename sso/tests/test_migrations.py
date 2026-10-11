@@ -8,7 +8,7 @@ from django.db.migrations import operations as ops
 from django.db.migrations.loader import MigrationLoader
 
 SHARED_APPS = {"auth", "contenttypes", "sessions", "admin"}
-OWNED_APPS = {"sso", "token_blacklist"}
+OWNED_APPS = {"sso", "application", "token_blacklist"}  # design A1
 # Leaf migrations of Django's shared apps; identical from Django 4.1 (myFinance) to 5.2, so `migrate`
 # is a no-op for them on dcWebUsers (spec §4.4).
 EXPECTED_SHARED_LEAVES = {
@@ -24,7 +24,7 @@ def test_makemigrations_check_reports_no_changes(db):
     call_command("makemigrations", "--check", "--dry-run", verbosity=0)
 
 
-def test_only_sso_and_token_blacklist_own_migrations(db):
+def test_only_sso_application_and_token_blacklist_own_migrations(db):
     loader = MigrationLoader(connection, ignore_no_migrations=True)
     apps_with_migrations = {app for app, _ in loader.disk_migrations}
     assert apps_with_migrations == SHARED_APPS | OWNED_APPS
@@ -41,16 +41,34 @@ def test_sso_migrations_only_create_or_alter_sso_models(db):
     allowed = (ops.CreateModel, ops.AddField, ops.AlterField, ops.AddIndex, ops.AlterModelOptions,
                ops.AddConstraint, ops.RemoveField, ops.DeleteModel, ops.RenameField)
     for (app, _name), migration in loader.disk_migrations.items():
-        if app != "sso":
+        if app not in {"sso", "application"}:
             continue
         for op in migration.operations:
             assert isinstance(op, allowed), op  # no RunSQL/RunPython against shared tables
         for dep_app, _ in migration.dependencies:
-            assert dep_app in {"sso", "auth", "__setting__"}
+            assert dep_app in {"sso", "application", "auth", "__setting__"}
 
 
 def test_sso_tables_are_prefixed(db):
     from django.apps import apps
 
-    for model in apps.get_app_config("sso").get_models():
-        assert model._meta.db_table.startswith("sso_")
+    for label in ("sso", "application"):
+        for model in apps.get_app_config(label).get_models():
+            if model._meta.proxy:  # ApplicationPermission: proxy over auth.Permission, no table of its own
+                assert model._meta.db_table == "auth_permission"
+                continue
+            assert model._meta.db_table.startswith("sso_"), model
+
+
+def test_application_migration_creates_no_shared_tables(db):
+    """The proxy model must not create or alter auth_permission; only the two sso_application_* tables."""
+    loader = MigrationLoader(connection, ignore_no_migrations=True)
+    created = []
+    for (app, _name), migration in loader.disk_migrations.items():
+        if app != "application":
+            continue
+        for op in migration.operations:
+            assert isinstance(op, ops.CreateModel), op
+            if not op.options.get("proxy"):
+                created.append(op.options["db_table"])
+    assert sorted(created) == ["sso_application_access", "sso_application_permission_record"]
