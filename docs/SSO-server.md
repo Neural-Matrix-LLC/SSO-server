@@ -101,13 +101,17 @@ Payload:
   "username": "thomas",
   "email": "thomas@example.com",
   "is_staff": false,
-  "groups": ["trader", "beta"]
+  "groups": ["trader", "beta"],
+  "perms": ["application.app1"]
 }
 ```
 
 - `sub` is `auth_user.id` as a string. Services should key their data on `sub`, not `username`.
 - `groups` are Django group names. **Authorization uses groups**: a service decides what a group may do.
-- Keep the token small: no permissions list, no personal data beyond the above.
+- `perms` (v1.1, docs/sso-integration-design.md A2): the user's `application.*` permissions only (direct + via
+  groups; superusers get all `application.*`; inactive users none), sorted. An app checks its own permission,
+  e.g. `application.app1`. Recomputed on every refresh.
+- Keep the token small: no full permissions list (only `application.*`), no personal data beyond the above.
 
 ### 5.2 Refresh token
 JWT with `token_type: "refresh"`, 7-day `exp`, its own `jti`. Services must **reject** refresh tokens; only
@@ -160,7 +164,7 @@ Response `200`:
   "expires_in": 900,
   "refresh_token": "eyJ…",
   "user": { "id": 42, "username": "thomas", "email": "…", "first_name": "…", "last_name": "…",
-            "is_staff": false, "groups": ["trader"] }
+            "is_staff": false, "groups": ["trader"], "perms": ["application.app1"] }
 }
 ```
 - `client: "browser"`: `refresh_token` is **omitted from the body**. The server sets it as a cookie instead:
@@ -193,7 +197,7 @@ Returns the `user` object from §6.1, read fresh from the DB.
 For services that need revocation or freshness checks (e.g. admin actions). Auth: HTTP Basic with a registered
 service's `client_id:client_secret` (§9 `ServiceClient`).
 Request `{ "token": "eyJ…" }` → `200 { "active": true, "sub": "42", "username": "thomas", "groups": [...],
-"exp": 1760000900 }`, or `{ "active": false }`. `active` is false if the signature, expiry or type is bad, the
+"perms": [...], "exp": 1760000900 }` (`perms` read fresh from the DB), or `{ "active": false }`. `active` is false if the signature, expiry or type is bad, the
 user is inactive, or the user's tokens were revoked after `iat` (`sso.UserTokenRevocation.revoked_at`, which
 `logout-all` and password changes set).
 
@@ -324,7 +328,8 @@ try again in N s". Also: a logout button, a silent restore on load, and a redire
 4. `aud` contains `myfin-services` (or your configured audience).
 5. `exp` is in the future and `iat` is not in the future (allow 30 s clock skew).
 6. `token_type` == `"access"`.
-7. Authorize: check `groups` / `is_staff` for the endpoint. If not allowed → `403`.
+7. Authorize with `perms` / `groups` / `is_staff`: e.g. the app's own `application.<codename>` permission in
+   `perms`, then groups for finer rules. If not allowed → `403` (never 401, so clients don't loop on refresh).
 8. Optional, for sensitive operations: call `/api/v1/auth/introspect` (§6.6) to get revocation-aware status.
 
 JWKS caching: fetch on start-up, cache for 1 h, and on an unknown `kid` re-fetch once (rate-limited to once per

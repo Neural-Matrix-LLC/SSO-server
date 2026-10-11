@@ -40,7 +40,8 @@ but nothing uses it.
 | `sso/admin.py` | ServiceClient admin. The secret is generated and shown once; only its hash is stored |
 | `sso/management/commands/create_service_client.py` | CLI registration and secret rotation |
 | `sso/checks.py`, `sso/runtime.py` | System checks (Errors) with `SSO_DEBUG=False`: `sso.E001` per-process/no-op cache, `sso.E002` running as root |
-| `sso/migrations/0001_initial.py` | The only migration this project owns (new `sso_*` tables) |
+| `sso/migrations/0001_initial.py` | SSO's own tables (`sso_*`) |
+| `application/` | Central application permissions (`application.<codename>`, §6a): `ApplicationAccess` anchor model, SSO-side permission registry, `create_app_permission` command, read-only admin, post-migrate re-sync. Its migration only creates `sso_application_*` tables |
 | `sso/tests/` | pytest suite (see §9 for the spec §11 mapping) |
 | `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`, with `JWKSCache`: keys cached 1 h, an unknown `kid` refetches the JWKS at most once per 60 s, spec §8.1) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
 | `examples/frontend/` | `index.html` test page plus the spec §7.2 `auth.js` (SSO base URL configurable) |
@@ -163,11 +164,12 @@ Rotation follows deployment plan §11 and spec §5.3:
 
 `dcWebUsers` is shared with myFinance. This project uses the stock `auth.User` and adds only the
 `sso_*` and `token_blacklist_*` tables. A test asserts that `makemigrations --check` is clean, that the
-only migrations this project owns are `sso` and `token_blacklist`, and that the shared apps sit at the
+only migrations this project owns are `sso`, `application` and `token_blacklist`, and that the shared apps sit at the
 same leaf migrations as Django 4.1 (so `migrate` does nothing to them).
 
 **Never** run `clearsessions` or `remove_stale_contenttypes` from this project. `django_session` and
-`django_content_type` are shared with myFinance.
+`django_content_type` are shared with myFinance. **And never run `remove_stale_contenttypes` in myFinance
+either** once SSO is migrated: see the warning in §6a.
 
 1. **Back up first** (spec §4.6). Keep credentials in an options file so they stay out of `ps`:
    ```bash
@@ -183,10 +185,10 @@ same leaf migrations as Django 4.1 (so `migrate` does nothing to them).
    ```bash
    docker compose run --rm -e SSO_DBUSER -e SSO_DBPWD web python manage.py migrate --plan
    ```
-   **Stop** unless the plan lists only `sso.*` and `token_blacklist.*`.
+   **Stop** unless the plan lists only `sso.*`, `application.*` and `token_blacklist.*`.
 3. **Migrate**: `docker compose run --rm -e SSO_DBUSER -e SSO_DBPWD web python manage.py migrate`.
-   The post-migrate step also inserts rows into `django_content_type` and `auth_permission` for the two
-   new apps. That only adds rows and does not affect myFinance.
+   The post-migrate step also inserts rows into `django_content_type` and `auth_permission` for the new
+   apps (including `application.app1`). That only adds rows and does not affect myFinance.
 4. Verify: `SELECT COUNT(*) FROM auth_user` is unchanged. Log in with an existing account through the
    API **and** through myFinance.
 
@@ -268,6 +270,33 @@ The web container itself runs as `sso_app` (DML only).
 `cp docker-compose.dev.yml docker-compose.override.yml` makes a plain `docker compose up` use the overlay.
 The override file is gitignored, so it can never reach a server checkout.
 
+## 6a. Application permissions (`application.<codename>`)
+
+One permission per application, checked by that application in the access token's `perms` claim
+(docs/sso-integration-design.md). `application.app1` = llm-wiki-svc, created by `migrate`.
+
+* **Grant:** admin → Users (or Groups) → "user permissions" / "group permissions" → pick
+  `application | application access | Can use app1 (llm-wiki-svc)`. Direct and group grants both count;
+  superusers have every `application.*` permission; inactive users have none.
+  Shell alternative: `u.user_permissions.add(Permission.objects.get(content_type__app_label="application", codename="app1"))`.
+* **Takes effect** at the user's next token refresh (access tokens live ≤ 15 min); `/me` and `/introspect` show it at once.
+* **Add an application (no code change):**
+  `docker compose exec web python manage.py create_app_permission app2 "Can use app2 (reports)"`.
+  Idempotent (re-running only updates the description, grants are kept). Codename `^[a-z][a-z0-9_]{1,62}$`.
+* **See them:** admin → Applications → "Application permissions" (read-only list with grant counts) and
+  "Application permission records" (the SSO-side registry).
+* Tokens export only `application.*` permissions, never the full Django permission list.
+
+> **WARNING: shared `django_content_type` / `auth_permission`.** These tables belong to myFinance as much as
+> to SSO. Running **`manage.py remove_stale_contenttypes` in myFinance** (which does not know the
+> `application` app) deletes the `application.applicationaccess` content type, and the database
+> CASCADE-deletes every `application.*` permission **and every user/group grant of them**: everybody loses access
+> to every app at once. SSO keeps its own registry of the permissions (`sso_application_permission_record`) and its
+> post-migrate step recreates any missing permission on the next `manage.py migrate` (logging an ERROR
+> "ALL GRANTS ... WERE LOST" on logger `sso.application`), **but the grants cannot be recovered**: re-assign them
+> (or restore `auth_user_user_permissions` / `auth_group_permissions` from the backup). Tell the myFinance
+> maintainers never to run `remove_stale_contenttypes` (or to answer "no" for `application`).
+
 ## 8. API summary
 
 | Method and path | Auth | Notes |
@@ -277,7 +306,7 @@ The override file is gitignored, so it can never reach a server checkout.
 | `POST /api/v1/auth/logout` | same | 204. Blacklists the token and clears the cookie |
 | `POST /api/v1/auth/logout-all` | Bearer access | 204. Blacklists all refresh tokens and sets `UserTokenRevocation` |
 | `GET /api/v1/auth/me` | Bearer access | Fresh from the DB |
-| `POST /api/v1/auth/introspect` | Basic (ServiceClient) | `{"active": true, sub, username, email, is_staff, groups, iat, exp, …}` or `{"active": false}` |
+| `POST /api/v1/auth/introspect` | Basic (ServiceClient) | `{"active": true, sub, username, email, is_staff, groups, perms, iat, exp, …}` or `{"active": false}` |
 | `GET /.well-known/jwks.json` | — | All public keys. `Cache-Control: public, max-age=3600` |
 | `GET /.well-known/openid-configuration` | — | `token_endpoint` = `/api/v1/auth/login`. No `authorization_endpoint` until phase 5 |
 | `GET /healthz` | — | `200 {"status":"ok"}`, or `503 {"error":"unhealthy","detail":"database"}` |
