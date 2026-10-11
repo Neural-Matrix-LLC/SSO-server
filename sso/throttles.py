@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from rest_framework.throttling import SimpleRateThrottle
 
-from .logs import log_login
+from .logs import client_ip, log_login
 
 
 class _LoggingThrottle(SimpleRateThrottle):
@@ -37,7 +37,8 @@ class LoginIPThrottle(_LoggingThrottle):
     log_failures = True
 
     def get_cache_key(self, request, view):
-        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+        # the end user's IP when a ServiceClient delegates it (v1.1 item 4), else the caller's
+        return self.cache_format % {"scope": self.scope, "ident": client_ip(request)}
 
 
 class LoginUserThrottle(_LoggingThrottle):
@@ -59,4 +60,5 @@ class RefreshThrottle(_LoggingThrottle):
     scope = "refresh"
 
     def get_cache_key(self, request, view):
-        return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+        # the end user's IP when a ServiceClient delegates it (v1.1 item 4), else the caller's
+        return self.cache_format % {"scope": self.scope, "ident": client_ip(request)}

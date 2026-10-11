@@ -10,8 +10,13 @@ logger = logging.getLogger("sso.auth")
 
 
 def client_ip(request) -> str:
-    """Client IP honouring REST_FRAMEWORK['NUM_PROXIES'] (nginx sets X-Forwarded-For)."""
-    return BaseThrottle().get_ident(request)
+    """Client IP honouring REST_FRAMEWORK['NUM_PROXIES'] (nginx sets X-Forwarded-For).
+
+    For a ServiceClient calling server-side with ``client_ip`` (sso/delegation.py), that end-user IP.
+    """
+    from .delegation import delegated_client_ip
+
+    return delegated_client_ip(request) or BaseThrottle().get_ident(request)
 
 
 def log_login(request, username: str, result: str, *, client: str | None = None, user_id: int | None = None) -> None:
