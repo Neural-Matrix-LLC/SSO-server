@@ -185,9 +185,9 @@ dedicated ports, users with and without `application.app1` (direct and via group
    valid continue, else 503 "Login service unavailable" (HTML) / 503 JSON — do not clear the session (Q-05).
    Refresh that no longer carries the permission → delete session, 403 page (Q-06). HTML route with an invalid
    explicit Bearer → 401; no credentials at all → 303 to `/login` (Q-07).
-8. **SSO claim details.** `perms` is always present, `[]` when none (Q-11). Superusers get every
-   `application.*` permission, which is Django's normal rule (D-11/Q-17) — pending Thomas's confirmation, keep
-   it but make it switchable on the SSO server with `SSO_SUPERUSER_ALL_APPS` (default true). Post-migrate
+8. **SSO claim details.** `perms` is always present, `[]` when none (Q-11). ~~Superusers get every
+   `application.*` permission (default true)~~ — SUPERSEDED 2026-10-11 by Thomas: superusers administer
+   dcWebUsers only and get no automatic app access; `SSO_SUPERUSER_ALL_APPS` defaults to **false**. Post-migrate
    recreates only code-defined permissions (app1); command-created ones are documented (Q-13).
 9. `SESSION_SECRET` is no longer needed (server-side sessions); drop it. Grant revocation can take up to the
    access lifetime (15 min) — documented, accepted (D-10).
