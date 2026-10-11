@@ -67,19 +67,25 @@ def test_without_basic_auth_client_ip_is_ignored(api, user, rates):
 
 
 @pytest.mark.parametrize("auth", [basic(secret="wrong"), basic(cid="unknown"), {"HTTP_AUTHORIZATION": "Basic !!"},
-                                  {"HTTP_AUTHORIZATION": "Basic " + base64.b64encode(b"nocolon").decode()}])
-def test_invalid_basic_auth_ignores_client_ip_and_does_not_block_login(api, user, wiki_client, rates, auth):
-    for i in range(3):
-        assert post_login(api, f"203.0.113.{i + 1}", auth).status_code == 401
-    assert post_login(api, "198.51.100.77", auth).status_code == 429
+                                  {"HTTP_AUTHORIZATION": "Basic " + base64.b64encode(b"nocolon").decode()},
+                                  {"HTTP_AUTHORIZATION": "Basic"}])
+@pytest.mark.parametrize("path", ["login", "refresh", "logout"])
+def test_invalid_basic_auth_is_401_invalid_client(api, user, wiki_client, auth, path, caplog):
+    """v1.2 (C-19): wrong service credentials are refused, no silent fallback to the caller's IP."""
+    body = {"username": "thomas", "password": PASSWORD, "client": "native", "refresh_token": "x.y.z",
+            "client_ip": "203.0.113.1"}
+    r = api.post(f"/api/v1/auth/{path}", body, format="json", **auth)
+    assert r.status_code == 401
+    assert r.json()["error"] == "invalid_client"
+    assert r["WWW-Authenticate"].startswith("Basic")
+    assert "invalid_client" in caplog.text
 
 
-def test_inactive_service_client_is_not_trusted(api, user, wiki_client, rates):
+def test_inactive_service_client_is_invalid_client(api, user, wiki_client):
     wiki_client.is_active = False
     wiki_client.save()
-    for i in range(3):
-        post_login(api, f"203.0.113.{i + 1}", basic())
-    assert post_login(api, "198.51.100.77", basic()).status_code == 429
+    r = post_login(api, "203.0.113.1", basic(), password=PASSWORD)
+    assert r.status_code == 401 and r.json()["error"] == "invalid_client"
 
 
 def test_login_with_basic_auth_still_works_and_logs_the_end_user_ip(api, user, wiki_client, caplog):
@@ -91,13 +97,21 @@ def test_login_with_basic_auth_still_works_and_logs_the_end_user_ip(api, user, w
     assert "wiki-s3cret-value" not in caplog.text
 
 
-def test_bad_client_ip_falls_back_to_the_caller(api, user, wiki_client, caplog):
+@pytest.mark.parametrize("bad", ["not-an-ip", "", "203.0.113.1, 10.0.0.1", 12345, ["1.2.3.4"]])
+def test_bad_client_ip_with_valid_credentials_is_400(api, user, wiki_client, caplog, bad):
+    """v1.2 (Q-28): invalid client_ip with valid service credentials -> 400 invalid_request."""
     caplog.set_level(logging.INFO, logger="sso.auth")
-    post_login(api, "not-an-ip", basic())
-    login_events = [json.loads(r.getMessage()) for r in caplog.records
-                    if r.getMessage().startswith('{"client"') or '"event": "login"' in r.getMessage()]
-    assert login_events and login_events[-1]["ip"] == "127.0.0.1"
+    r = post_login(api, bad, basic(), password=PASSWORD)
+    assert r.status_code == 400 and r.json()["error"] == "invalid_request"
     assert "bad_client_ip" in caplog.text
+    r = api.post("/api/v1/auth/refresh", {"refresh_token": "x.y.z", "client_ip": bad}, format="json", **basic())
+    assert r.status_code == 400
+
+
+def test_valid_credentials_without_client_ip_use_the_caller(api, user, wiki_client, caplog):
+    caplog.set_level(logging.INFO, logger="sso.auth")
+    assert post_login(api, None, basic(), password=PASSWORD).status_code == 200
+    assert '"ip": "127.0.0.1"' in caplog.text
 
 
 def test_refresh_throttle_uses_client_ip_with_basic_auth(api, user, wiki_client, rates):
@@ -139,4 +153,4 @@ def test_non_dict_body_with_basic_auth(rf, wiki_client):
     from rest_framework.request import Request
 
     raw = rf.post("/x", data="[1]", content_type="application/json", **basic())
-    assert delegated_client_ip(Request(raw, parsers=[JSONParser()])) is None
+    assert delegated_client_ip(Request(raw, parsers=[JSONParser()])) is None  # no client_ip field

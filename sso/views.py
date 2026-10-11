@@ -119,7 +119,15 @@ def load_refresh(raw: str) -> tuple[SSORefreshToken, User]:
 
 
 # --------------------------------------------------------------------------- auth endpoints
-class LoginView(APIView):
+class _ServiceClientChallenge:
+    """Login/refresh/logout accept optional ServiceClient Basic auth (sso/delegation.py). Without an
+    authenticate header DRF would turn its 401 ``invalid_client`` into a 403."""
+
+    def get_authenticate_header(self, request):
+        return 'Basic realm="sso-service-client"'
+
+
+class LoginView(_ServiceClientChallenge, APIView):
     throttle_classes = [LoginIPThrottle, LoginUserThrottle]
 
     def post(self, request):
@@ -143,7 +151,7 @@ class LoginView(APIView):
         return token_response(user, browser=(client == "browser"))
 
 
-class RefreshView(APIView):
+class RefreshView(_ServiceClientChallenge, APIView):
     throttle_classes = [RefreshThrottle]
 
     def post(self, request):
@@ -162,7 +170,7 @@ class RefreshView(APIView):
         return token_response(user, browser=cookie_mode)
 
 
-class LogoutView(APIView):
+class LogoutView(_ServiceClientChallenge, APIView):
     throttle_classes = [RefreshThrottle]
 
     def post(self, request):

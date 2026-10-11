@@ -1,11 +1,16 @@
-"""Trusted end-user IP for server-side callers (docs/sso-integration-design.md v1.1 item 4).
+"""Trusted end-user IP for server-side callers (docs/sso-integration-design.md v1.1 item 4, v1.2).
 
 An application that logs users in server-side (llm-wiki-svc's /login) calls ``/api/v1/auth/login`` and
 ``/refresh`` from its own address, so the per-IP throttle would count every user of that app as one
-client. Such an app may authenticate as a registered, active ``ServiceClient`` with HTTP Basic and add
-``"client_ip": "<the browser's IP>"`` to the JSON body. Only then do the IP throttle and the login log
-use ``client_ip``; without valid Basic auth the field is ignored (and an invalid Basic header is
-ignored too, so a mistyped secret degrades to "throttled as the app's own IP", never to an open door).
+client. Such an app authenticates as a registered, active ``ServiceClient`` with HTTP Basic and adds
+``"client_ip": "<the browser's IP>"`` to the JSON body; then the IP throttle and the login log use
+``client_ip``. Without an ``Authorization: Basic`` header the field is ignored. v1.2 (C-19, Q-28):
+
+* a Basic header that does not authenticate an active ServiceClient -> 401 ``invalid_client``
+  (no silent fallback to the caller's address);
+* valid credentials but a ``client_ip`` that is not an IP address -> 400 ``invalid_request``;
+* valid credentials without ``client_ip`` -> the caller's address, as before.
+
 The per-username throttle is unchanged either way.
 """
 from __future__ import annotations
@@ -15,6 +20,7 @@ import binascii
 import ipaddress
 import logging
 
+from .errors import InvalidClient, InvalidRequest
 from .models import ServiceClient
 
 logger = logging.getLogger("sso.auth")
@@ -45,24 +51,29 @@ def _basic_client(request) -> ServiceClient | None:
 def delegated_client_ip(request) -> str | None:
     """``client_ip`` from the body when the caller is an authenticated ServiceClient, else None.
 
-    ``request`` is a DRF Request (body parsed) or a Django HttpRequest. Cached per request.
+    Raises InvalidClient / InvalidRequest as described in the module docstring. ``request`` is a
+    DRF Request (body parsed) or a Django HttpRequest. A successful result is cached per request.
     """
     django_request = getattr(request, "_request", request)
     cached = getattr(django_request, _ATTR, _MISSING)
     if cached is not _MISSING:
         return cached
     result: str | None = None
-    if django_request.META.get("HTTP_AUTHORIZATION", "").lower().startswith("basic "):
-        data = getattr(request, "data", None)
-        raw = data.get("client_ip") if isinstance(data, dict) else None
+    if django_request.META.get("HTTP_AUTHORIZATION", "").lower().startswith("basic"):
         client = _basic_client(django_request)
         if client is None:
-            logger.warning('{"event": "service_client_auth", "result": "invalid", "note": "client_ip ignored"}')
-        elif isinstance(raw, str) and raw.strip():
+            logger.warning('{"event": "service_client_auth", "result": "invalid_client"}')
+            raise InvalidClient()
+        data = getattr(request, "data", None)
+        raw = data.get("client_ip") if isinstance(data, dict) else None
+        if raw is not None:
             try:
+                if not isinstance(raw, str):
+                    raise ValueError(raw)
                 result = str(ipaddress.ip_address(raw.strip()))
             except ValueError:
                 logger.warning('{"event": "service_client_auth", "result": "bad_client_ip", '
                                f'"client_id": "{client.client_id}"}}')
+                raise InvalidRequest("client_ip must be an IP address.") from None
     setattr(django_request, _ATTR, result)
     return result

@@ -295,9 +295,13 @@ One permission per application, checked by that application in the access token'
 **Server-side logins (apps like llm-wiki-svc).** An app that calls `/api/v1/auth/login` and `/refresh` from
 its server would make every one of its users share the app's per-IP throttle. Register it as a ServiceClient
 (§6) and have it send HTTP Basic `client_id:client_secret` plus `"client_ip": "<end user's IP>"` in the JSON
-body: then the per-IP throttle and the login log use `client_ip`. Without valid Basic auth (missing, wrong
-secret, inactive client) `client_ip` is ignored and the request is handled as before, from the caller's
-address. A non-IP `client_ip` is ignored (logged). The per-username throttle is unchanged.
+body: then the per-IP throttle and the login log use `client_ip`. Without an `Authorization: Basic` header
+`client_ip` is ignored and the request is handled as before, from the caller's address. Design v1.2: a Basic
+header that does not authenticate an active ServiceClient (wrong secret, unknown or inactive client) is refused
+with 401 `invalid_client` (no silent fallback); valid credentials with a `client_ip` that is not an IP address
+get 400 `invalid_request`; valid credentials without `client_ip` use the caller's address. The per-username
+throttle is unchanged. A leaked client secret lets its holder choose the IP that is throttled; accepted (the
+per-username throttle still applies) - rotate it with `create_service_client <id> --rotate-secret`.
 
 > **WARNING: shared `django_content_type` / `auth_permission`.** These tables belong to myFinance as much as
 > to SSO. Running **`manage.py remove_stale_contenttypes` in myFinance** (which does not know the
