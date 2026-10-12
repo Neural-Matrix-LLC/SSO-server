@@ -8,4 +8,10 @@ class SsoConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self) -> None:
+        import logging
+
         from . import checks, signals  # noqa: F401
+
+        # once per process (gunicorn does not run system checks; sso.W001 covers manage.py)
+        for msg in checks.deprecated_key_messages():
+            logging.getLogger("sso").warning(msg)

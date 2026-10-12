@@ -16,7 +16,8 @@ from pathlib import Path
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
-from sso.keys import KeyConfigError, generate_ephemeral_keyset, load_keyset
+from sso.keys import (KeyConfigConflict, KeyConfigError, generate_ephemeral_keyset, load_keyset,
+                      resolve_key_config)
 from sso.runtime import ROOT_MESSAGE, running_as_root
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -59,13 +60,20 @@ ALLOWED_HOSTS = env.list("SSO_ALLOWED_HOSTS", default=["localhost", "127.0.0.1"]
 CSRF_TRUSTED_ORIGINS = env.list("SSO_CSRF_TRUSTED_ORIGINS", default=[])
 
 # --------------------------------------------------------------------------- JWT keys
-SSO_JWT_PRIVATE_KEY_PATH = env.str("SSO_JWT_PRIVATE_KEY_PATH", default="")
-# Comma-separated list for rotation (addendum B.6). Falls back to the singular v1.0 name.
-SSO_JWT_PUBLIC_KEY_PATHS = env.list(
-    "SSO_JWT_PUBLIC_KEY_PATHS", default=env.list("SSO_JWT_PUBLIC_KEY_PATH", default=[])
-)
+# SSO_JWT_PRIVATE_KEY / SSO_JWT_PUBLIC_KEYS are file NAMES in the keys mount (README §3, "Docker quick start"):
+# mount = SSO_JWT_KEYS_MOUNT > SSO_KEYS_DIR > /run/keys (compose pins SSO_JWT_KEYS_MOUNT=/run/keys for web).
+# A value with '/' is a path. The old SSO_JWT_PRIVATE_KEY_PATH / SSO_JWT_PUBLIC_KEY_PATHS still work (deprecated,
+# sso.W001); old and new form of the same setting together are an error even with SSO_DEBUG=True.
 try:
-    SSO_KEYSET = load_keyset(SSO_JWT_PRIVATE_KEY_PATH, SSO_JWT_PUBLIC_KEY_PATHS)
+    SSO_KEY_CONFIG = resolve_key_config(os.environ)
+except KeyConfigConflict as exc:
+    raise ImproperlyConfigured(f"JWT key configuration error: {exc}") from exc
+SSO_JWT_KEYS_MOUNT = SSO_KEY_CONFIG.mount
+SSO_JWT_PRIVATE_KEY_PATH = SSO_KEY_CONFIG.private.path  # resolved paths (kept for compatibility)
+SSO_JWT_PUBLIC_KEY_PATHS = [k.path for k in SSO_KEY_CONFIG.publics]
+SSO_KEY_DEPRECATED_VARS = SSO_KEY_CONFIG.deprecated
+try:
+    SSO_KEYSET = load_keyset(SSO_KEY_CONFIG.private, SSO_KEY_CONFIG.publics)
 except KeyConfigError as exc:
     if not DEBUG:
         raise ImproperlyConfigured(f"JWT key configuration error: {exc}") from exc

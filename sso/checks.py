@@ -5,7 +5,7 @@ SSO_DEBUG=False; these checks (sso.E001, sso.E002) also catch settings overridde
 custom settings module.
 """
 from django.conf import settings
-from django.core.checks import Error, register
+from django.core.checks import Error, Warning, register  # noqa: A004
 
 from .runtime import ROOT_MESSAGE, running_as_root
 
@@ -32,3 +32,19 @@ def not_root_in_production(app_configs, **kwargs):
     if not settings.DEBUG and running_as_root():
         return [Error(ROOT_MESSAGE, hint="Set SSO_UID/SSO_GID (non-zero) and run as that user.", id="sso.E002")]
     return []
+
+
+def deprecated_key_messages() -> list[str]:
+    from .keys import DEPRECATED_KEY_VARS
+
+    return [f"{var} is deprecated; use {DEPRECATED_KEY_VARS[var]} "
+            "(file names in SSO_JWT_KEYS_MOUNT, default /run/keys)."
+            for var in getattr(settings, "SSO_KEY_DEPRECATED_VARS", ())]
+
+
+@register()
+def deprecated_key_variables(app_configs, **kwargs):
+    """sso.W001: the old *_PATH key variables still work but should be replaced (README "Docker quick start")."""
+    return [Warning(msg, hint='e.g. SSO_JWT_PRIVATE_KEY=sso-2026-10.private.pem, '
+                              'SSO_JWT_PUBLIC_KEYS=sso-2026-10.public.pem', id="sso.W001")
+            for msg in deprecated_key_messages()]

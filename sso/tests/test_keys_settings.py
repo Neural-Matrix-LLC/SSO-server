@@ -94,10 +94,20 @@ def _run_settings(env_over: dict) -> subprocess.CompletedProcess:
 GOOD = {
     "SSO_SECRET_KEY": "Zq3-vT8_pL1xN6rW0yK4bF7mC2hJ9sD5gA8eR1uI3oP6tY0wQ4zX7cV2nB5mL8k",
     "SSO_ISSUER": "https://sso.test",
-    "SSO_JWT_PRIVATE_KEY_PATH": os.environ["SSO_TEST_CURRENT_PRIVATE"],
-    "SSO_JWT_PUBLIC_KEY_PATHS": os.environ["SSO_TEST_CURRENT_PUBLIC"],
+    "SSO_JWT_KEYS_MOUNT": os.environ["SSO_TEST_KEYDIR"],
+    "SSO_JWT_PRIVATE_KEY": "current.private.pem",
+    "SSO_JWT_PUBLIC_KEYS": "current.public.pem",
     "SSO_CACHE_URL": "redis://127.0.0.1:6379/0",
 }
+NEW_KEY_VARS = ("SSO_JWT_KEYS_MOUNT", "SSO_JWT_PRIVATE_KEY", "SSO_JWT_PUBLIC_KEYS")
+
+
+def _old_form(**extra) -> dict:
+    """GOOD with the deprecated *_PATH variables instead of the new names."""
+    env = {k: v for k, v in GOOD.items() if k not in NEW_KEY_VARS}
+    env.update({"SSO_JWT_PRIVATE_KEY_PATH": os.environ["SSO_TEST_CURRENT_PRIVATE"],
+                "SSO_JWT_PUBLIC_KEY_PATHS": os.environ["SSO_TEST_CURRENT_PUBLIC"]}, **extra)
+    return env
 
 
 def test_settings_start_with_full_config():
@@ -109,8 +119,8 @@ def test_settings_start_with_full_config():
 @pytest.mark.parametrize("override,message", [
     ({"SSO_SECRET_KEY": ""}, "SSO_SECRET_KEY is empty"),
     ({"SSO_ISSUER": ""}, "SSO_ISSUER is empty"),
-    ({"SSO_JWT_PRIVATE_KEY_PATH": "/nonexistent/private.pem"}, "JWT private key"),
-    ({"SSO_JWT_PUBLIC_KEY_PATHS": "/nonexistent/public.pem"}, "JWT public key"),
+    ({"SSO_JWT_PRIVATE_KEY": "missing.private.pem"}, "JWT private key"),
+    ({"SSO_JWT_PUBLIC_KEYS": "missing.public.pem"}, "JWT public key"),
     ({"SSO_DB_ENGINE": "postgres"}, "SSO_DB_ENGINE must be"),
 ])
 def test_settings_fail_fast_in_non_debug(override, message):
@@ -126,7 +136,7 @@ def test_debug_mode_falls_back_to_ephemeral_key_and_dev_secret():
 
 
 def test_singular_public_key_env_still_supported():
-    env = dict(GOOD)
+    env = _old_form()
     del env["SSO_JWT_PUBLIC_KEY_PATHS"]
     env["SSO_JWT_PUBLIC_KEY_PATH"] = os.environ["SSO_TEST_OLD_PUBLIC"]
     code = ("import django; django.setup(); from django.conf import settings; "
@@ -136,7 +146,8 @@ def test_singular_public_key_env_still_supported():
               "SSO_SQLITE_PATH": ":memory:", **env})
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "2"
+    assert r.stdout.strip().splitlines()[-1] == "2"
+    assert "SSO_JWT_PUBLIC_KEY_PATH is deprecated" in r.stdout + r.stderr
 
 
 def test_deploy_check_passes_with_prod_like_env():
@@ -369,7 +380,7 @@ def test_unreadable_key_file_is_not_reported_as_missing(tmp_path):
     finally:
         os.chmod(p, 0o600)
     msg = str(info.value)
-    assert msg == (f"JWT private key (SSO_JWT_PRIVATE_KEY_PATH) {p!r} exists but is not readable by uid "
+    assert msg == (f"JWT private key (SSO_JWT_PRIVATE_KEY) {p!r} exists but is not readable by uid "
                    f"{os.geteuid()}; chown to SSO_UID:SSO_GID or set SSO_UID")
     assert "not found" not in msg and "PRIVATE KEY" not in msg and "BEGIN" not in msg
 
@@ -401,3 +412,165 @@ def test_other_stat_errors_are_reported(tmp_path):
     f = _write(tmp_path, "file", b"x")
     with pytest.raises(keys.KeyConfigError, match="is not readable: .*Not a directory"):
         keys.load_private_key(f + "/private.pem")
+
+
+# ---------------------------------------------------------------- key names, mount precedence, old variables
+KEYDIR = os.environ["SSO_TEST_KEYDIR"]
+
+
+def _cfg(**env):
+    return keys.resolve_key_config(env)
+
+
+def test_names_resolve_in_the_default_mount():
+    c = _cfg(SSO_JWT_PRIVATE_KEY="sso-2026-10.private.pem", SSO_JWT_PUBLIC_KEYS="sso-2026-10.public.pem")
+    assert (c.mount, c.mount_source) == ("/run/keys", "default")
+    assert c.private.path == "/run/keys/sso-2026-10.private.pem"
+    assert [k.path for k in c.publics] == ["/run/keys/sso-2026-10.public.pem"]
+    assert c.private.origin == "SSO_JWT_PRIVATE_KEY='sso-2026-10.private.pem' in the default mount '/run/keys'"
+    assert c.deprecated == ()
+
+
+def test_sso_keys_dir_is_the_fallback_mount(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _cfg(SSO_KEYS_DIR="./keys", SSO_JWT_PRIVATE_KEY="a.private.pem")
+    assert (c.mount, c.mount_source) == (str(tmp_path / "keys"), "SSO_KEYS_DIR")  # relative -> cwd
+    assert c.private.path == str(tmp_path / "keys" / "a.private.pem")
+    assert f"in SSO_KEYS_DIR={str(tmp_path / 'keys')!r}" in c.private.origin
+
+
+def test_explicit_mount_wins_over_sso_keys_dir():
+    """The compose pitfall: env_file passes the HOST SSO_KEYS_DIR into the container; compose's environment sets
+    SSO_JWT_KEYS_MOUNT=/run/keys, which must win."""
+    c = _cfg(SSO_KEYS_DIR="/home/thomas/sso/keys", SSO_JWT_KEYS_MOUNT="/run/keys",
+             SSO_JWT_PRIVATE_KEY="a.private.pem", SSO_JWT_PUBLIC_KEYS="a.public.pem, b.public.pem")
+    assert (c.mount, c.mount_source) == ("/run/keys", "SSO_JWT_KEYS_MOUNT")
+    assert [k.path for k in (c.private, *c.publics)] == ["/run/keys/a.private.pem", "/run/keys/a.public.pem",
+                                                          "/run/keys/b.public.pem"]
+
+
+def test_compose_pins_the_mount_for_web():
+    compose = (REPO / "docker-compose.yml").read_text()
+    web = compose[compose.index("\n  web:"):compose.index("\n  redis:")]
+    assert "SSO_JWT_KEYS_MOUNT: /run/keys" in web
+    assert "- ${SSO_KEYS_DIR:-./keys}:/run/keys:ro" in web
+
+
+def test_a_value_with_a_slash_is_a_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    c = _cfg(SSO_JWT_KEYS_MOUNT="/run/keys", SSO_JWT_PRIVATE_KEY="/abs/dir/k.pem", SSO_JWT_PUBLIC_KEYS="rel/k.pub,n.pub")
+    assert c.private.path == "/abs/dir/k.pem" and "is a path" in c.private.origin
+    assert [k.path for k in c.publics] == [str(tmp_path / "rel" / "k.pub"), "/run/keys/n.pub"]
+    assert f"relative to the working directory {str(tmp_path)!r}" in c.publics[0].origin
+
+
+def test_old_variables_still_work_and_are_flagged():
+    c = _cfg(SSO_KEYS_DIR="/ignored", SSO_JWT_PRIVATE_KEY_PATH="/x/old.private.pem",
+             SSO_JWT_PUBLIC_KEY_PATHS="/x/a.pub,/x/b.pub", SSO_JWT_PUBLIC_KEY_PATH="/x/singular.pub")
+    assert c.private.path == "/x/old.private.pem"
+    assert [k.path for k in c.publics] == ["/x/a.pub", "/x/b.pub"]  # PATHS wins over the singular, as before
+    assert c.deprecated == ("SSO_JWT_PRIVATE_KEY_PATH", "SSO_JWT_PUBLIC_KEY_PATHS")
+
+
+def test_old_variables_give_a_check_warning_and_a_log_line(settings, caplog):
+    from sso import checks
+
+    settings.SSO_KEY_DEPRECATED_VARS = ("SSO_JWT_PRIVATE_KEY_PATH",)
+    [w] = checks.deprecated_key_variables(None)
+    assert w.id == "sso.W001" and "SSO_JWT_PRIVATE_KEY_PATH is deprecated; use SSO_JWT_PRIVATE_KEY" in w.msg
+    from django.apps import apps
+
+    caplog.set_level("WARNING", logger="sso")
+    apps.get_app_config("sso").ready()
+    assert "SSO_JWT_PRIVATE_KEY_PATH is deprecated" in caplog.text
+    settings.SSO_KEY_DEPRECATED_VARS = ()
+    assert checks.deprecated_key_variables(None) == []
+
+
+def test_old_variables_log_once_at_startup():
+    r = _run_settings(_old_form())
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert out.count("SSO_JWT_PRIVATE_KEY_PATH is deprecated") == 1
+    assert out.count("SSO_JWT_PUBLIC_KEY_PATHS is deprecated") == 1
+
+
+@pytest.mark.parametrize("old", [{"SSO_JWT_PRIVATE_KEY_PATH": "/x/p.pem"}])
+def test_old_and_new_private_key_together_is_an_error(old):
+    with pytest.raises(keys.KeyConfigConflict, match="Both SSO_JWT_PRIVATE_KEY and the deprecated SSO_JWT_PRIVATE_KEY_PATH"):
+        _cfg(SSO_JWT_PRIVATE_KEY="p.pem", **old)
+
+
+@pytest.mark.parametrize("old", ["SSO_JWT_PUBLIC_KEY_PATHS", "SSO_JWT_PUBLIC_KEY_PATH"])
+def test_old_and_new_public_keys_together_is_an_error(old):
+    with pytest.raises(keys.KeyConfigConflict, match=f"Both SSO_JWT_PUBLIC_KEYS and the deprecated {old}"):
+        _cfg(SSO_JWT_PUBLIC_KEYS="p.pub", **{old: "/x/p.pub"})
+
+
+@pytest.mark.parametrize("debug", ["False", "True"])
+def test_both_forms_stop_the_settings_even_in_debug(debug):
+    r = _run_settings({**GOOD, "SSO_DEBUG": debug, "SSO_JWT_PRIVATE_KEY_PATH": os.environ["SSO_TEST_CURRENT_PRIVATE"]})
+    assert r.returncode != 0
+    assert "ImproperlyConfigured" in r.stderr and "Both SSO_JWT_PRIVATE_KEY and the deprecated" in r.stderr
+
+
+def test_rotation_publishes_every_public_key_and_signs_with_the_private_one(tmp_path):
+    for name in ("old", "new"):
+        k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        (tmp_path / f"{name}.private.pem").write_bytes(k.private_bytes(
+            serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        (tmp_path / f"{name}.public.pem").write_bytes(k.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+    # T0: old signs, both published
+    c = _cfg(SSO_KEYS_DIR=str(tmp_path), SSO_JWT_PRIVATE_KEY="old.private.pem",
+             SSO_JWT_PUBLIC_KEYS="old.public.pem,new.public.pem")
+    ks = keys.load_keyset(c.private, c.publics)
+    old_kid, new_kid = (keys.compute_kid(keys.load_public_key(str(tmp_path / f"{n}.public.pem"))) for n in ("old", "new"))
+    assert ks.signing_kid == old_kid and [k["kid"] for k in ks.jwks()["keys"]] == [old_kid, new_kid]
+    # switch: new signs; old still published
+    c = _cfg(SSO_KEYS_DIR=str(tmp_path), SSO_JWT_PRIVATE_KEY="new.private.pem",
+             SSO_JWT_PUBLIC_KEYS="old.public.pem,new.public.pem")
+    ks = keys.load_keyset(c.private, c.publics)
+    assert ks.signing_kid == new_kid and [k["kid"] for k in ks.jwks()["keys"]] == [new_kid, old_kid]
+    # unchanged behaviour: the signing key's own public half is published even if not listed
+    c = _cfg(SSO_KEYS_DIR=str(tmp_path), SSO_JWT_PRIVATE_KEY="new.private.pem", SSO_JWT_PUBLIC_KEYS="old.public.pem")
+    assert [k["kid"] for k in keys.load_keyset(c.private, c.publics).jwks()["keys"]] == [new_kid, old_kid]
+
+
+def test_settings_publish_the_rotation_keys_in_jwks(client):
+    body = client.get("/.well-known/jwks.json").json()
+    cur = keys.compute_kid(keys.load_public_key(os.environ["SSO_TEST_CURRENT_PUBLIC"]))
+    old = keys.compute_kid(keys.load_public_key(os.environ["SSO_TEST_OLD_PUBLIC"]))
+    assert [k["kid"] for k in body["keys"]] == [cur, old]
+
+
+def test_missing_key_message_shows_resolved_path_and_how_it_was_built(tmp_path):
+    c = _cfg(SSO_JWT_KEYS_MOUNT=str(tmp_path), SSO_JWT_PRIVATE_KEY="nope.private.pem")
+    with pytest.raises(keys.KeyConfigError) as info:
+        keys.load_keyset(c.private, c.publics)
+    resolved = str(tmp_path / "nope.private.pem")
+    assert str(info.value) == (f"JWT private key (SSO_JWT_PRIVATE_KEY='nope.private.pem' in SSO_JWT_KEYS_MOUNT="
+                               f"{str(tmp_path)!r}) not found: {resolved!r}. Generate keys with scripts/gen_keys.sh.")
+
+
+@needs_non_root
+def test_unreadable_key_message_shows_resolved_path_origin_and_uid(tmp_path):
+    pub = _write(tmp_path, "k.public.pem", _rsa_pem()[1])
+    os.chmod(pub, 0o000)
+    c = _cfg(SSO_JWT_KEYS_MOUNT=str(tmp_path), SSO_JWT_PRIVATE_KEY=os.environ["SSO_TEST_CURRENT_PRIVATE"],
+             SSO_JWT_PUBLIC_KEYS="k.public.pem")
+    try:
+        with pytest.raises(keys.KeyConfigError) as info:
+            keys.load_keyset(c.private, c.publics)
+    finally:
+        os.chmod(pub, 0o644)
+    assert str(info.value) == (f"JWT public key (SSO_JWT_PUBLIC_KEYS='k.public.pem' in SSO_JWT_KEYS_MOUNT="
+                               f"{str(tmp_path)!r}) {pub!r} exists but is not readable by uid {os.geteuid()}; "
+                               "chown to SSO_UID:SSO_GID or set SSO_UID")
+
+
+def test_unset_private_key_is_not_found():
+    c = _cfg()
+    assert c.private.path == "" and c.publics == ()
+    with pytest.raises(keys.KeyConfigError, match="not found"):
+        keys.load_keyset(c.private, c.publics)

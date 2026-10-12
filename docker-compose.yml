@@ -33,7 +33,12 @@ services:
       SSO_FORWARDED_ALLOW_IPS: ${SSO_FORWARDED_ALLOW_IPS:-${SSO_EDGE_SUBNET:-172.31.250.0/24}}
       # shared throttle cache; settings refuse a per-process cache when SSO_DEBUG=False (QA defect 5)
       SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
+      # JWT keys: SSO_JWT_PRIVATE_KEY / SSO_JWT_PUBLIC_KEYS are file NAMES resolved in this directory.
+      # Pinned here (not overridable from .env): env_file also passes the HOST path SSO_KEYS_DIR into the
+      # container, and settings' precedence is SSO_JWT_KEYS_MOUNT > SSO_KEYS_DIR > /run/keys.
+      SSO_JWT_KEYS_MOUNT: /run/keys
     volumes:
+      # SSO_KEYS_DIR: the single host folder with the key pair(s), mounted read-only at the fixed /run/keys
       - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
       # optional MySQL server CA for verified DB TLS (SSO_DB_SSL_CA=/run/mysql-ca/ca.pem, R20/R28)
       - ${SSO_MYSQL_CA_DIR:-./mysql-ca}:/run/mysql-ca:ro

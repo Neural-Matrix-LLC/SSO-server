@@ -33,6 +33,8 @@ _cur_priv, _cur_pub = _write_pair("current")
 _old_priv, _old_pub = _write_pair("old")
 _rogue_priv, _rogue_pub = _write_pair("rogue")  # never published
 
+for _var in ("SSO_KEYS_DIR", "SSO_JWT_PRIVATE_KEY_PATH", "SSO_JWT_PUBLIC_KEY_PATHS", "SSO_JWT_PUBLIC_KEY_PATH"):
+    os.environ.pop(_var, None)  # a developer's shell must not leak the old/host forms into the tests
 os.environ.update(
     {
         "SSO_ENV_FILE": "",
@@ -42,8 +44,10 @@ os.environ.update(
         "SSO_AUDIENCE": "myfin-services",
         "SSO_ALLOWED_HOSTS": "testserver,sso.test,localhost",
         "SSO_DB_ENGINE": os.environ.get("SSO_DB_ENGINE", "sqlite"),
-        "SSO_JWT_PRIVATE_KEY_PATH": _cur_priv,
-        "SSO_JWT_PUBLIC_KEY_PATHS": f"{_cur_pub},{_old_pub}",
+        # file names in the keys mount (README "Docker quick start" step 3); rotation: two public keys
+        "SSO_JWT_KEYS_MOUNT": _KEYDIR,
+        "SSO_JWT_PRIVATE_KEY": "current.private.pem",
+        "SSO_JWT_PUBLIC_KEYS": "current.public.pem,old.public.pem",
         "SSO_CORS_ALLOWED_ORIGINS": "https://fin.example.test,https://app.example.test",
         "SSO_COOKIE_DOMAIN": ".example.test",
         "SSO_SSL_REDIRECT": "False",

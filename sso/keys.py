@@ -8,6 +8,7 @@ import base64
 import hashlib
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from cryptography.hazmat.primitives import serialization
@@ -108,8 +109,8 @@ def _read(path: str, what: str) -> bytes:
         raise KeyConfigError(f"{what} is not readable: {path!r} ({exc.strerror})") from None
 
 
-def load_private_key(path: str) -> rsa.RSAPrivateKey:
-    data = _read(path, "JWT private key (SSO_JWT_PRIVATE_KEY_PATH)")
+def load_private_key(path: str, origin: str = "SSO_JWT_PRIVATE_KEY") -> rsa.RSAPrivateKey:
+    data = _read(path, f"JWT private key ({origin})")
     try:
         key = serialization.load_pem_private_key(data, password=None)
     except (ValueError, TypeError) as exc:
@@ -121,8 +122,8 @@ def load_private_key(path: str) -> rsa.RSAPrivateKey:
     return key
 
 
-def load_public_key(path: str) -> rsa.RSAPublicKey:
-    data = _read(path, "JWT public key (SSO_JWT_PUBLIC_KEY_PATHS)")
+def load_public_key(path: str, origin: str = "SSO_JWT_PUBLIC_KEYS") -> rsa.RSAPublicKey:
+    data = _read(path, f"JWT public key ({origin})")
     try:
         key = serialization.load_pem_public_key(data)
     except ValueError as exc:
@@ -158,11 +159,113 @@ def build_keyset(private_key: rsa.RSAPrivateKey, public_keys: list[rsa.RSAPublic
     )
 
 
-def load_keyset(private_path: str, public_paths: list[str]) -> KeySet:
-    """Load the signing key and all published public keys from disk (fail fast)."""
-    private_key = load_private_key(private_path)
-    publics = [load_public_key(p) for p in public_paths if p]
+def load_keyset(private_path: "str | KeyFile",
+                public_paths: "list[str] | list[KeyFile] | tuple[KeyFile, ...]") -> KeySet:
+    """Load the signing key and all published public keys from disk (fail fast). Accepts plain paths or the
+    :class:`KeyFile` entries of :func:`resolve_key_config` (whose origin then appears in error messages)."""
+    priv = private_path if isinstance(private_path, KeyFile) else KeyFile(private_path, "SSO_JWT_PRIVATE_KEY")
+    private_key = load_private_key(priv.path, priv.origin)
+    publics = []
+    for p in public_paths:
+        kf = p if isinstance(p, KeyFile) else KeyFile(p, "SSO_JWT_PUBLIC_KEYS")
+        if kf.path:
+            publics.append(load_public_key(kf.path, kf.origin))
     return build_keyset(private_key, publics)
+
+
+# --------------------------------------------------------------------------- key file configuration
+DEFAULT_KEYS_MOUNT = "/run/keys"
+#: deprecated variable -> its replacement
+DEPRECATED_KEY_VARS = {
+    "SSO_JWT_PRIVATE_KEY_PATH": "SSO_JWT_PRIVATE_KEY",
+    "SSO_JWT_PUBLIC_KEY_PATHS": "SSO_JWT_PUBLIC_KEYS",
+    "SSO_JWT_PUBLIC_KEY_PATH": "SSO_JWT_PUBLIC_KEYS",
+}
+
+
+class KeyConfigConflict(KeyConfigError):
+    """The old and the new form of the same key setting are both set. Always fatal (also with SSO_DEBUG)."""
+
+
+@dataclass(frozen=True)
+class KeyFile:
+    path: str
+    origin: str  # how the path was built, for error messages
+
+
+@dataclass(frozen=True)
+class KeyConfig:
+    private: KeyFile
+    publics: tuple[KeyFile, ...]
+    mount: str
+    mount_source: str  # "SSO_JWT_KEYS_MOUNT", "SSO_KEYS_DIR" or "default"
+    deprecated: tuple[str, ...]  # old variables that were used
+
+
+def keys_mount(env: Mapping[str, str]) -> tuple[str, str]:
+    """Directory key *names* are resolved in. Precedence: SSO_JWT_KEYS_MOUNT (explicit) > SSO_KEYS_DIR >
+    /run/keys. A relative directory is resolved against the working directory. docker-compose.yml sets
+    SSO_JWT_KEYS_MOUNT=/run/keys for web, so the host SSO_KEYS_DIR that env_file passes in never wins there."""
+    for var in ("SSO_JWT_KEYS_MOUNT", "SSO_KEYS_DIR"):
+        value = (env.get(var) or "").strip()
+        if value:
+            return os.path.abspath(value), var
+    return DEFAULT_KEYS_MOUNT, "default"
+
+
+def _resolve(var: str, value: str, mount: str, mount_source: str) -> KeyFile:
+    if "/" in value:  # a path, as before: absolute, or relative to the working directory
+        path = os.path.abspath(value)
+        how = f"{var}={value!r} is a path"
+        if not os.path.isabs(value):
+            how += f" relative to the working directory {os.getcwd()!r}"
+        return KeyFile(path, how)
+    where = f"{mount_source}={mount!r}" if mount_source != "default" else f"the default mount {mount!r}"
+    return KeyFile(os.path.join(mount, value), f"{var}={value!r} in {where}")
+
+
+def _names(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def resolve_key_config(env: Mapping[str, str]) -> KeyConfig:
+    """Turn the key environment variables into file paths (README "Docker quick start" step 3, §3).
+
+    New form: SSO_JWT_PRIVATE_KEY (a file name) and SSO_JWT_PUBLIC_KEYS (comma-separated file names), joined to
+    :func:`keys_mount`. A value containing '/' is a path instead (absolute, or relative to the working
+    directory). Old form (deprecated): SSO_JWT_PRIVATE_KEY_PATH, SSO_JWT_PUBLIC_KEY_PATHS (and the v1.0
+    singular SSO_JWT_PUBLIC_KEY_PATH), used verbatim as before. Old and new form of the same setting together
+    raise :class:`KeyConfigConflict`. An unset private key resolves to path "" (= "not found").
+    """
+    get = lambda var: (env.get(var) or "").strip()  # noqa: E731
+    mount, mount_source = keys_mount(env)
+    deprecated: list[str] = []
+
+    if get("SSO_JWT_PRIVATE_KEY") and get("SSO_JWT_PRIVATE_KEY_PATH"):
+        raise KeyConfigConflict("Both SSO_JWT_PRIVATE_KEY and the deprecated SSO_JWT_PRIVATE_KEY_PATH are set; "
+                                "keep only SSO_JWT_PRIVATE_KEY (a file name in the keys mount).")
+    old_publics = [v for v in ("SSO_JWT_PUBLIC_KEY_PATHS", "SSO_JWT_PUBLIC_KEY_PATH") if get(v)]
+    if get("SSO_JWT_PUBLIC_KEYS") and old_publics:
+        raise KeyConfigConflict(f"Both SSO_JWT_PUBLIC_KEYS and the deprecated {old_publics[0]} are set; "
+                                "keep only SSO_JWT_PUBLIC_KEYS (comma-separated file names in the keys mount).")
+
+    if get("SSO_JWT_PRIVATE_KEY"):
+        private = _resolve("SSO_JWT_PRIVATE_KEY", get("SSO_JWT_PRIVATE_KEY"), mount, mount_source)
+    elif get("SSO_JWT_PRIVATE_KEY_PATH"):
+        deprecated.append("SSO_JWT_PRIVATE_KEY_PATH")
+        private = KeyFile(get("SSO_JWT_PRIVATE_KEY_PATH"), "SSO_JWT_PRIVATE_KEY_PATH, deprecated")
+    else:
+        private = KeyFile("", "SSO_JWT_PRIVATE_KEY is not set")
+
+    if get("SSO_JWT_PUBLIC_KEYS"):
+        publics = [_resolve("SSO_JWT_PUBLIC_KEYS", n, mount, mount_source) for n in _names(get("SSO_JWT_PUBLIC_KEYS"))]
+    elif old_publics:
+        var = old_publics[0]  # PATHS wins over the singular, as before
+        deprecated.append(var)
+        publics = [KeyFile(p, f"{var}, deprecated") for p in _names(get(var))]
+    else:
+        publics = []
+    return KeyConfig(private, tuple(publics), mount, mount_source, tuple(deprecated))
 
 
 def generate_ephemeral_keyset() -> KeySet:
