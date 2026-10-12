@@ -17,6 +17,117 @@ Sprint 1 scope covers spec phases 1–2 plus the phase-3 deployment files. Phase
 phase 5 (PKCE / hosted login / account endpoints) are not built yet. The `AuthorizationCode` model exists
 but nothing uses it.
 
+## Docker quick start (local / WSL)
+
+From a fresh checkout to a running server against an existing `dcWebUsers` MySQL, with the production
+compose file (`docker-compose.yml`: `web` + `redis` + `nginx`, no DB container). Values below are for a local
+machine (`https://localhost:8443`, self-signed TLS); a server uses its real host name, port 443 and a real
+certificate. For a throw-away local MySQL instead, see "Local dev with self-signed TLS" in [§7](#7-docker).
+
+1. **Create `.env`** (never commit it):
+   ```bash
+   cp .env.example .env && chmod 600 .env
+   python3 -c 'import secrets; print(secrets.token_urlsafe(50))'   # paste as SSO_SECRET_KEY=
+   ```
+   For a local run, change these lines in `.env`:
+   ```ini
+   SSO_ALLOWED_HOSTS=localhost
+   SSO_ISSUER=https://localhost:8443
+   SSO_CSRF_TRUSTED_ORIGINS=https://localhost:8443
+   SSO_CORS_ALLOWED_ORIGINS=https://localhost:8443
+   SSO_COOKIE_DOMAIN=
+   SSO_HSTS_SECONDS=0
+   SSO_DOMAIN=localhost
+   SSO_HOSTNAME=localhost
+   SSO_HTTP_PORT=8080
+   SSO_HTTPS_PORT=8443
+   SSO_TLS_CERT_FILE=selfsigned.crt
+   SSO_TLS_KEY_FILE=selfsigned.key
+   IMAGE_TAG=dev
+   ```
+   and create the self-signed certificate nginx expects in `SSO_CERTS_DIR` (default `./docker/certs`):
+   `scripts/gen_selfsigned_cert.sh localhost docker/certs` (writes `selfsigned.crt` / `selfsigned.key`).
+
+2. **Generate the JWT signing keys.** `scripts/gen_keys.sh [OUT_DIR] [NAME] [BITS]` (defaults `./keys`,
+   `sso-YYYY-MM`, 3072 bits; it never overwrites):
+   ```bash
+   scripts/gen_keys.sh ./keys sso-2026-10
+   # private=./keys/sso-2026-10.private.pem      (mode 0600)
+   # public=./keys/sso-2026-10.public.pem        (mode 0644)
+   # kid=<16 hex>                                 note it: JWKS must show the same kid (step 7)
+   ```
+
+3. **Point `.env` at the keys as the container sees them.** Compose mounts the host directory
+   `SSO_KEYS_DIR` (default `./keys`) **read-only at `/run/keys`** inside `web`. `SSO_JWT_PRIVATE_KEY_PATH` and
+   `SSO_JWT_PUBLIC_KEY_PATHS` are read inside the container, so they must be `/run/keys/<file>` paths, not
+   host paths like `./keys/...` or `/home/you/...`:
+   ```ini
+   SSO_KEYS_DIR=./keys
+   SSO_JWT_PRIVATE_KEY_PATH=/run/keys/sso-2026-10.private.pem
+   SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/sso-2026-10.public.pem
+   ```
+   (`SSO_JWT_PUBLIC_KEY_PATHS` is comma-separated: during a key rotation it lists every public key, see §4.)
+
+4. **Let the container user read them.** `web` runs as `SSO_UID:SSO_GID` (default `10001:10001`), not as you,
+   and `gen_keys.sh` creates `keys/` as `0700` owned by you. Either
+   ```bash
+   sudo chown -R 10001:10001 keys && chmod 0600 keys/*.private.pem        # a)
+   ```
+   or b) run the container as yourself: add `SSO_UID=$(id -u)` / `SSO_GID=$(id -g)` (the numbers, e.g.
+   `1000`) to `.env` and **rebuild** the image (step 7 uses `--build`). The private key stays `0600` (or
+   `0640` with the `SSO_GID` group). Symptoms and checks (`ls -n keys/`): see
+   [Troubleshooting: key ownership](#troubleshooting-key-ownership) in §7.
+
+5. **Database.** The settings read `SSO_DB_ENGINE=mysql`, `SSO_DBHOST`, `SSO_DBPORT` (3306), `SSO_DBNAME`
+   (`dcWebUsers`), `SSO_DBUSER`, `SSO_DBPWD` (optional TLS: `SSO_DB_SSL_CA` / `SSO_DB_SSL_MODE`). `.env` holds the
+   **runtime** account `sso_app` (`SELECT, INSERT, UPDATE, DELETE` only); migrations use a separate
+   **`sso_migrator`** account that additionally has `CREATE, ALTER, INDEX, REFERENCES`. The exact grants are in
+   `docker/mysql-init/01-sso-accounts.sh` (it creates both accounts for the local/QA MySQL; on a real server
+   a DBA creates them the same way, restricted to the SSO host). `SSO_DBHOST` is resolved inside the container:
+   `localhost` is the container itself. For MySQL on the Windows/WSL host use `host.docker.internal` (Docker
+   Desktop) or the host's IP. **Before migrating a real `dcWebUsers`, take the `mysqldump` backup in
+   [§5](#5-database-first-deployment-and-migrate-procedure) step 1.**
+
+6. **Migrate once, as `sso_migrator`** (the container never migrates on its own). The password is read into the
+   shell so it stays out of `.env` and the command line; `-e SSO_DBPWD` passes it through:
+   ```bash
+   read -rs -p 'sso_migrator password: ' SSO_DBPWD && export SSO_DBPWD && echo
+   docker compose build web
+   docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate --plan
+   ```
+   **Stop** unless the plan lists only `application.*`, `sso.*` and `token_blacklist.*` (an existing `dcWebUsers`
+   already has `contenttypes`, `auth`, `admin` and `sessions`; see §5). Then apply it:
+   ```bash
+   docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate
+   unset SSO_DBPWD
+   ```
+   This also creates the permission `application.app1` (llm-wiki-svc).
+
+7. **Start and check.** nginx answers only for `SSO_HOSTNAME` (any other `Host` is dropped), so call it by that
+   name; `-k` accepts the self-signed certificate:
+   ```bash
+   docker compose up -d --build
+   docker compose ps                                   # web and nginx "healthy"
+   curl -sk https://localhost:8443/healthz             # {"status":"ok"}
+   curl -sk https://localhost:8443/.well-known/jwks.json \
+     | python3 -c 'import json,sys; print([k["kid"] for k in json.load(sys.stdin)["keys"]])'
+   ```
+   The kid must equal the `kid=` that `gen_keys.sh` printed. With a real host name that does not resolve yet,
+   add `--resolve "$SSO_HOSTNAME:$SSO_HTTPS_PORT:127.0.0.1"` and use `https://$SSO_HOSTNAME:$SSO_HTTPS_PORT/...`.
+   If `web` keeps restarting, `docker compose logs web` names the problem (missing or unreadable key, DB, cache).
+
+8. **Admin user and app access.**
+   ```bash
+   docker compose run --rm web python manage.py createsuperuser
+   # other applications later:  docker compose run --rm web python manage.py create_app_permission app2 "Can use app2 (reporting)"
+   ```
+   The admin is at `https://localhost:8443/<SSO_ADMIN_PATH>` (default `sso-admin/`). **Superusers do not get
+   app access automatically** (`SSO_SUPERUSER_ALL_APPS=false`, §6a): to use llm-wiki-svc, grant
+   `application.app1` explicitly. In the admin open *Users* → the user → *User permissions* (or a group the
+   user is in → *Permissions*) → "Applications | application access | Can use app1 (llm-wiki-svc)" → Save. `perms` in the
+   next token (or after a refresh) then contains `application.app1`. An existing `dcWebUsers` user can be made
+   staff/superuser the same way instead of creating a new one.
+
 ---
 
 ## 1. Layout
@@ -271,6 +382,7 @@ The web container itself runs as `sso_app` (DML only).
 `cp docker-compose.dev.yml docker-compose.override.yml` makes a plain `docker compose up` use the overlay.
 The override file is gitignored, so it can never reach a server checkout.
 
+<a id="troubleshooting-key-ownership"></a>
 **Troubleshooting: key ownership (e.g. WSL, where your user is uid 1000).** The container reads the keys
 as `SSO_UID:SSO_GID` (default `10001:10001`), not as you. If the key files or the keys directory belong to
 your host user (`id -u` is usually `1000` in WSL) with mode 0600/0700, `web` stops at startup with

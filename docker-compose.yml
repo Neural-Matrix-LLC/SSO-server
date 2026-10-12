@@ -1,7 +1,8 @@
 # Production / staging stack (spec §9.5, deployment plan §3 and §15 R18-R23).
 # Validate without printing secrets:  docker compose config --quiet
 # No DB service: MySQL dcWebUsers is remote. Migrations are operator-run, never automatic:
-#   docker compose run --rm web python manage.py migrate --plan   (review: only sso + token_blacklist)
+#   docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate --plan
+#   (review: only application + sso + token_blacklist; README "Docker quick start" step 6 / §5)
 # All host names, ports and paths come from .env (see .env.example); nothing is hard-coded here.
 name: sso
 
