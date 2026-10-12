@@ -421,7 +421,7 @@ One permission per application, checked by that application in the access token'
 
 * **Grant:** admin → Users (or Groups) → "user permissions" / "group permissions" → pick
   `application | application access | Can use app1 (llm-wiki-svc)`. Direct and group grants both count;
-  superusers have every `application.*` permission; inactive users have none.
+  by default superusers get only explicit grants (see below); inactive users have none.
   Shell alternative: `u.user_permissions.add(Permission.objects.get(content_type__app_label="application", codename="app1"))`.
 * **Takes effect** at the user's next token refresh (access tokens live ≤ 15 min); `/me` and `/introspect` show it at once.
 * **Add an application (no code change):**
