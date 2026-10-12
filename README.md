@@ -84,8 +84,10 @@ certificate. For a throw-away local MySQL instead, see "Local dev with self-sign
    **`sso_migrator`** account that additionally has `CREATE, ALTER, INDEX, REFERENCES`. The exact grants are in
    `docker/mysql-init/01-sso-accounts.sh` (it creates both accounts for the local/QA MySQL; on a real server
    a DBA creates them the same way, restricted to the SSO host). `SSO_DBHOST` is resolved inside the container:
-   `localhost` is the container itself. For MySQL on the Windows/WSL host use `host.docker.internal` (Docker
-   Desktop) or the host's IP. **Before migrating a real `dcWebUsers`, take the `mysqldump` backup in
+   `localhost` is the container itself. For MySQL on the Docker host (Windows/WSL or Linux) use
+   `SSO_DBHOST=host.docker.internal`: `docker-compose.yml` maps that name to the host (`extra_hosts:
+   host-gateway`), so it works with Docker Desktop and with Docker Engine in WSL/Linux alike. MySQL must then
+   listen on an address the containers can reach (not only `127.0.0.1`) and allow the account from that host. **Before migrating a real `dcWebUsers`, take the `mysqldump` backup in
    [§5](#5-database-first-deployment-and-migrate-procedure) step 1.**
 
 6. **Migrate once, as `sso_migrator`** (the container never migrates on its own). The password is read into the

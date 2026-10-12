@@ -45,6 +45,10 @@ services:
     cap_drop:
       - ALL
     # no "ports:": only nginx is published. Shared-nginx variant: "127.0.0.1:${SSO_WEB_LOCAL_PORT:-8001}:8000".
+    # SSO_DBHOST=host.docker.internal reaches a MySQL on the Docker host, also with Docker Engine on Linux/WSL
+    # (Docker Desktop defines the name itself; host-gateway = the host's address on the default bridge).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - edge
       - backend

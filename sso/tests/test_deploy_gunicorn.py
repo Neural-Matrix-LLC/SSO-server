@@ -49,6 +49,8 @@ def test_writable_paths_match_compose():
     web = compose[compose.index("\n  web:"):compose.index("\n  redis:")]
     assert "read_only: true" in web and "tmpfs:\n      - /tmp" in web
     assert '["CMD", "python", "/app/docker/healthcheck.py"]' in web
+    # SSO_DBHOST=host.docker.internal works with Docker Engine on Linux/WSL too
+    assert 'extra_hosts:\n      - "host.docker.internal:host-gateway"' in web
     assert 'CMD ["python", "/app/docker/healthcheck.py"]' in (REPO / "Dockerfile").read_text()
     args = _cmd_args()
     assert args[args.index("--worker-tmp-dir") + 1] == "/dev/shm"
