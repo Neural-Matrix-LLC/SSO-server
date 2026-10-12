@@ -8,7 +8,7 @@ from django.conf import settings
 from django.contrib.auth.models import Permission
 from django.db.models import Q
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
+from django.db import connections, transaction
 
 from .models import CODENAME_RE, ApplicationAccess, ApplicationPermissionRecord
 
@@ -81,8 +81,26 @@ def sync_permissions(using: str = "default") -> list[str]:
     return lost
 
 
+def _required_tables() -> set[str]:
+    """Tables sync_permissions reads or writes: our own two, plus auth_permission and django_content_type."""
+    return {ApplicationPermissionRecord._meta.db_table, ApplicationAccess._meta.db_table,
+            Permission._meta.db_table, ContentType._meta.db_table}
+
+
 def sync_after_migrate(sender, using="default", **kwargs) -> None:
-    """post_migrate receiver: runs after Django has created the content type and the Meta permissions."""
+    """post_migrate receiver: runs after Django has created the content type and the Meta permissions.
+
+    Django sends post_migrate for every installed app after *any* migrate run, including
+    ``migrate contenttypes`` on an empty database (README §7 dev sequence), before our tables exist.
+    Skip quietly until they do; the run that creates them (a full ``migrate``) syncs.
+    """
+    with connections[using].cursor() as cursor:
+        present = set(connections[using].introspection.table_names(cursor))
+    missing = sorted(_required_tables() - present)
+    if missing:
+        logger.debug("application permission sync skipped on %r: tables not created yet: %s",
+                     using, ", ".join(missing))
+        return
     sync_permissions(using=using)
 
 
