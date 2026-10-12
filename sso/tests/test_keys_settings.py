@@ -326,3 +326,78 @@ def test_dockerfile_collectstatic_still_works_as_root(tmp_path):
     r = _run_as_uid(0, env, code)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "static" / "admin").is_dir()
+
+
+# ---------------------------------------------------------------- missing vs not readable (WSL report)
+_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+needs_non_root = pytest.mark.skipif(_as_root, reason="root bypasses file permissions")
+
+
+def _rsa_pem() -> tuple[bytes, bytes]:
+    k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    priv = k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                           serialization.NoEncryption())
+    pub = k.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return priv, pub
+
+
+def test_missing_key_file_says_not_found(tmp_path):
+    with pytest.raises(keys.KeyConfigError, match=r"not found: .*missing\.pem.*gen_keys\.sh"):
+        keys.load_private_key(str(tmp_path / "missing.pem"))
+    with pytest.raises(keys.KeyConfigError, match="not found"):
+        keys.load_public_key(str(tmp_path / "nodir" / "public.pem"))
+
+
+def test_readable_key_files_load(tmp_path):
+    priv, pub = _rsa_pem()
+    p = _write(tmp_path, "private.pem", priv)
+    os.chmod(p, 0o600)
+    q = _write(tmp_path, "public.pem", pub)
+    os.chmod(q, 0o640)
+    assert keys.load_private_key(p).key_size == 2048
+    assert keys.load_public_key(q).key_size == 2048
+
+
+@needs_non_root
+def test_unreadable_key_file_is_not_reported_as_missing(tmp_path):
+    priv, _ = _rsa_pem()
+    p = _write(tmp_path, "private.pem", priv)
+    os.chmod(p, 0o000)
+    try:
+        with pytest.raises(keys.KeyConfigError) as info:
+            keys.load_private_key(p)
+    finally:
+        os.chmod(p, 0o600)
+    msg = str(info.value)
+    assert msg == (f"JWT private key (SSO_JWT_PRIVATE_KEY_PATH) {p!r} exists but is not readable by uid "
+                   f"{os.geteuid()}; chown to SSO_UID:SSO_GID or set SSO_UID")
+    assert "not found" not in msg and "PRIVATE KEY" not in msg and "BEGIN" not in msg
+
+
+@needs_non_root
+def test_key_in_an_unreadable_directory_is_not_reported_as_missing(tmp_path):
+    d = tmp_path / "keys"
+    d.mkdir()
+    priv, pub = _rsa_pem()
+    q = _write(d, "public.pem", pub)
+    os.chmod(d, 0o000)
+    try:
+        with pytest.raises(keys.KeyConfigError) as info:
+            keys.load_public_key(q)
+    finally:
+        os.chmod(d, 0o700)
+    msg = str(info.value)
+    assert "not found" not in msg and "BEGIN" not in msg
+    assert f"cannot be reached by uid {os.geteuid()}" in msg and repr(str(d)) in msg
+    assert "chown to SSO_UID:SSO_GID or set SSO_UID" in msg
+
+
+def test_key_path_that_is_a_directory(tmp_path):
+    with pytest.raises(keys.KeyConfigError, match="is not a regular file"):
+        keys.load_private_key(str(tmp_path))
+
+
+def test_other_stat_errors_are_reported(tmp_path):
+    f = _write(tmp_path, "file", b"x")
+    with pytest.raises(keys.KeyConfigError, match="is not readable: .*Not a directory"):
+        keys.load_private_key(f + "/private.pem")

@@ -6,8 +6,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
+import stat
 from dataclasses import dataclass, field
-from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -77,13 +78,34 @@ def _public_pem(public_key: rsa.RSAPublicKey) -> str:
 
 
 def _read(path: str, what: str) -> bytes:
-    p = Path(path)
-    if not path or not p.is_file():
+    """Read a key file, telling "missing" apart from "there but not readable by this uid".
+
+    ``Path.is_file()`` returns False on EACCES too, which used to report a mis-owned key (e.g. a host
+    uid 1000 file in a uid 10001 container) as "not found". Messages never contain key material.
+    """
+    if not path:
         raise KeyConfigError(f"{what} not found: {path!r}. Generate keys with scripts/gen_keys.sh.")
+    hint = "chown to SSO_UID:SSO_GID or set SSO_UID"
     try:
-        return p.read_bytes()
-    except OSError as exc:  # pragma: no cover - permission problems are environment specific
-        raise KeyConfigError(f"{what} is not readable: {path!r} ({exc.strerror})") from exc
+        st = os.stat(path)
+    except FileNotFoundError:
+        raise KeyConfigError(f"{what} not found: {path!r}. Generate keys with scripts/gen_keys.sh.") from None
+    except PermissionError:
+        parent = os.path.dirname(os.path.abspath(path))
+        raise KeyConfigError(
+            f"{what} {path!r} cannot be reached by uid {os.geteuid()}: a parent directory (e.g. {parent!r}) "
+            f"is not accessible; {hint}") from None
+    except OSError as exc:
+        raise KeyConfigError(f"{what} is not readable: {path!r} ({exc.strerror})") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise KeyConfigError(f"{what} {path!r} is not a regular file")
+    try:
+        with open(path, "rb") as fh:
+            return fh.read()
+    except PermissionError:
+        raise KeyConfigError(f"{what} {path!r} exists but is not readable by uid {os.geteuid()}; {hint}") from None
+    except OSError as exc:  # pragma: no cover - e.g. EIO; environment specific
+        raise KeyConfigError(f"{what} is not readable: {path!r} ({exc.strerror})") from None
 
 
 def load_private_key(path: str) -> rsa.RSAPrivateKey:
