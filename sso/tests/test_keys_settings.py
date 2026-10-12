@@ -147,7 +147,7 @@ def test_singular_public_key_env_still_supported():
     r = subprocess.run([sys.executable, "-c", code], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().splitlines()[-1] == "2"
-    assert "SSO_JWT_PUBLIC_KEY_PATH is deprecated" in r.stdout + r.stderr
+    assert "SSO_JWT_PUBLIC_KEY_PATH is deprecated" in r.stderr and "deprecated" not in r.stdout
 
 
 def test_deploy_check_passes_with_prod_like_env():
@@ -480,7 +480,7 @@ def test_old_variables_give_a_check_warning_and_a_log_line(settings, caplog):
     assert w.id == "sso.W001" and "SSO_JWT_PRIVATE_KEY_PATH is deprecated; use SSO_JWT_PRIVATE_KEY" in w.msg
     from django.apps import apps
 
-    caplog.set_level("WARNING", logger="sso")
+    caplog.set_level("WARNING", logger="sso.config")
     apps.get_app_config("sso").ready()
     assert "SSO_JWT_PRIVATE_KEY_PATH is deprecated" in caplog.text
     settings.SSO_KEY_DEPRECATED_VARS = ()
@@ -490,9 +490,66 @@ def test_old_variables_give_a_check_warning_and_a_log_line(settings, caplog):
 def test_old_variables_log_once_at_startup():
     r = _run_settings(_old_form())
     assert r.returncode == 0, r.stderr
-    out = r.stdout + r.stderr
-    assert out.count("SSO_JWT_PRIVATE_KEY_PATH is deprecated") == 1
-    assert out.count("SSO_JWT_PUBLIC_KEY_PATHS is deprecated") == 1
+    assert r.stderr.count("WARNING sso.config SSO_JWT_PRIVATE_KEY_PATH is deprecated") == 1
+    assert r.stderr.count("WARNING sso.config SSO_JWT_PUBLIC_KEY_PATHS is deprecated") == 1
+    assert "deprecated" not in r.stdout
+
+
+def test_new_variables_log_no_deprecation():
+    r = _run_settings(GOOD)
+    assert r.returncode == 0, r.stderr
+    assert "deprecated" not in r.stdout + r.stderr
+
+
+def _old_form_manage(*args: str) -> subprocess.CompletedProcess:
+    e = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    e.update({"DJANGO_SETTINGS_MODULE": "ssoproject.settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "sqlite",
+              "SSO_SQLITE_PATH": ":memory:", **_old_form()})
+    return subprocess.run([sys.executable, "manage.py", *args], cwd=REPO, env=e, capture_output=True, text=True,
+                          timeout=120)
+
+
+def test_manage_py_logs_the_deprecation_once_on_stderr():
+    r = _old_form_manage("check", "--deploy", "--fail-level", "ERROR")
+    assert r.returncode == 0, r.stderr
+    # one log line from ready(); the check framework's own sso.W001 report also goes to stderr
+    assert r.stderr.count("WARNING sso.config SSO_JWT_PRIVATE_KEY_PATH is deprecated") == 1
+    assert "(sso.W001) SSO_JWT_PRIVATE_KEY_PATH is deprecated" in r.stderr
+    assert "deprecated" not in r.stdout
+
+
+def test_gunicorn_logs_the_deprecation_once_per_worker_on_stderr(tmp_path):
+    """Under gunicorn (which runs no system checks) the line reaches stderr exactly once per worker process."""
+    pytest.importorskip("gunicorn")
+    import shutil
+    import socket
+    import time
+
+    gunicorn = shutil.which("gunicorn", path=os.path.dirname(sys.executable))
+    if not gunicorn:
+        pytest.skip("gunicorn not installed in this venv")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    e = {k: v for k, v in os.environ.items() if not k.startswith("SSO_")}
+    e.update({"DJANGO_SETTINGS_MODULE": "ssoproject.settings", "SSO_ENV_FILE": "", "SSO_DB_ENGINE": "sqlite",
+              "SSO_SQLITE_PATH": ":memory:", "SSO_ALLOWED_HOSTS": "127.0.0.1", "SSO_SSL_REDIRECT": "False",
+              **_old_form()})
+    err, out = tmp_path / "err", tmp_path / "out"
+    with open(err, "w") as fe, open(out, "w") as fo:
+        p = subprocess.Popen([gunicorn, "ssoproject.wsgi:application", "--bind", f"127.0.0.1:{port}",
+                              "--workers", "2", "--no-control-socket", "--worker-tmp-dir", str(tmp_path)],
+                             cwd=REPO, env=e, stdout=fo, stderr=fe)
+        try:
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and err.read_text().count("sso.config") < 2:
+                time.sleep(0.2)
+        finally:
+            p.terminate()
+            p.wait(timeout=15)
+    text = err.read_text()
+    assert text.count("WARNING sso.config SSO_JWT_PRIVATE_KEY_PATH is deprecated") == 2, text  # 2 workers
+    assert "deprecated" not in out.read_text()
 
 
 @pytest.mark.parametrize("old", [{"SSO_JWT_PRIVATE_KEY_PATH": "/x/p.pem"}])

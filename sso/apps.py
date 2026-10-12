@@ -12,6 +12,7 @@ class SsoConfig(AppConfig):
 
         from . import checks, signals  # noqa: F401
 
-        # once per process (gunicorn does not run system checks; sso.W001 covers manage.py)
+        # once per process (ready() runs once per django.setup(); gunicorn does not run system checks, so
+        # sso.W001 alone would be invisible there). "sso.config" logs to stderr only (settings.LOGGING).
         for msg in checks.deprecated_key_messages():
-            logging.getLogger("sso").warning(msg)
+            logging.getLogger("sso.config").warning(msg)

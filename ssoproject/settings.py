@@ -300,9 +300,15 @@ LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
     "formatters": {"plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"}},
-    "handlers": {"console": {"class": "logging.StreamHandler", "stream": sys.stdout, "formatter": "plain"}},
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "stream": sys.stdout, "formatter": "plain"},
+        # start-up configuration warnings (e.g. deprecated key variables): stderr, like gunicorn's own
+        # --error-logfile - and Django's system-check output
+        "stderr": {"class": "logging.StreamHandler", "stream": sys.stderr, "formatter": "plain"},
+    },
     "root": {"handlers": ["console"], "level": env.str("SSO_LOG_LEVEL", default="INFO")},
     "loggers": {
         "django.request": {"level": "ERROR"},
+        "sso.config": {"handlers": ["stderr"], "level": "WARNING", "propagate": False},
     },
 }
