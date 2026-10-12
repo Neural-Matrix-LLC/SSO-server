@@ -257,3 +257,26 @@ Branch `sso-server-sprint1`: local and `origin` were both already at `5666f8b` (
 Notes:
 - At 12:53 a non-QA process briefly held `127.0.0.1:8000`. QA's non-root start there failed with "address in use", and the `/healthz` 503 `database` answer came from that other server. QA reran on port 8020 (PASS). QA's `pkill -f "gunicorn … -b 127.0.0.1:8000"` matches any server started with the README command line, so it may have stopped that other process. From now on QA uses its own ports and stops servers by PID.
 - Cleanup: all servers stopped; root-created `/tmp/qa-quick-root*` and `/tmp/qa-cache-quick*`, plus the README's `/tmp/ssokeys` and `/tmp/sso-cache`, removed; nothing root-owned left in the repo. Nothing outside `qa/` changed.
+
+## Key config @ d784f10 (feat/app-permissions; 610c9b8 + d784f10)
+
+Tree clean before QA edits; both commits in HEAD (local branch is ahead of `origin/feat/app-permissions` = c041594, i.e.
+610c9b8/d784f10 are not on the remote yet). qa/ is on both branches (sprint1 d866070 is an ancestor of feat/app-permissions).
+Run with `qa/harness/run_keys_round.sh` (server started with the new variables; ports 8052/8050 for 3.13, 8053/8051 for 3.11;
+stopped by PID; throw-away SQLite DBs `qa/run/sso-keys-<py>.sqlite3`). `manage.py check` with the new form: no issues.
+
+| Python (server + pytest) | test_deploy_files | test_keys_config (new) | test_jwks_discovery_health | test_security_jwt | Total |
+|---|---|---|---|---|---|
+| 3.13.16 | 35 pass | 36 pass | 15 pass | 43 pass | **129 pass, 0 fail, 0 skip** |
+| 3.11.14 | 35 pass | 36 pass | 15 pass | 43 pass | **129 pass, 0 fail, 0 skip** |
+
+Findings (no failures):
+- **K-01 (Info, by design):** a key value containing `/` is a path relative to the working directory, so
+  `SSO_JWT_PRIVATE_KEY=../outside/x.pem` resolves outside the mount (KEYCFG-09); relative `sub/x.pem` is NOT mount-relative
+  (KEYCFG-05). Documented in README §3 / .env.example; operator-controlled env only, no privilege boundary. Bare names cannot
+  escape (`..`, `..%2Fx`, `..\x` → clean ImproperlyConfigured inside the mount). Optional hardening: reject `..` components or
+  resolve relative paths against the mount.
+- **K-02 (Info):** `.env.example` assigns `SSO_KEYS_DIR=./keys` twice (l.41 and l.94, same value).
+- **K-03 (Info, doc drift):** `docs/SSO-server.md` (l.123, 471-472, 497-498) and `docs/DESIGN-ADDENDUM-v1.1.md` (l.29-30) still
+  show the old `*_PATH` names.
+- The deprecation log line goes to stdout (settings LOGGING console handler), not stderr; one line per old variable per process.

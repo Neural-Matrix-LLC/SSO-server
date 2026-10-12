@@ -39,11 +39,21 @@ def test_DEPLOY_01b_nginx_conf_and_verifier_package(repo):
 def test_DEPLOY_02_env_example_lists_all_settings(repo):
     text = _text(os.path.join(repo, ".env.example"))
     required = ["SSO_SECRET_KEY", "SSO_DEBUG", "SSO_ALLOWED_HOSTS", "SSO_DBHOST", "SSO_DBPORT", "SSO_DBUSER",
-                "SSO_DBPWD", "SSO_ISSUER", "SSO_AUDIENCE", "SSO_JWT_PRIVATE_KEY_PATH", "SSO_JWT_PUBLIC_KEY_PATHS",
+                "SSO_DBPWD", "SSO_ISSUER", "SSO_AUDIENCE",
+                # key config @ 610c9b8/d784f10: host folder + file NAMES (resolved in SSO_JWT_KEYS_MOUNT, /run/keys)
+                "SSO_KEYS_DIR", "SSO_JWT_PRIVATE_KEY", "SSO_JWT_PUBLIC_KEYS",
                 "SSO_ACCESS_TTL_MIN", "SSO_REFRESH_TTL_DAYS", "SSO_CORS_ALLOWED_ORIGINS", "SSO_COOKIE_DOMAIN",
                 "SSO_CACHE_URL"]
     missing = [v for v in required if not re.search(rf"^\s*{v}\s*=", text, re.M)]
     assert not missing, f".env.example missing {missing}"
+    # names, not paths: no '/' in the values (a '/' would make them paths relative to the working directory)
+    for v in ("SSO_JWT_PRIVATE_KEY", "SSO_JWT_PUBLIC_KEYS"):
+        val = re.search(rf"^[ \t]*{v}[ \t]*=[ \t]*(\S*)", text, re.M).group(1)
+        assert val and "/" not in val, f"{v}={val!r} should be a file name"
+    # deprecated *_PATH forms: if listed at all, they must be EMPTY (old + new together = ImproperlyConfigured)
+    for v in ("SSO_JWT_PRIVATE_KEY_PATH", "SSO_JWT_PUBLIC_KEY_PATHS", "SSO_JWT_PUBLIC_KEY_PATH"):
+        m = re.search(rf"^[ \t]*{v}[ \t]*=[ \t]*(\S*)", text, re.M)
+        assert m is None or m.group(1) == "", f"{v} set in .env.example together with the new form"
     assert re.search(r"^\s*SSO_DEBUG\s*=\s*False", text, re.M | re.I), "SSO_DEBUG must default to False (B12)"
     assert "PRIVATE KEY" not in text
 
@@ -80,7 +90,8 @@ def test_DEPLOY_05_nginx_forwards_proto_and_host(repo):
 
 def test_DEPLOY_06_compose_mounts_keys_readonly(repo):
     compose = _text(os.path.join(repo, "docker-compose.yml"))
-    assert re.search(r"/run/keys:ro", compose), "keys must be mounted read-only at /run/keys"
+    assert re.search(r"\$\{SSO_KEYS_DIR:-\./keys\}:/run/keys:ro", compose), "SSO_KEYS_DIR must be mounted ro at /run/keys"
+    assert re.search(r"^\s+SSO_JWT_KEYS_MOUNT:\s*/run/keys\s*$", compose, re.M), "web must pin SSO_JWT_KEYS_MOUNT"
 
 
 def test_DEPLOY_07_readme_covers_required_topics(repo):

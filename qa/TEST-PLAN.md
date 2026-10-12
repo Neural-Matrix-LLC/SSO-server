@@ -86,6 +86,8 @@ with bad claims), `SSO_MANAGE_CMD` (Django shell access for DB-state cases), `VE
 ### 2.5 Late check of the code (commit df02306, after the plan was drafted)
 - Paths: `ssoproject/urls.py` routes exactly the spec paths. Phase-5 names are reserved but not routed, which matches ERR-10/DISC-04.
 - `SSO_JWT_PUBLIC_KEY_PATHS` is read, with the singular `SSO_JWT_PUBLIC_KEY_PATH` as fallback (answers Q-01).
+  **Superseded @ 610c9b8/d784f10:** keys are now `SSO_JWT_PRIVATE_KEY` / `SSO_JWT_PUBLIC_KEYS` (file names resolved in
+  `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`); the three old `*_PATH` names are deprecated (`sso.W001`). See §3.13.
 - Throttle rates come from env: `SSO_THROTTLE_LOGIN`, `SSO_THROTTLE_LOGIN_USER`, `SSO_THROTTLE_REFRESH` (answers Q-02). Plan: run the functional
   suite with high rates (`-m "not throttle"`) and the throttle suite at spec defaults. Set `SSO_TEST_RATE_*` to match.
 - `DEFAULT_PARSER_CLASSES = [JSONParser]` (answers the parser half of Q-15; LOGIN-19 still verifies it).
@@ -209,7 +211,7 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | JWKS-05 | | token header kid is in JWKS; token verifies with the §8.2 code | A |
 | JWKS-06 | | kids unique | A |
 | JWKS-07 | with a garbage Bearer; POST | 200 (public); POST 405 | A |
-| JWKS-08 | set `SSO_JWT_PUBLIC_KEY_PATHS=old,new`, restart; then switch the signing key | both keys published; tokens signed by either verify; JWKS lists every configured key (B6, §5.3 rotation runbook) | M |
+| JWKS-08 | set `SSO_JWT_PUBLIC_KEYS=old.public.pem,new.public.pem`, restart; then switch `SSO_JWT_PRIVATE_KEY` to the new key; then retire the old public key | both keys published; tokens signed by either verify; JWKS lists every configured key (B6, §5.3 rotation runbook). Automated as KEYROT-01 | A |
 | DISC-01 | GET openid-configuration | 200; `issuer`==SSO_ISSUER; `id_token_signing_alg_values_supported==["RS256"]` | A |
 | DISC-02 | | `jwks_uri` = issuer + `/.well-known/jwks.json`, returns the same keys | A |
 | DISC-03 | | `token_endpoint` absent or ends with `/api/v1/auth/login` (B2 overrides spec) | A |
@@ -333,14 +335,14 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | ID | Check | Auto |
 |---|---|---|
 | DEPLOY-01/01b | Dockerfile, docker-compose.yml, nginx.conf, scripts/gen_keys.sh, .env.example, README.md, manage.py, examples/verifier/, examples/frontend/index.html exist | A |
-| DEPLOY-02 | `.env.example` lists every setting (incl. `SSO_JWT_PUBLIC_KEY_PATHS`, `SSO_CACHE_URL`, `SSO_COOKIE_DOMAIN`); `SSO_DEBUG=False`; no key material | A |
+| DEPLOY-02 | `.env.example` lists every setting (incl. `SSO_KEYS_DIR`, `SSO_JWT_PRIVATE_KEY`, `SSO_JWT_PUBLIC_KEYS` as file **names** without `/`, `SSO_CACHE_URL`, `SSO_COOKIE_DOMAIN`); the deprecated `SSO_JWT_PRIVATE_KEY_PATH`/`SSO_JWT_PUBLIC_KEY_PATHS`/`SSO_JWT_PUBLIC_KEY_PATH`, if listed, are empty; `SSO_DEBUG=False`; no key material | A |
 | DEPLOY-03 | no private key tracked in git; `keys/` gitignored | A |
 | DEPLOY-04 | frontend uses `credentials: "include"` and the login/refresh paths; no localStorage/sessionStorage | A |
 | DEPLOY-05 | nginx: `listen 443 ssl`, `proxy_set_header Host $http_host`, `X-Forwarded-Proto` | A |
-| DEPLOY-06 | compose mounts keys at `/run/keys:ro` | A |
+| DEPLOY-06 | compose mounts `${SSO_KEYS_DIR:-./keys}` at `/run/keys:ro` and `web` pins `SSO_JWT_KEYS_MOUNT: /run/keys` (see KEYCFG-10) | A |
 | DEPLOY-07 | README covers mysqldump backup, gen_keys, migrate, ServiceClient registration, SSO_CACHE_URL, .env | A |
 | DEPLOY-08 | `makemigrations --check --dry-run` clean (B11) | A\* |
-| DEPLOY-09 | start with `SSO_DEBUG=False` and an empty `SSO_SECRET_KEY` / missing key files → refuses with a clear message (B12) | M |
+| DEPLOY-09 | start with `SSO_DEBUG=False` and an empty `SSO_SECRET_KEY` / missing key files → refuses with a clear message (B12). Key half automated as KEYCFG-08/08b | M (key part A) |
 | DEPLOY-10 | `gen_keys.sh` makes an RSA ≥ 2048 key, private chmod 600, public PEM | M |
 | DEPLOY-11 | `showmigrations`/`sqlmigrate`: SSO owns migrations only in `sso` and `token_blacklist`; nothing ALTERs existing tables; no `clearsessions`/`remove_stale_contenttypes` in scripts or cron (B11) | M |
 | DEPLOY-12 | `flushexpiredtokens` cron documented and runs (§9.6) | M |
@@ -358,6 +360,45 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | DOC-01 | `SSO-server.md` has a front-end integration section usable without help (§7) (R-06) | M |
 | DOC-02 | `SSO-server.md` has a back-end verification section (§8) (R-07) | M |
 | DOC-03 | Clarity review: QA built the automated client and verifier from the docs alone; every place we had to guess is listed in §6 (R-08) | M |
+
+### 3.13 JWT key configuration (610c9b8, d784f10 on feat/app-permissions)
+Semantics (read from `sso/keys.py:resolve_key_config`, `ssoproject/settings.py`, `sso/checks.py`, `sso/apps.py`, compose, README §3/§4, `.env.example`):
+`SSO_JWT_PRIVATE_KEY` (one name) and `SSO_JWT_PUBLIC_KEYS` (comma list; blanks/empty entries dropped) are joined to the
+mount = `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys` (relative mount = relative to cwd). A value containing `/` is a
+**path** (absolute, or relative to the working directory), never mount-relative. The signing key's public key is always published.
+Old `SSO_JWT_PRIVATE_KEY_PATH`, `SSO_JWT_PUBLIC_KEY_PATHS` (and singular `SSO_JWT_PUBLIC_KEY_PATH`) are used verbatim, give
+`sso.W001` in `manage.py check` and one `WARNING sso … is deprecated` log line per process (stdout). Old + new of the same setting
+→ `ImproperlyConfigured` (also with `SSO_DEBUG=True`); an EMPTY old variable is ignored. Compose pins `SSO_JWT_KEYS_MOUNT: /run/keys`
+for `web` (env_file also passes the host `SSO_KEYS_DIR`). Tests: `qa/tests/test_keys_config.py` (settings loaded in a fresh
+interpreter of the server venv `QA_SSO_PYTHON`; KEYROT starts gunicorn on `QA_KEYS_PORT`, default 8050, and stops it by PID).
+
+| ID | Steps | Expected | Auto |
+|---|---|---|---|
+| KEYCFG-01 | `SSO_JWT_KEYS_MOUNT=<dir>`, `SSO_JWT_PRIVATE_KEY=a.private.pem` | private = `<dir>/a.private.pem`; no W001/deprecation line | A |
+| KEYCFG-02 | `SSO_JWT_PUBLIC_KEYS=a,b,c` (also with spaces / empty entries) | three paths under the mount, in order; JWKS kids = the three keys | A |
+| KEYCFG-02b | private a, publics b only | JWKS = {a, b} (signing key always published) | A |
+| KEYCFG-03 | precedence: MOUNT+KEYS_DIR → MOUNT; KEYS_DIR only → KEYS_DIR; neither → `/run/keys` (error names "the default mount") | as stated | A |
+| KEYCFG-03b | relative `SSO_KEYS_DIR` | resolved against cwd | A |
+| KEYCFG-04 | absolute private path; public list mixing a name and an absolute path | absolute used as given; name under the mount; origin says "is a path" | A |
+| KEYCFG-05 | `sub/sub.private.pem` (relative with `/`) | path relative to the **working directory**, not the mount: from repo cwd → ImproperlyConfigured naming `<repo>/sub/…` and "relative to the working directory"; from cwd=mount → found | A |
+| KEYCFG-06 | each old variable alone (3 cases) + `manage.py check` | exit 0, `sso.W001`, "`<old>` is deprecated; use `<new>`" | A |
+| KEYCFG-06b | both old variables, no new | settings load with the old paths; exactly 2 deprecation log lines | A |
+| KEYCFG-06c | new form + EMPTY old variables (as shipped in `.env.example`) | no conflict, no W001 | A |
+| KEYCFG-07 | old + new together, each pair (PRIVATE/PRIVATE_PATH, PUBLIC_KEYS/PUBLIC_KEY_PATHS, PUBLIC_KEYS/PUBLIC_KEY_PATH) × `SSO_DEBUG` False/True | `ImproperlyConfigured` naming both variables; no key material | A |
+| KEYCFG-08 | missing private / missing public file | `ImproperlyConfigured` with resolved path, variable and `SSO_JWT_KEYS_MOUNT`, "not found"; no traceback text | A |
+| KEYCFG-08b/08c | private unset (non-debug) → error naming `SSO_JWT_PRIVATE_KEY`; missing key with `SSO_DEBUG=True` → ephemeral key, loads | as stated | A |
+| KEYCFG-09 | traversal: `../outside/x.pem`, `..`, `..%2Fx`, `..\\x` | `..`/encoded/backslash: clean error inside the mount. **`../x` contains `/` → treated as a cwd-relative path and resolves OUTSIDE the mount** (documented rule; flagged Info) | A |
+| KEYCFG-10 | compose `web`: volume `${SSO_KEYS_DIR:-./keys}:/run/keys:ro`, literal pin `SSO_JWT_KEYS_MOUNT: /run/keys` (not `${…}`), no `*_PATH` in compose files | as stated | A |
+| KEYCFG-10b | `.env.example` as env_file + the compose pin through `resolve_key_config` | `/run/keys/<names>`, mount source `SSO_JWT_KEYS_MOUNT`, nothing deprecated | A |
+| KEYCFG-10c | `.env.example`, `.env.dev.example` set new names; old ones empty; `gen_keys.sh` prints the new lines | as stated | A |
+| KEYCFG-10d | duplicate assignments in `.env.example` (recorded) | none for the key names (`SSO_KEYS_DIR` is listed twice, same value: Info) | A |
+| KEYROT-01 | live gunicorn, new variables: T0 k1/k1 → T1 k1/k1,k2 → T2 k2/k1,k2 (T1 token still verifies) → T3 k2/k2 | signing kid and published kids per step; no deprecation line | A |
+| KEYROT-02 | live gunicorn with the old `*_PATH` variables | serves and signs with k1; one deprecation line per old variable | A |
+| KEYROT-03 | gunicorn with old + new private | refuses to start, `ImproperlyConfigured` naming `SSO_JWT_PRIVATE_KEY_PATH` | A |
+
+The suite's own server start (`qa/harness/start_sso.sh`, `sso.env`, `manage.sh`, `stop_sso.sh`, `run_keys_round.sh`) uses the new
+variables (`SSO_JWT_KEYS_MOUNT=qa/run/keys`, `SSO_JWT_PRIVATE_KEY=qa-test.private.pem`, `SSO_JWT_PUBLIC_KEYS=qa-test.public.pem`)
+and unsets the old ones.
 
 ---
 
@@ -398,15 +439,16 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | Logout-all | 7 | 1 | 0 | 8 |
 | Me | 7 | 0 | 0 | 7 |
 | Introspect | 14 | 0 | 0 | 14 |
-| JWKS / discovery / healthz | 15 | 0 | 2 | 17 |
+| JWKS / discovery / healthz | 16 (JWKS-08 via KEYROT-01) | 0 | 1 | 17 |
 | Error format | 15 (ERR-14, ERR-16 asserted inside SEC cases) | 0 | 1 | 16 |
 | Legacy PBKDF2 | 7 | 0 | 2 | 9 |
 | Security | 34 (SEC-01..28, 30..35) | 0 | 4 | 38 |
 | End-to-end | 9 | 0 | 4 | 13 |
 | Deployment / docs | 18 | 0 | 9 | 27 |
-| **Total** | **165** | **2** | **24** | **191** |
+| Key configuration (§3.13) | 22 | 0 | 0 | 22 |
+| **Total** | **188** | **2** | **23** | **213** |
 
-pytest collects 211 items because of parametrization (`pytest --collect-only` passes with no errors).
+pytest collects 269 items @ d784f10 (was 211 before the deploy and key cases) because of parametrization (`pytest --collect-only` passes with no errors).
 
 ---
 
@@ -461,7 +503,7 @@ pytest collects 211 items because of parametrization (`pytest --collect-only` pa
 ## 6. Open questions and document conflicts (for Philip / Developer)
 
 **Doc conflicts**
-- **Q-01** Public key env: spec §9.3/§9.4 `SSO_JWT_PUBLIC_KEY_PATH` (single) vs addendum B6 `SSO_JWT_PUBLIC_KEY_PATHS` (comma list). Addendum wins; DEPLOY-02 expects the plural. Is the singular still accepted? *(Code: yes, as a fallback.)*
+- **Q-01** Public key env: spec §9.3/§9.4 `SSO_JWT_PUBLIC_KEY_PATH` (single) vs addendum B6 `SSO_JWT_PUBLIC_KEY_PATHS` (comma list). Addendum wins; DEPLOY-02 expects the plural. Is the singular still accepted? *(Code: yes, as a fallback.)* **Resolved @ 610c9b8:** all three old names are deprecated in favour of `SSO_JWT_PRIVATE_KEY`/`SSO_JWT_PUBLIC_KEYS` (KEYCFG-06/07). Spec §9.3/§9.4 (`docs/SSO-server.md` l.123, 471-498) and addendum B6 (l.29-30) still show the old `*_PATH` names (doc drift, Info).
 - **Q-24** Phase numbering: spec §2, §5.4, §6.8, §6.9, §9.2 call hosted login/PKCE/account endpoints "phase 2", but the §10 table puts them in phase 5 and phase 2 = cookie mode/CORS/throttling. Addendum §A uses the §10 numbering, so QA treats §6.8/§6.9 as out of scope.
 - Discovery: spec §6.7 advertises `token_endpoint=/api/v1/auth/token` and `authorization_endpoint`; addendum B2 forbids both for now (tests follow B2). **Q-17**: the minimal discovery doc lacks OIDC-required fields (`response_types_supported`, `subject_types_supported`), so strict OIDC libraries will reject it. Advertising `/login` as an OAuth `token_endpoint` may mislead OAuth clients. QA recommends omitting `token_endpoint` until phase 5.
 - **Q-13** examples/verifier: §8.4 uses `HTTPBearer()`, which in older FastAPI versions answers a missing header with **403**, while §8.1/§8.6 require **401**. §8.4 also sends `WWW-Authenticate: Bearer` where §8.6 says `Bearer error="invalid_token"`. E2E-05 expects 401 and a header starting with `Bearer`. Also: what is the demo's endpoint path, and does it have a group-protected endpoint?

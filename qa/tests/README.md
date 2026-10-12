@@ -98,3 +98,21 @@ test server is started with higher `SSO_THROTTLE_*` rates.
 ### Shared cache
 
 With `SSO_DEBUG=False` the server refuses to start without `SSO_CACHE_URL` (or with `locmemcache://`/`dummycache://`). `qa/run/sso.env` sets `filecache:///tmp/qa-cache`; give each side instance its own cache dir so throttle counters don't mix.
+
+## Key configuration round (610c9b8 / d784f10)
+
+`qa/harness/` (tracked) starts the server with the NEW key variables (`SSO_JWT_KEYS_MOUNT=qa/run/keys`,
+`SSO_JWT_PRIVATE_KEY=qa-test.private.pem`, `SSO_JWT_PUBLIC_KEYS=qa-test.public.pem`; the deprecated `*_PATH` variables are
+unset). Dedicated ports only (never 8000), stop by recorded PID:
+
+```bash
+qa/harness/run_keys_round.sh qa/.venv-py3.13.16 py3.13 8052 8050   # VENV TAG SERVER_PORT KEYROT_PORT
+qa/harness/run_keys_round.sh qa/.venv-py3.11   py3.11 8053 8051
+# or by hand: qa/harness/start_sso.sh 8052 /tmp/sso.log ; ... ; qa/harness/stop_sso.sh 8052
+```
+
+It migrates a throw-away SQLite DB under `qa/run/`, seeds it, runs `manage.py check`, starts gunicorn, runs
+`test_deploy_files.py test_keys_config.py test_jwks_discovery_health.py test_security_jwt.py`, and writes
+`qa/run/keys-<TAG>/{pytest.log,junit.xml,sso-server.log,server-cmdline.txt,check.log}`. `test_keys_config.py` needs
+`QA_SSO_PYTHON` (the server venv's python; settings are loaded there in a fresh interpreter) and `QA_KEYS_PORT` (KEYROT-* start
+and stop their own gunicorn on it).
