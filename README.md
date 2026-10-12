@@ -271,6 +271,24 @@ The web container itself runs as `sso_app` (DML only).
 `cp docker-compose.dev.yml docker-compose.override.yml` makes a plain `docker compose up` use the overlay.
 The override file is gitignored, so it can never reach a server checkout.
 
+**Troubleshooting: key ownership (e.g. WSL, where your user is uid 1000).** The container reads the keys
+as `SSO_UID:SSO_GID` (default `10001:10001`), not as you. If the key files or the keys directory belong to
+your host user (`id -u` is usually `1000` in WSL) with mode 0600/0700, `web` stops at startup with
+`JWT private key (SSO_JWT_PRIVATE_KEY_PATH) '/run/keys/….private.pem' exists but is not readable by uid 10001;
+chown to SSO_UID:SSO_GID or set SSO_UID` (or `cannot be reached by uid 10001` when the directory is the
+problem). Check numeric owners and modes:
+```bash
+ls -n keys/          # columns 3/4 = uid/gid; compare with SSO_UID/SSO_GID (default 10001)
+ls -nd keys/         # the directory must be enterable (x) by that uid too
+```
+Fix it one of two ways:
+1. Give the keys to the container user (works with the pre-built Docker Hub image):
+   `sudo chown 10001:10001 keys/ keys/*.pem && chmod 0700 keys/ && chmod 0600 keys/*.private.pem`.
+2. Or run the container as yourself: put `SSO_UID=$(id -u)` and `SSO_GID=$(id -g)` (e.g. `1000`) in `.env`, then
+   **rebuild** (`docker compose build web && docker compose up -d`), since the image's user is created at build time.
+The private key should be `0600` (owner only) or `0640` (owner + the `SSO_GID` group); never world-readable.
+The public keys may be `0644`.
+
 ## 6a. Application permissions (`application.<codename>`)
 
 One permission per application, checked by that application in the access token's `perms` claim
