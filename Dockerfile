@@ -67,4 +67,6 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
 # R5/R6: gunicorn only. No migrate/createsuperuser/clearsessions/flushexpiredtokens at start-up.
 # Default access log format logs no headers. gunicorn trusts X-Forwarded-* only from
 # SSO_FORWARDED_ALLOW_IPS (comma list of IPs/CIDRs; image default 127.0.0.1, compose sets the nginx network).
-CMD ["sh", "-c", "exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --access-logfile - --error-logfile - --forwarded-allow-ips \"${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
+# --no-control-socket (gunicorn >= 25.1): the gunicornc control socket defaults to $HOME/.gunicorn/gunicorn.ctl,
+# and HOME is /nonexistent on a read-only root fs ("[ERROR] Control server error"). Nothing uses gunicornc here.
+CMD ["sh", "-c", "exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --no-control-socket --access-logfile - --error-logfile - --forwarded-allow-ips \"${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
