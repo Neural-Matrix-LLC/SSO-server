@@ -38,5 +38,12 @@ KID="$(openssl pkey -pubin -in "$PUB" -outform DER | sha256sum | cut -c1-16)"
 echo "private=$PRIV"
 echo "public=$PUB"
 echo "kid=$KID"
-echo "Set SSO_JWT_PRIVATE_KEY_PATH=/run/keys/$NAME.private.pem and add /run/keys/$NAME.public.pem to SSO_JWT_PUBLIC_KEY_PATHS." >&2
+cat >&2 <<EOF
+.env lines (file names; resolved in /run/keys in the container, SSO_KEYS_DIR=$OUT_DIR on the host):
+SSO_KEYS_DIR=$OUT_DIR
+SSO_JWT_PRIVATE_KEY=$NAME.private.pem
+SSO_JWT_PUBLIC_KEYS=$NAME.public.pem
+Rotation: APPEND the new public key and keep the old one, e.g. SSO_JWT_PUBLIC_KEYS=<old>.public.pem,$NAME.public.pem
+(switch SSO_JWT_PRIVATE_KEY to $NAME.private.pem only after >= 24 h; README §4).
+EOF
 echo "On the server: chown them to the container user (SSO_UID:SSO_GID, default 10001:10001). Never commit them." >&2

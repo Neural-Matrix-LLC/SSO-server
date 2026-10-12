@@ -57,16 +57,23 @@ certificate. For a throw-away local MySQL instead, see "Local dev with self-sign
    # kid=<16 hex>                                 note it: JWKS must show the same kid (step 7)
    ```
 
-3. **Point `.env` at the keys as the container sees them.** Compose mounts the host directory
-   `SSO_KEYS_DIR` (default `./keys`) **read-only at `/run/keys`** inside `web`. `SSO_JWT_PRIVATE_KEY_PATH` and
-   `SSO_JWT_PUBLIC_KEY_PATHS` are read inside the container, so they must be `/run/keys/<file>` paths, not
-   host paths like `./keys/...` or `/home/you/...`:
+3. **Name the keys in `.env`.** `SSO_KEYS_DIR` (default `./keys`) is the one host folder with the keys;
+   compose mounts it **read-only at `/run/keys`** inside `web`. Give the key **file names** only, exactly as
+   `gen_keys.sh` prints them:
    ```ini
    SSO_KEYS_DIR=./keys
-   SSO_JWT_PRIVATE_KEY_PATH=/run/keys/sso-2026-10.private.pem
-   SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/sso-2026-10.public.pem
+   SSO_JWT_PRIVATE_KEY=sso-2026-10.private.pem
+   SSO_JWT_PUBLIC_KEYS=sso-2026-10.public.pem
    ```
-   (`SSO_JWT_PUBLIC_KEY_PATHS` is comma-separated: during a key rotation it lists every public key, see §4.)
+   The names are resolved in a directory chosen by this precedence: **`SSO_JWT_KEYS_MOUNT` (explicit) >
+   `SSO_KEYS_DIR` > `/run/keys`**. `docker-compose.yml` pins `SSO_JWT_KEYS_MOUNT=/run/keys` for `web`, because
+   `env_file: .env` also hands the *host* path `SSO_KEYS_DIR` to the container; so in Docker the keys are
+   always `/run/keys/<name>`, and without Docker (`manage.py`, tests) they resolve in `SSO_KEYS_DIR`. A
+   relative directory is taken relative to the working directory. A value containing `/` is a path, not a
+   name (absolute, or relative to the working directory). `SSO_JWT_PUBLIC_KEYS` is comma-separated: for a
+   rotation **append** the new public key (`old.public.pem,new.public.pem`, see §4). The old
+   `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS` (full paths) still work but log a deprecation
+   warning (`sso.W001`); setting an old and a new form of the same key together stops the server.
 
 4. **Let the container user read them.** `web` runs as `SSO_UID:SSO_GID` (default `10001:10001`), not as you,
    and `gen_keys.sh` creates `keys/` as `0700` owned by you. Either
@@ -209,8 +216,9 @@ SSO_DEBUG=False
 SSO_ALLOWED_HOSTS=localhost,127.0.0.1
 SSO_ISSUER=http://127.0.0.1:8000
 SSO_DB_ENGINE=sqlite
-SSO_JWT_PRIVATE_KEY_PATH=/tmp/ssokeys/dev.private.pem
-SSO_JWT_PUBLIC_KEY_PATHS=/tmp/ssokeys/dev.public.pem
+SSO_KEYS_DIR=/tmp/ssokeys
+SSO_JWT_PRIVATE_KEY=dev.private.pem
+SSO_JWT_PUBLIC_KEYS=dev.public.pem
 SSO_CORS_ALLOWED_ORIGINS=http://127.0.0.1:5500
 SSO_SSL_REDIRECT=False
 SSO_COOKIE_SECURE=False
@@ -240,8 +248,11 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_DB_ENGINE` | `mysql` | `mysql` or `sqlite` |
 | `SSO_DBHOST` / `SSO_DBPORT` / `SSO_DBNAME` / `SSO_DBUSER` / `SSO_DBPWD` | `127.0.0.1` / `3306` / `dcWebUsers` / — / — | MySQL connection (runtime account `sso_app`, DML only) |
 | `SSO_DB_SSL_CA` / `SSO_DB_SSL_MODE` | — / — | Optional DB TLS. With a CA, the mode defaults to `VERIFY_CA`. Modes: `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY`. A missing CA file stops start-up |
-| `SSO_JWT_PRIVATE_KEY_PATH` | — | **Required.** Signing key |
-| `SSO_JWT_PUBLIC_KEY_PATHS` | — | Comma list of **all** published or accepted public keys (rotation). The signing key's own public key is always included. The singular `SSO_JWT_PUBLIC_KEY_PATH` is still read as a fallback |
+| `SSO_KEYS_DIR` | `./keys` (compose) | The host folder with the key files; compose mounts it read-only at `/run/keys`. Without Docker it is where key names resolve (unless `SSO_JWT_KEYS_MOUNT` is set) |
+| `SSO_JWT_KEYS_MOUNT` | `SSO_KEYS_DIR`, else `/run/keys` | Directory key names resolve in. Precedence: `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`; relative = relative to the working directory. Compose pins it to `/run/keys` for `web` |
+| `SSO_JWT_PRIVATE_KEY` | — | **Required.** Signing key file name, e.g. `sso-2026-10.private.pem`. A value with `/` is a path (absolute, or relative to the working directory) |
+| `SSO_JWT_PUBLIC_KEYS` | — | Comma list of file names of **all** published or accepted public keys (rotation: append). The signing key's own public key is always published even if not listed |
+| `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS` | — | **Deprecated** full-path forms (and the v1.0 singular `SSO_JWT_PUBLIC_KEY_PATH`). Still read, with warning `sso.W001` (logged once per process). Setting one together with its new form is an `ImproperlyConfigured` error |
 | `SSO_ACCESS_TTL_MIN` / `SSO_REFRESH_TTL_DAYS` | `15` / `7` | |
 | `SSO_CORS_ALLOWED_ORIGINS` | — | Front-end origins. Also the allow-list for the cookie-mode `Origin` check |
 | `SSO_COOKIE_DOMAIN` | host-only | e.g. `.example.com` so sibling sub-domains share the cookie |
@@ -267,9 +278,9 @@ overwrites existing files. Its `kid` (`openssl pkey -pubin -outform DER | sha256
 tested to equal the server's `kid`.
 
 Rotation follows deployment plan §11 and spec §5.3:
-1. Generate the new pair. Add the new public key to `SSO_JWT_PUBLIC_KEY_PATHS` (the old key keeps
-   signing). Recreate `web`. JWKS now lists both kids.
-2. After ≥ 24 h, point `SSO_JWT_PRIVATE_KEY_PATH` at the new private key and recreate `web`. Refresh and
+1. Generate the new pair into `SSO_KEYS_DIR`. Append the new public key to `SSO_JWT_PUBLIC_KEYS`
+   (`sso-2026-10.public.pem,sso-2027-10.public.pem`; the old key keeps signing). Recreate `web`. JWKS now lists both kids.
+2. After ≥ 24 h, set `SSO_JWT_PRIVATE_KEY` to the new private key's name and recreate `web`. Refresh and
    access tokens signed with the old key **stay valid** because verification picks the key by `kid`. A
    test covers this (`test_rotation_refresh_token_signed_with_old_key_still_refreshes`).
 3. After ≥ 8 days (15 min + refresh TTL + margin), remove the old public key and recreate. Shred the old private key.
@@ -388,8 +399,8 @@ The override file is gitignored, so it can never reach a server checkout.
 **Troubleshooting: key ownership (e.g. WSL, where your user is uid 1000).** The container reads the keys
 as `SSO_UID:SSO_GID` (default `10001:10001`), not as you. If the key files or the keys directory belong to
 your host user (`id -u` is usually `1000` in WSL) with mode 0600/0700, `web` stops at startup with
-`JWT private key (SSO_JWT_PRIVATE_KEY_PATH) '/run/keys/….private.pem' exists but is not readable by uid 10001;
-chown to SSO_UID:SSO_GID or set SSO_UID` (or `cannot be reached by uid 10001` when the directory is the
+`JWT private key (SSO_JWT_PRIVATE_KEY='sso-2026-10.private.pem' in SSO_JWT_KEYS_MOUNT='/run/keys')
+'/run/keys/sso-2026-10.private.pem' exists but is not readable by uid 10001; chown to SSO_UID:SSO_GID or set SSO_UID` (or `cannot be reached by uid 10001` when the directory is the
 problem). Check numeric owners and modes:
 ```bash
 ls -n keys/          # columns 3/4 = uid/gid; compare with SSO_UID/SSO_GID (default 10001)
