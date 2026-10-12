@@ -1,5 +1,5 @@
 # =============================================================================
-# DRAFT, NOT ACTIVE (v1.4, 2026-10-10). CI pipeline for sso-server (GitHub Actions syntax).
+# DRAFT, NOT ACTIVE (v1.5, 2026-10-11). CI pipeline for sso-server (GitHub Actions syntax).
 # Proposal by DevOps; see devops/DEPLOYMENT-PLAN.md §7-§8.
 # It lives under devops/ci/ on purpose and will NOT run from here. To activate
 # (after Thomas approves and the GitHub repo exists, addendum D), copy it to
@@ -11,6 +11,9 @@
 # v1.3: the Docker Hub repo is PUBLIC -> hard secret gate `image-secret-scan`
 #       (scanners + per-layer file check + history/config check). Publish needs it,
 #       plus a manual approval via the `dockerhub-publish` environment (plan §7.1-§7.2).
+# v1.5: key env vars per feat/app-permissions: SSO_KEYS_DIR / SSO_JWT_KEYS_MOUNT + file names in
+#       SSO_JWT_PRIVATE_KEY and SSO_JWT_PUBLIC_KEYS (comma list). The deprecated *_PATH(S) vars are not used
+#       (they would raise sso.W001, which check --deploy --fail-level WARNING turns into a failure).
 # =============================================================================
 name: ci
 
@@ -129,8 +132,9 @@ jobs:
       SSO_ISSUER: https://sso.ci.invalid
       SSO_CORS_ALLOWED_ORIGINS: https://app.ci.invalid
       SSO_COOKIE_DOMAIN: .ci.invalid
-      SSO_JWT_PRIVATE_KEY_PATH: ci-keys/ci.private.pem
-      SSO_JWT_PUBLIC_KEY_PATHS: ci-keys/ci.public.pem
+      SSO_KEYS_DIR: ci-keys                      # host-style dir; names resolve here (no Docker)
+      SSO_JWT_PRIVATE_KEY: ci.private.pem        # file name, not a path
+      SSO_JWT_PUBLIC_KEYS: ci.public.pem         # comma-separated file names
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -215,7 +219,7 @@ jobs:
             GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES ON dcWebUsers.* TO 'sso_ci'@'%';"
           docker exec ${{ job.services.mysql.id }} mysql -uroot -pci-root -N \
             -e "SELECT user, plugin FROM mysql.user WHERE user='sso_ci'" | grep caching_sha2_password
-      - name: Throw-away keys + env for the container
+      - name: Throw-away keys + env for the container (keys dir mounted at /run/keys, as compose does)
         run: |
           mkdir -p ci-keys && umask 077
           openssl genrsa -out ci-keys/private.pem 2048
@@ -234,8 +238,9 @@ jobs:
           SSO_DBNAME=dcWebUsers
           SSO_DBUSER=sso_ci
           SSO_DBPWD=ci-pass
-          SSO_JWT_PRIVATE_KEY_PATH=/run/keys/private.pem
-          SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/public.pem
+          SSO_JWT_KEYS_MOUNT=/run/keys
+          SSO_JWT_PRIVATE_KEY=private.pem
+          SSO_JWT_PUBLIC_KEYS=public.pem
           ENV
       - name: DB login from inside the image (MySQL ${{ matrix.mysql }})
         run: |

@@ -12,6 +12,7 @@
 ## Changelog
 | Version | Date | Change |
 |---|---|---|
+| v1.5 | 2026-10-11 | Key env vars updated to match branch `feat/app-permissions` (verified in `sso/keys.py`, `sso/checks.py`, `docker-compose.yml`). `SSO_KEYS_DIR` = host folder, mounted read-only at `/run/keys`. `SSO_JWT_PRIVATE_KEY` = signing-key **file name**. `SSO_JWT_PUBLIC_KEYS` = **comma-separated file names**. Names resolve in `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`, and compose pins `SSO_JWT_KEYS_MOUNT=/run/keys` for `web`. `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS` / `SSO_JWT_PUBLIC_KEY_PATH` are deprecated (still read, warning `sso.W001`; setting old + new together is fatal). Updated §1, §4, §11 rotation runbook (edit the file list / file name), §12 P3, §13.5 (rollback across the rename), R10, R20, R26 and the CI env. New §4.3 on the deprecated vars. |
 | v1.4 | 2026-10-10 | Local/QA/CI MySQL default aligned to **`mysql:8.0`** (prod runs 8.0 today; 8.4 supported) through the Developer's `MYSQL_IMAGE` variable (falls back to `QA_MYSQL_TAG`), in §2, §2.1, §6.4 and R29. New §15.1 **Accepted deviations (Developer)**: R19 (`IMAGE_TAG=latest` default + `build:` in compose, dev/local only; prod pins `sha-*`/`vX.Y.Z` and verifies the digest; CI never pushes `latest`), R2 (configurable `SSO_UID`/`SSO_GID`, default 10001; host key ownership must match), R29 (`MYSQL_IMAGE` default `mysql:8.0`). R2/R19/R29 and §4.2 point to them. |
 | v1.3 | 2026-10-10 | Q23 closed: Docker Hub repo `thomaschoi/sso-server` is **PUBLIC** (Thomas). The private-repo pull-token path is removed. The VPS pulls anonymously (rate-limited; an optional read-only token raises the limit), and the image is world-readable. New **hard CI secret gate** `image-secret-scan` (§7.1): trufflehog + Trivy secret scanner over the saved image, a per-layer file-name check (catches files deleted in later layers), and checks on `docker history` / config Env / Labels. Publish now depends on it. New pre-publish manual checklist (§7.2) and leaked-secret response (§7.3). Developer requirements R3 tightened; R30–R32 added (no build-time secrets via ARG/ENV, multi-stage with explicit final-stage COPY). |
 | v1.2 | 2026-10-10 | Thomas's update applied. **Prod MySQL stays on 8.0 for now, 8.4 later**: the prerequisites cover both (version check accepts 8.0.x ≥ 8.0.11 or 8.4.x; auth-plugin guidance per version; SSO accounts use `caching_sha2_password` on 8.0 too). A new §6.4 covers the 8.0 → 8.4 upgrade and the `mysql_native_password` risk. CI tests against `mysql:8.0` **and** `mysql:8.4` (matrix). G2 and Q21 reworded: go-live no longer waits for 8.4. 8.0's April 2026 EOL noted. **Python 3.13**: runtime `python:3.13-slim` (= Debian **trixie**, confirmed by digest on Docker Hub, 2026-10-10), CI `setup-python 3.13`, and a dependency checklist (unverified items marked). **Docker Hub**: image `${DOCKER_USER}/sso-server:${IMAGE_TAG}` with `DOCKER_USER=thomaschoi` (replaces GHCR and `SSO_IMAGE_TAG`). The publish step (commented out) uses `docker/login-action` with `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN` (access token). Rollout, rollback, compose refs and R1/R19 updated. New Q23: public vs private repo. |
@@ -61,7 +62,7 @@ Internet ──${SSO_HTTPS_PORT}──▶ nginx :443 (TLS) ──http:8000──
                                                                          │            └─▶ redis (throttle cache)
             Ubuntu VPS, Docker Engine + compose plugin, ufw              ▼                internal network only
                                                        remote MySQL 8.0→8.4 `dcWebUsers` (shared with myFinance), TLS
-Host files: /opt/sso/.env (0600)  /opt/sso/keys/*.pem → /run/keys:ro  /opt/sso/certs  /etc/cron.d/sso-*
+Host files: /opt/sso/.env (0600)  SSO_KEYS_DIR=/opt/sso/keys/*.pem → /run/keys:ro  /opt/sso/certs  /etc/cron.d/sso-*
 ```
 
 - No DB container in staging or prod. MySQL is remote (spec §9.5). The `mysql:8.0` / `mysql:8.4` containers exist
@@ -230,8 +231,8 @@ Certs are mounted read-only into nginx, never baked into an image.
 | `SSO_DBUSER`/`SSO_DBPWD` (`sso_app`) | `/opt/sso/.env` | env |
 | `sso_migrator` password | `/opt/sso/migrate.env`, present **only during a migration window** | env for one-off `run` |
 | MySQL server CA cert (if verifying DB TLS, §6.0) | `/opt/sso/mysql-ca/ca.pem` (not secret, but integrity matters) | file mount |
-| JWT private key(s) | `/opt/sso/keys/*.private.pem` | `/run/keys:ro` |
-| JWT public key(s) | `/opt/sso/keys/*.public.pem` | `/run/keys:ro` |
+| JWT private key(s) | `SSO_KEYS_DIR` = `/opt/sso/keys/`, e.g. `sso-2026-10.private.pem` | mounted at `/run/keys:ro`; `SSO_JWT_PRIVATE_KEY=<file name>` |
+| JWT public key(s) | `SSO_KEYS_DIR` = `/opt/sso/keys/` | mounted at `/run/keys:ro`; `SSO_JWT_PUBLIC_KEYS=<name>[,<name>…]` |
 | TLS key | `/etc/letsencrypt/` or `/opt/sso/certs/` | nginx mount `:ro` |
 | Redis password (optional) | `/opt/sso/.env` | in `SSO_CACHE_URL` |
 | `ServiceClient` secrets | Created via admin or `manage.py create_service_client`. The DB stores only the hash. Plaintext goes once to the owner via the password manager. | n/a |
@@ -252,7 +253,18 @@ The master copy of secrets lives in Thomas's password manager **[ASSUMPTION; Q10
    ```
    `.env` is read by compose as root. The keys are opened by the app (uid `SSO_UID`,
    default 10001) at start-up, so the key directory's and files' owner **must equal the configured `SSO_UID:SSO_GID`**.
-3. Keys are mounted **read-only** at `/run/keys` (spec §9.5).
+3. Keys live in **one host folder**, `SSO_KEYS_DIR=/opt/sso/keys` (in `/opt/sso/.env`), which compose mounts
+   **read-only** at the fixed `/run/keys` (spec §9.5). The `.env` names the files only, not paths:
+   ```dotenv
+   SSO_KEYS_DIR=/opt/sso/keys
+   SSO_JWT_PRIVATE_KEY=sso-2026-10.private.pem
+   SSO_JWT_PUBLIC_KEYS=sso-2026-10.public.pem
+   ```
+   The app resolves names in `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`. Compose **pins
+   `SSO_JWT_KEYS_MOUNT=/run/keys`** for `web`, because `env_file` also passes the *host* path `SSO_KEYS_DIR` into the
+   container. **Don't override `SSO_JWT_KEYS_MOUNT` in `.env`.** A value containing `/` is treated as a path, not a
+   name, so use bare file names in prod. The signing key's own public key is always published, even if it isn't
+   listed in `SSO_JWT_PUBLIC_KEYS`.
 4. Generate keys **on the VPS**, never in CI. RSA 3072 recommended (spec allows 2048/3072; Q10). Name them by month:
    ```bash
    umask 077
@@ -264,6 +276,17 @@ The master copy of secrets lives in Thomas's password manager **[ASSUMPTION; Q10
 6. The app refuses to start in non-debug mode when `SSO_SECRET_KEY`, `SSO_ISSUER` or the key files are missing
    (implemented in `ssoproject/settings.py`, addendum B.12).
 7. Don't print secrets: use `docker compose config --quiet` to validate, not plain `config`.
+
+### 4.3 Deprecated key variables (code on `feat/app-permissions`)
+- `SSO_JWT_PRIVATE_KEY_PATH`, `SSO_JWT_PUBLIC_KEY_PATHS` and the v1.0 singular `SSO_JWT_PUBLIC_KEY_PATH` (full paths)
+  are **deprecated**. They are still read verbatim, but they log `sso.W001` ("… is deprecated; use …", once per
+  process; also shown by `manage.py check`).
+- Setting the old and new form of the **same** setting together (e.g. `SSO_JWT_PRIVATE_KEY` + `SSO_JWT_PRIVATE_KEY_PATH`)
+  is **always fatal** (`ImproperlyConfigured`, even with `SSO_DEBUG=True`). Empty values count as unset (the
+  Developer's `.env.example` keeps `SSO_JWT_PRIVATE_KEY_PATH=` / `SSO_JWT_PUBLIC_KEY_PATHS=` empty). When migrating
+  an existing `.env`, delete or empty the old lines in the same edit as adding the new ones.
+- New deployments use only `SSO_KEYS_DIR`, `SSO_JWT_PRIVATE_KEY` and `SSO_JWT_PUBLIC_KEYS`. CI treats `sso.W001` as a
+  failure in `check --deploy --fail-level WARNING`, so a deprecated var in CI's env would fail the build.
 
 ## 5. Shared cache for throttling
 - **Why:** DRF throttle counters live in Django's cache. LocMem is per gunicorn worker, so with 3 workers the
@@ -613,8 +636,10 @@ TBD (Q19). Alert channel TBD (Q9).
   myFinance (addendum B.11).
 
 ## 11. Signing-key rotation runbook (spec §5.3, addendum B.6)
-`SSO_JWT_PRIVATE_KEY_PATH` is the signing key. `SSO_JWT_PUBLIC_KEY_PATHS` is a comma-separated list of every
-published key; JWKS lists them all. `kid` = first 16 hex chars of SHA-256 over the DER SubjectPublicKeyInfo
+Keys are files in `SSO_KEYS_DIR` (`/opt/sso/keys`, mounted at `/run/keys`). **Rotation means editing two `.env`
+values:** `SSO_JWT_PRIVATE_KEY` (the signing-key **file name**) and `SSO_JWT_PUBLIC_KEYS` (the **comma-separated list
+of public-key file names**; JWKS lists all of them, plus the signing key's own public key, which is always published).
+No paths and no compose changes are needed. Put new key files in `SSO_KEYS_DIR`, edit the names, recreate `web`. `kid` = first 16 hex chars of SHA-256 over the DER SubjectPublicKeyInfo
 (`sso/keys.py::compute_kid`).
 **Prerequisite met in code:** `sso/tokens.py` picks the verifying key by `kid` across all published keys. That means
 refresh tokens signed with the old key still work after the switch. Rehearse once on staging before the first prod
@@ -635,22 +660,26 @@ change.
    `IMAGE_TAG`. Monitoring is green.
 2. Generate the pair on the VPS (§4.2), fix ownership/permissions, compute NEW_KID:
    `openssl pkey -pubin -in /opt/sso/keys/sso-2027-10.public.pem -outform DER | sha256sum | cut -c1-16`.
-3. T0: set `SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/sso-2026-10.public.pem,/run/keys/sso-2027-10.public.pem` (signing
-   unchanged), then `docker compose up -d --force-recreate web`.
+3. T0: in `/opt/sso/.env`, **append** the new public key to the list:
+   `SSO_JWT_PUBLIC_KEYS=sso-2026-10.public.pem,sso-2027-10.public.pem`. `SSO_JWT_PRIVATE_KEY=sso-2026-10.private.pem`
+   stays unchanged. Then `docker compose up -d --force-recreate web`.
 4. Verify: JWKS lists OLD_KID + NEW_KID, a new login token still has `kid=OLD_KID`, and `/healthz` returns 200.
    Notify service owners.
 5. Wait ≥ 24 h.
-6. Switch: set `SSO_JWT_PRIVATE_KEY_PATH=/run/keys/sso-2027-10.private.pem`, then recreate `web`.
+6. Switch: change the file name to `SSO_JWT_PRIVATE_KEY=sso-2027-10.private.pem`. **Keep both names** in
+   `SSO_JWT_PUBLIC_KEYS`. Then recreate `web`.
 7. Verify: a new token has `kid=NEW_KID` and verifies with `examples/verifier`. A refresh token from before step 6
    still refreshes. Watch service 401s for 1 h.
 8. Wait 8 days.
-9. Retire: set `SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/sso-2027-10.public.pem`, recreate `web`, and confirm JWKS shows
-   NEW_KID only.
+9. Retire: remove the old name from the list, so `SSO_JWT_PUBLIC_KEYS=sso-2027-10.public.pem`. Recreate `web`, and
+   confirm JWKS shows NEW_KID only.
 10. `shred -u /opt/sso/keys/sso-2026-10.private.pem`. Log the date, kids and operator.
 Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are still published, so nothing breaks.
 
 ### 11.3 Emergency rotation (compromise)
-1. Generate a new key. Set **only** the new key in both env vars and recreate `web`. Every user has to log in again.
+1. Generate a new key into `SSO_KEYS_DIR`. Set `SSO_JWT_PRIVATE_KEY=<new>.private.pem` and
+   `SSO_JWT_PUBLIC_KEYS=<new>.public.pem` (the **new name only**), then recreate `web`. Every user has to log in again.
+   Then `shred -u` the compromised private key file.
 2. Services may keep the old key cached for up to 1 h. Tell their owners to restart them or flush the JWKS cache.
 3. Optionally blacklist all outstanding refresh tokens and set `UserTokenRevocation` (introspect then reports old
    tokens inactive).
@@ -682,7 +711,8 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
   from `.env.example` with the §0 derived values.
 - **P2 DNS + TLS**: A/AAAA record for `${SSO_HOSTNAME}` → VPS. Obtain the cert (§3.2). Check with
   `openssl s_client -connect ${SSO_HOSTNAME}:${SSO_HTTPS_PORT} -servername ${SSO_HOSTNAME}`.
-- **P3 Keys** (§4.2).
+- **P3 Keys** (§4.2): generate into `/opt/sso/keys`. In `.env`, set `SSO_KEYS_DIR=/opt/sso/keys`,
+  `SSO_JWT_PRIVATE_KEY=<name>.private.pem` and `SSO_JWT_PUBLIC_KEYS=<name>.public.pem`. No deprecated `*_PATH(S)` vars.
 - **P3b Image**: `docker compose pull web` for `${DOCKER_USER}/sso-server:${IMAGE_TAG}`. The public repo pulls
   anonymously, subject to anonymous rate limits; an optional read-only token login is described in §7. Or build
   locally under the same name (§7). Check that the pulled digest matches the one that passed §7.1.
@@ -770,8 +800,16 @@ zcat dcWebUsers-pre-sso-<TS>.sql.gz | docker run --rm -i --network host \
 The dump has no `CREATE DATABASE`, so tables created after the dump (SSO's) remain. Drop them as in §13.3.
 
 ### 13.5 Keys on rollback
-An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` and falls back to the singular
-`SSO_JWT_PUBLIC_KEY_PATH`, so images from this sprint onward are interchangeable.
+An image rollback doesn't touch the key files, but **the env var form must match the image**:
+- Images built from `feat/app-permissions` onward read `SSO_KEYS_DIR` / `SSO_JWT_PRIVATE_KEY` / `SSO_JWT_PUBLIC_KEYS`
+  and still accept the deprecated `*_PATH(S)` vars (with `sso.W001`).
+- **Older images only read `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS`.** Rolling back to such an image
+  means switching `.env` to the old form, with full container paths: `SSO_JWT_PRIVATE_KEY_PATH=/run/keys/<name>`,
+  `SSO_JWT_PUBLIC_KEY_PATHS=/run/keys/<a>,/run/keys/<b>`. **Remove** the new `SSO_JWT_PRIVATE_KEY` /
+  `SSO_JWT_PUBLIC_KEYS` lines at the same time; the new code rejects both forms together, but the old code just
+  ignores the new names. Also check that the older compose file still mounts the same host folder at `/run/keys`.
+  Otherwise the old image fails fast at start-up (missing key).
+- Keep both `.env` variants next to `DEPLOYED` during the first releases after the rename.
 
 ## 14. Security checklist mapping (spec §9.6)
 | Spec item | Where handled |
@@ -827,8 +865,8 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 **Settings / app behaviour**
 - R10. Env vars documented in `.env.example`, using the §0 parameters as placeholders (no `thomas-choi.com` literal):
   `SSO_SECRET_KEY, SSO_DEBUG, SSO_ALLOWED_HOSTS, SSO_CSRF_TRUSTED_ORIGINS, SSO_DB_ENGINE, SSO_DBNAME, SSO_DBHOST,
-  SSO_DBPORT, SSO_DBUSER, SSO_DBPWD, SSO_ISSUER, SSO_AUDIENCE, SSO_JWT_PRIVATE_KEY_PATH, SSO_JWT_PUBLIC_KEY_PATHS,
-  SSO_ACCESS_TTL_MIN, SSO_REFRESH_TTL_DAYS, SSO_CORS_ALLOWED_ORIGINS, SSO_COOKIE_DOMAIN, SSO_CACHE_URL, SSO_NUM_PROXIES,
+  SSO_DBPORT, SSO_DBUSER, SSO_DBPWD, SSO_ISSUER, SSO_AUDIENCE, SSO_KEYS_DIR, SSO_JWT_PRIVATE_KEY, SSO_JWT_PUBLIC_KEYS
+  (file names; the deprecated `*_PATH(S)` forms only as commented notes, §4.3), SSO_ACCESS_TTL_MIN, SSO_REFRESH_TTL_DAYS, SSO_CORS_ALLOWED_ORIGINS, SSO_COOKIE_DOMAIN, SSO_CACHE_URL, SSO_NUM_PROXIES,
   SSO_ADMIN_PATH`, plus compose-only `SSO_HOSTNAME, SSO_DOMAIN, SSO_HTTPS_PORT, SSO_HTTP_PORT, DOCKER_USER,
   IMAGE_TAG, GUNICORN_WORKERS`. (QA's `qa/tests/conftest.py` still defaults `SSO_ALLOWED_ORIGIN` to a `thomas-choi.com`
   origin; QA should parameterize it too.)
@@ -849,7 +887,8 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 - R19. `image: ${DOCKER_USER:?set DOCKER_USER}/sso-server:${IMAGE_TAG:?set IMAGE_TAG}` (Docker Hub;
   `DOCKER_USER=thomaschoi`), `env_file: .env`. Production never runs `latest`. The Developer's compose defaults to
   `IMAGE_TAG=latest` and keeps `build:`: accepted deviation for local/dev use, see §15.1. Prod `.env` pins the tag.
-- R20. Volumes: `./keys:/run/keys:ro` (web), certs `:ro` + ACME webroot (nginx), optional `./mysql-ca:/run/mysql-ca:ro`
+- R20. Volumes: `${SSO_KEYS_DIR:-./keys}:/run/keys:ro` (web), with `SSO_JWT_KEYS_MOUNT: /run/keys` pinned in the web
+  service's `environment` (done on `feat/app-permissions`), certs `:ro` + ACME webroot (nginx), optional `./mysql-ca:/run/mysql-ca:ro`
   (web).
 - R21. **Only nginx publishes ports:** `"${SSO_HTTPS_PORT:-443}:443"` and `"${SSO_HTTP_PORT:-80}:80"`. No `ports:` on
   web or redis, because Docker-published ports bypass ufw (§3.0). For the shared-nginx variant, bind to
@@ -874,7 +913,9 @@ An image rollback doesn't touch keys. The code reads `SSO_JWT_PUBLIC_KEY_PATHS` 
 
 **scripts/gen_keys.sh**
 - R26. `umask 077`, RSA 3072 (or a parameter), writes `<name>.private.pem`/`<name>.public.pem`, prints the kid using the
-  same DER-SPKI method as `sso/keys.py`, and refuses to overwrite existing files.
+  same DER-SPKI method as `sso/keys.py`, and refuses to overwrite existing files. It prints the matching `.env` lines
+  (`SSO_KEYS_DIR=…`, `SSO_JWT_PRIVATE_KEY=<name>.private.pem`, `SSO_JWT_PUBLIC_KEYS=<name>.public.pem`) and the rotation
+  hint (append the public key). Done on `feat/app-permissions`.
 
 ### 15.1 Accepted deviations (Developer)
 Agreed on 2026-10-10. The Developer's files differ from the original requirement text, and these differences are
