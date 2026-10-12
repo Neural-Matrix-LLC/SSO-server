@@ -120,8 +120,10 @@ JWT with `token_type: "refresh"`, 7-day `exp`, its own `jti`. Services must **re
 `/api/v1/auth/refresh` and `/api/v1/auth/logout` accept them.
 
 ### 5.3 Keys
-- RSA 2048 (or 3072) key pair. Private key in a file mounted into the container (`SSO_JWT_PRIVATE_KEY_PATH`),
-  never in git and never in the image.
+- RSA 2048 (or 3072) key pair. Private key in a file mounted into the container: the host folder
+  `SSO_KEYS_DIR` is mounted read-only at `/run/keys`, and `SSO_JWT_PRIVATE_KEY` names the file in it
+  (resolved in `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`). Never in git and never in the image.
+  (Deprecated alias: `SSO_JWT_PRIVATE_KEY_PATH`, a full path.)
 - `kid` = first 16 hex characters of the SHA-256 of the public key's DER encoding.
 - **Rotation**: generate the new key, publish *both* public keys in JWKS, wait 24 h (longer than JWKS cache
   time), switch signing to the new key, keep the old public key published for 15 min + refresh lifetime, then
@@ -446,7 +448,7 @@ sso-server/
 │   ├── admin.py                 # ServiceClient admin
 │   ├── templates/sso/login.html # phase 2 hosted login
 │   └── tests/                   # pytest
-├── keys/                        # gitignored; private.pem / public.pem mounted at runtime
+├── keys/                        # gitignored (SSO_KEYS_DIR); <name>.private.pem / .public.pem, mounted at /run/keys
 ├── scripts/gen_keys.sh          # openssl genrsa / rsa -pubout
 ├── Dockerfile  docker-compose.yml  docker/nginx.conf
 ├── requirements.txt  .env.example  README.md
@@ -468,8 +470,10 @@ DATABASES = {"default": {"ENGINE": "django.db.backends.mysql", "NAME": "dcWebUse
     "OPTIONS": {"charset": "utf8mb4"}}}
 SIMPLE_JWT = {
     "ALGORITHM": "RS256",
-    "SIGNING_KEY": open(env("SSO_JWT_PRIVATE_KEY_PATH")).read(),
-    "VERIFYING_KEY": open(env("SSO_JWT_PUBLIC_KEY_PATH")).read(),
+    # key_path(): file name joined to the keys mount (SSO_JWT_KEYS_MOUNT > SSO_KEYS_DIR > /run/keys);
+    # implemented by sso.keys.resolve_key_config
+    "SIGNING_KEY": open(key_path(env("SSO_JWT_PRIVATE_KEY"))).read(),
+    "VERIFYING_KEY": open(key_path(env.list("SSO_JWT_PUBLIC_KEYS")[0])).read(),  # all of them go into JWKS
     "ISSUER": env("SSO_ISSUER"), "AUDIENCE": env("SSO_AUDIENCE", "myfin-services"),
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=int(env("SSO_ACCESS_TTL_MIN", 15))),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=int(env("SSO_REFRESH_TTL_DAYS", 7))),
@@ -494,8 +498,10 @@ SSO_ALLOWED_HOSTS=sso.thomas-choi.com
 SSO_DBHOST=  SSO_DBPORT=3306  SSO_DBUSER=  SSO_DBPWD=
 SSO_ISSUER=https://sso.thomas-choi.com
 SSO_AUDIENCE=myfin-services
-SSO_JWT_PRIVATE_KEY_PATH=/run/keys/private.pem
-SSO_JWT_PUBLIC_KEY_PATH=/run/keys/public.pem
+SSO_KEYS_DIR=./keys                       # host folder, mounted ro at /run/keys
+SSO_JWT_PRIVATE_KEY=sso-2026-10.private.pem   # file names in the mount (SSO_JWT_KEYS_MOUNT, compose: /run/keys)
+SSO_JWT_PUBLIC_KEYS=sso-2026-10.public.pem    # comma list (rotation)
+# deprecated aliases: SSO_JWT_PRIVATE_KEY_PATH / SSO_JWT_PUBLIC_KEY_PATHS (full paths)
 SSO_ACCESS_TTL_MIN=15  SSO_REFRESH_TTL_DAYS=7
 SSO_CORS_ALLOWED_ORIGINS=https://fin.thomas-choi.com
 SSO_COOKIE_DOMAIN=.thomas-choi.com

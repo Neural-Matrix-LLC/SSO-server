@@ -26,8 +26,10 @@ endpoint) and a static test page `examples/frontend/index.html` using spec §7.2
    never match.
 6. **`kid` header.** Compute once at start-up from the public key (spec §5.3). simplejwt >= 5.3 supports
    `"JWK_URL"` for verification only; for signing, set the header by subclassing `TokenBackend` or by
-   overriding `Token.__str__`. JWKS must list every public key in `SSO_JWT_PUBLIC_KEY_PATHS` (comma-separated,
-   for rotation); signing key = `SSO_JWT_PRIVATE_KEY_PATH`.
+   overriding `Token.__str__`. JWKS must list every public key in `SSO_JWT_PUBLIC_KEYS` (comma-separated
+   file names, for rotation); signing key = `SSO_JWT_PRIVATE_KEY`. Both are resolved in `SSO_JWT_KEYS_MOUNT` >
+   `SSO_KEYS_DIR` > `/run/keys` (compose mounts the host `SSO_KEYS_DIR` at `/run/keys`). Deprecated aliases:
+   `SSO_JWT_PUBLIC_KEY_PATHS` / `SSO_JWT_PRIVATE_KEY_PATH` (full paths).
 7. **Access token audience.** `aud` = `SSO_AUDIENCE`. Refresh tokens also carry `aud`, but services reject them via
    `token_type`.
 8. **Revocation is enforced at refresh too.** `/refresh` must reject a refresh token whose `iat` < the user's
