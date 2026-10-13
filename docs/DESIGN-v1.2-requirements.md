@@ -17,6 +17,8 @@ for the developer manual.
 8. [Phasing plan](#8-phasing-plan)
 9. [Decisions (2026-10-13)](#9-decisions-2026-10-13)
 
+The service-side Python library is designed in [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md).
+
 Future-phase and not-planned items are tracked in [../TODOS.md](../TODOS.md).
 
 ## 1. Requirements traceability
@@ -329,6 +331,85 @@ sequenceDiagram
   API-->>C: 200 / 401 / 403
 ```
 
+### 4.5 How the client IP is determined
+
+The IP that the SSO binds into a token (`cip`) and the IP that a service sends to introspect must be the
+**same address, derived the same way**. This section defines that derivation. It is implemented once, in the
+planned `sso_client` library ([SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md)), and mirrored in the SSO.
+
+#### 4.5.1 Root of trust: the socket peer
+
+The only address the client cannot forge is the **TCP peer address** that the OS returns from
+`accept()` / `getpeername()`. Each stack exposes it as:
+
+| Stack | Where the socket peer appears |
+|---|---|
+| Raw socket server | `conn, addr = sock.accept()` / `sock.getpeername()` |
+| WSGI (Django, Flask, gunicorn sync) | `environ["REMOTE_ADDR"]` (`request.META["REMOTE_ADDR"]`, `request.environ["REMOTE_ADDR"]`) |
+| ASGI (FastAPI, Starlette, uvicorn) | `scope["client"][0]` (`request.client.host`) |
+
+Everything in an HTTP header (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`) is **client-supplied data** unless it
+was written by a proxy we operate.
+
+#### 4.5.2 Reverse proxies: trusted-hop walk
+
+Behind nginx / a load balancer, the socket peer is the proxy. The original client IP is then taken from
+`X-Forwarded-For` **only when the socket peer is a configured trusted proxy**:
+
+1. `ip = peer` (socket address). If `peer` is not in the trusted list → return `peer`; ignore all headers.
+2. Otherwise read `X-Forwarded-For` (all header instances joined, comma-split, trimmed) and walk it
+   **right to left**. For each entry: parse and normalise it (malformed → stop, use last good value);
+   set `ip = entry`; if `entry` is **not** trusted → stop, `ip` is the client.
+3. If every hop is trusted, use the leftmost valid entry.
+
+Trusted proxies are a list of IPs/CIDRs (e.g. `127.0.0.1/32,172.18.0.0/16`). Never configure `0.0.0.0/0`.
+Taking the leftmost entry blindly, or trusting the header from any peer, lets any client spoof its IP.
+
+| Side | Setting today | Recommendation |
+|---|---|---|
+| SSO-server | DRF `NUM_PROXIES=1` (count of hops behind our nginx) | Move to `SSO_TRUSTED_PROXIES` (CIDR list) using the same algorithm as the library, so SSO and services cannot disagree. Keep `NUM_PROXIES` as a fallback with a deprecation warning. |
+| llm-wiki-svc | `TRUSTED_PROXY_IPS` | Replace its own code with `sso_client.get_client_ip` (v1.2b). |
+| Other services | — | `SSO_TRUSTED_PROXIES` via `sso_client`. |
+
+#### 4.5.3 Delegated (BFF) calls
+
+When a backend (e.g. llm-wiki-svc) logs a user in, refreshes, logs out, or introspects on the user's behalf, the
+SSO's socket peer is the **backend**. The backend sends `client_ip` = the browser IP it derived from **its own**
+socket (4.5.1–4.5.2). The SSO accepts `client_ip` only from an authenticated, active `ServiceClient`
+(Basic auth). From any other caller the field is ignored and the socket-derived IP is used.
+
+#### 4.5.4 Normalisation
+
+Before hashing (`cip`) or comparing, both sides apply `ipaddress.ip_address()` and:
+
+- IPv6 → canonical compressed form (lower case, `::` compression, zone id `%eth0` stripped).
+- IPv4-mapped IPv6 `::ffff:a.b.c.d` → IPv4 `a.b.c.d` (dual-stack sockets report IPv4 clients this way).
+- Ports are stripped (`1.2.3.4:5678`, `[2001:db8::1]:443`); `Forwarded`/`for=` quoting removed.
+- Unparseable value → treated as no IP (in `WARNING`/`ENFORCE` that is a mismatch, per 4.4).
+
+#### 4.5.5 Docker and nginx specifics
+
+- nginx (in front of SSO or a service):
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;` and `proxy_set_header X-Real-IP $remote_addr;`.
+  If nginx itself sits behind another LB, use `set_real_ip_from <LB CIDR>; real_ip_header X-Forwarded-For;
+  real_ip_recursive on;` so `$remote_addr` is already the client.
+- The app container must trust **only** the nginx container's address/network (e.g. the compose network CIDR).
+- **Docker userland-proxy** (`docker-proxy`) can terminate published-port connections and make every client
+  appear as the bridge gateway (e.g. `172.17.0.1`). Then every user has the same IP and binding is useless.
+  Recommended: run the edge nginx with `network_mode: host`, or set `"userland-proxy": false` in
+  `/etc/docker/daemon.json` (iptables DNAT preserves the source IP). On WSL2/Docker Desktop, check the observed
+  address with `/healthz` logs before enabling `ENFORCE`.
+- Verify: log the derived IP in `WARNING` mode and confirm it matches the real client before switching to `ENFORCE`.
+
+```mermaid
+flowchart LR
+    B["Browser<br/>203.0.113.7"] -->|TCP| LB["nginx (edge)<br/>sets XFF: 203.0.113.7"]
+    LB -->|"TCP peer 172.18.0.2<br/>XFF: 203.0.113.7"| SVC["Service (sso_client)<br/>peer trusted → walk XFF → 203.0.113.7"]
+    SVC -->|"Basic auth + token<br/>client_ip=203.0.113.7"| N2["nginx (SSO)"]
+    N2 -->|"TCP peer 172.19.0.3<br/>XFF: service IP"| SSO["SSO-server<br/>ServiceClient → use client_ip<br/>HMAC(ip) == cip ?"]
+    X["Attacker sets<br/>XFF: 10.0.0.9"] -.->|"peer not trusted → header ignored"| SVC
+```
+
 ## 5. Admin page
 
 | Need | Django admin today | Gap / proposal (v1.2a) |
@@ -445,7 +526,7 @@ change passwords in myFinance.
 |---|---|
 | current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
 | v1.2a | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
-| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere |
+| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES`, **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
 | v1.4 | Signed webhooks to registered services |
 | future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
 
@@ -464,3 +545,5 @@ Recorded from Thomas:
 7. One notification mechanism in the API: signed webhooks to services.
 8. Sign-up and other future items are tracked in TODOS.md.
 9. myFinance is phasing out; the SSO-server is the new authentication server.
+10. Client IP is derived from the socket peer (`getpeername`); forwarded headers only from trusted proxies (§4.5).
+11. A Python library (`sso-client`) provides this and the SSO permission query for all services (v1.2b).

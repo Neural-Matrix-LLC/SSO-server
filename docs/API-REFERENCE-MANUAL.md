@@ -222,6 +222,12 @@ def with_backoff(call, tries=5):
 
 ## 3. Service developers
 
+> **Planned v1.2b — Python library.** Python services should use the `sso-client` package (`import sso_client`),
+> which derives the client IP from the socket peer and trusted proxies, and wraps introspection, caching and
+> permission checks (`@require_permission`). See [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md) and
+> [client-IP rules](DESIGN-v1.2-requirements.md#45-how-the-client-ip-is-determined). The raw HTTP API below
+> stays the contract for non-Python services.
+
 ### 3.1 Register your service
 
 Ask an SSO admin to run (or do it in the admin UI at `/<SSO_ADMIN_PATH>`):

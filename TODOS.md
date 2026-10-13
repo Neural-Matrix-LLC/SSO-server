@@ -23,3 +23,7 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - Per-service audience (`aud` per app) — rejected; one token for all services.
 - IP prefix binding (/24, /64) and refresh "rebind" policy — rejected; exact IP, re-login on change.
 - myFinance → SSO password sync — not needed; myFinance is phasing out.
+
+## Client libraries
+
+- `sso-client` (Python) is planned for v1.2b ([design](docs/SSO-CLIENT-LIBRARY-DESIGN.md)). Future: webhook receiver (v1.4), clients for other languages (JS/Go) if non-Python services appear, publishing to a private package index.
