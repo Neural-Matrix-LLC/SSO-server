@@ -400,6 +400,60 @@ The suite's own server start (`qa/harness/start_sso.sh`, `sso.env`, `manage.sh`,
 variables (`SSO_JWT_KEYS_MOUNT=qa/run/keys`, `SSO_JWT_PRIVATE_KEY=qa-test.private.pem`, `SSO_JWT_PUBLIC_KEYS=qa-test.public.pem`)
 and unsets the old ones.
 
+### 3.14 v1.2a (branch feat/v1.2a: badede6, 3477b53, c959c1f; spec `docs/DESIGN-v1.2-requirements.md` §3.2, §3.3, §4.2 "Session", §5, §10)
+Tests: `qa/tests/test_v12a.py` (marker `v12a`), black-box over HTTP (API + Django admin UI with a throw-away superuser)
+plus `manage.py` / Django-shell steps (`SSO_MANAGE_CMD`) where the case needs DB writes that bypass the API.
+Harness: `qa/harness/run_v12a_round.sh VENV TAG` starts on ONE throw-away SQLite DB: main (8054, grace 10 s), a
+grace-0 instance (8055, `SSO_REFRESH_REUSE_GRACE_SECONDS=0`), an admin instance (8056, `SSO_SECURE_COOKIES=False` so
+the admin session/CSRF cookies work over plain http), the verifier (8058); then the throttle phase on a fresh DB (8057).
+Every process is stopped by its recorded PID.
+
+| ID | Steps | Expected | Req | Auto |
+|---|---|---|---|---|
+| V12A-SUSP-01 | two sessions; admin changelist action *Suspend* (HTTP) | refresh 403 `account_inactive`, `/me` 403 `account_inactive`, introspect `{"active":false}` for both sessions; login refused; `sso.admin` `user.suspended` line | 3a, dec. 6, §10 | A |
+| V12A-SUSP-02 | `u.is_active=False; u.save()` in the shell | same; no live outstanding refresh token left | 3a, §10 | A |
+| V12A-SUSP-03 | admin user change form, untick *Active*, Save | same | 3a, §10 | A |
+| V12A-SUSP-04 | suspend then *Unsuspend* (admin actions) | login works again with new tokens; the pre-suspension pair stays dead (401) | §10 | A |
+| V12A-SUSP-05 | `save(update_fields=["first_name"])` | no revocation | §10 | A |
+| V12A-UPD-01 | `QuerySet.update(is_active=False)` | signal NOT fired (refresh token still live); `revoke_inactive_users --dry-run` prints "would revoke tokens of N" and revokes nothing; the real run revokes; re-activation by `update()` leaves the old tokens dead | §10 (gap + sweep) | A |
+| V12A-UPD-01b | sweep twice | idempotent (already-revoked user not counted again) | §10 | A |
+| V12A-UPD-02/02b | `update()` suspend, then first introspect / refresh | introspect inactive / refresh 403 and the user is revoked on the spot (tokens dead after an `update()` reactivation) | §10 defence (2) | A |
+| V12A-UPD-03 | `update()` suspend + `update()` reactivate, no use, no sweep | old tokens survive (documented residual gap, pinned) | §10 | A |
+| V12A-SID-01..03 | login native / browser; refresh ×3 | `sid` in access and refresh, ≥ 16 chars, identical on every refresh (cookie too); 4 logins → 4 sids | §4.2, §10 | A |
+| V12A-REUSE-01 | refresh R1→R2, replay R1 at once | 401, no tokens; R2 still refreshes; log `refresh`/`reuse_within_grace`, no `session_revoked` | §10 grace | A |
+| V12A-REUSE-02 | two sessions A, B; A: R1→R2; wait grace+1.5 s; replay R1 | 401; session A dead (R2 refresh 401, A access tokens `/me` 401 / introspect inactive); session B unaffected; `RevokedSession(reason=refresh_reuse)`; log `reuse_detected` + `session_revoked` (`tokens_blacklisted ≥ 1`); no token strings in the log | §10 | A |
+| V12A-REUSE-03 | grace-0 instance: first reuse | session revoked at once; log lines | §10 | A |
+| V12A-REUSE-04 | replay after plain logout (past grace) | 401; the ended session gets a `RevokedSession` row (open question in §10, current behaviour pinned) | §10 | A |
+| V12A-REUSE-05 | suspended user replays a used token past grace | 403 `account_inactive`; no `RevokedSession` row | §10 | A |
+| V12A-REUSE-06 | garbage / bad-signature / truncated refresh tokens | 401, no side effects on the session | §10 | A |
+| V12A-REUSE-07 | 4 parallel HTTP refreshes of one token (1 gunicorn worker, SQLite) | exactly one 200, three 401, session kept | §10 concurrency | A |
+| V12A-REUSE-08 | real-thread concurrent refresh on MySQL 8.0 and 8.4 (`sso/tests/test_sessions_reuse.py:152` via `docker-compose.test.yml`) | one winner, session not revoked | §10 concurrency | **BLOCKED** (no Docker/MySQL server on the box) |
+| V12A-ADM-01 | admin suspends self via the action | refused with "You cannot suspend yourself."; still active; admin session works | §10 | A |
+| V12A-ADM-01b | admin unticks *Active* on their OWN change form | should be refused like the action | §10 | A |
+| V12A-ADM-02 | delete page / POST for `application.app1` | 403; no delete link; permission still there | 3c, §5, §10 | A |
+| V12A-ADM-03 | change form of an app permission; POST `codename=hijacked` + new name | codename field read-only; codename unchanged, name renamed | §10 | A |
+| V12A-ADM-04 | changelist of app permissions; POST `action=delete_selected` | no action dropdown; nothing deleted | §10 | A |
+| V12A-ADM-05 | delete a non-code permission with a direct user and a group | confirmation page lists both; after delete introspect `perms` lacks it | 3c, §10 | A |
+| V12A-ADM-06/06b | *Grant / Revoke app access…* on users and groups; a non-`application` permission id | introspect `perms` changes at once, existing access token unchanged; only `application.*` offered, other ids refused | 3b, §10 | A |
+| V12A-ADM-07 | ServiceClient admin `notify_url`: https / http / `javascript:` / ftp / missing scheme | https stored; http, javascript:, ftp refused; missing scheme recorded | §3.2 | A |
+| V12A-ADM-07b | ServiceClient admin `app_codename` unknown / `application.app1`; duplicate client_id | unknown refused; stored as `app1`; duplicate refused | §3.2, §10 | A |
+| V12A-CMD-01 | `register_service <id> --name --app --notify-url https://… --origin` | permission + client created; secret printed once (stdout only, hash stored); new client can introspect | §3.3 | A |
+| V12A-CMD-02 | duplicate client_id via `register_service` (same/other app) and `create_service_client` | refused, clean message, no traceback; secret hash unchanged; no stray permission | §3.3 | A |
+| V12A-CMD-03 | `--notify-url` http / missing scheme / `javascript:` / ftp / `https://` | refused; neither client nor permission created | §3.2 | A |
+| V12A-CMD-04 | `create_service_client --app` unknown / `application.app1`; with `--rotate-secret` | unknown refused; linked as `app1` | §3.3 | A |
+| V12A-CMD-05 | `register_service` with an existing permission, with and without `--app-name` | description kept / replaced | §3.3 | A |
+| V12A-CMD-06 | bad codenames (`App2`, `app-2`, empty, space, `../x`) | refused, no traceback | §3.3 | A |
+| V12A-MIG-01 | throw-away SQLite: migrate all → sso 0001 → 0002 → 0001 → all; compare `sqlite_master` | back-migration restores 0001 exactly; only `sso_serviceclient` (2 NULL columns) and `sso_revokedsession` change; auth_* / django_* identical; `sqlmigrate sso 0002` touches only sso tables; old-style INSERT without the new columns works | §10 migration | A |
+| V12A-MIG-02 | `makemigrations --check --dry-run` | clean | §10 | A |
+| V12A-REG | full existing qa suite (v1.1 endpoints) incl. verifier and the throttle phase | unchanged | §8 v1.1 | A |
+| V12A-DEV | developer suite `pytest` (Py 3.13 / 3.11, Django 5.2) | 291 passed / 7 skipped (Philip's lead check) | — | A (run by QA) |
+
+Traceability (v1.2a requirements → tests): 3a suspend/unsuspend → SUSP-01..05, UPD-01..03, ADM-01/01b;
+3b app grants → ADM-06/06b; 3c service permission CRUD → ADM-02..05; §3.2 model (`app_codename`, `notify_url` https) →
+ADM-07/07b, CMD-03, MIG-01; §3.3 onboarding → CMD-01..06; §4.2 "Session"/`sid` → SID-01..03; §10 reuse → REUSE-01..08;
+§10 migration → MIG-01/02; v1.1 regression → V12A-REG. Not testable in v1.2a: webhooks (`user.suspended` event, v1.4),
+IP binding / `cip` / introspect `ip_match` (v1.2b), Redis revoked-session set (deferred to v1.2b).
+
 ---
 
 ## 4. Automation approach
@@ -446,7 +500,8 @@ and unsets the old ones.
 | End-to-end | 9 | 0 | 4 | 13 |
 | Deployment / docs | 18 | 0 | 9 | 27 |
 | Key configuration (§3.13) | 22 | 0 | 0 | 22 |
-| **Total** | **188** | **2** | **23** | **213** |
+| v1.2a (§3.14) | 40 | 0 | 0 (+1 blocked: REUSE-08) | 41 |
+| **Total** | **228** | **2** | **23** (+1 blocked) | **254** |
 
 pytest collects 269 items @ d784f10 (was 211 before the deploy and key cases) because of parametrization (`pytest --collect-only` passes with no errors).
 
