@@ -1,5 +1,7 @@
 # SSO server: technical design and architecture
 
+> **See also:** [v1.2 requirements design](DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](API-REFERENCE-MANUAL.md).
+
 | | |
 |---|---|
 | Status | Describes the code on branch `feat/app-permissions` at `0a1a462` (SSO server) and `feat/sso-login` (llm-wiki-svc consumer) |
