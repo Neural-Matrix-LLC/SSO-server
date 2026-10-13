@@ -326,6 +326,10 @@ llm-wiki-svc is the first adopter (v1.2b):
 
 ## 16. Open decisions
 
+**Decided 2026-10-13** (Thomas, recorded in [DESIGN-v1.2-requirements.md §9](DESIGN-v1.2-requirements.md#9-decisions-2026-10-13),
+items 12–17): 1 → `clients/python/`, pip from git; 2 → `sso-client` (`nm-sso-client` alternative); 3 → fail
+closed, 503; 4 → 30 s, active results only; 5 → httpx. The list below is kept for the record.
+
 1. Repo location: `clients/python/` in SSO-server (recommended) vs separate repo.
 2. Package name `sso-client` / `sso_client` (alternative: `nm-sso-client` to avoid a PyPI name clash if ever published).
 3. Failure default: fail closed (recommended); allow opt-in `cached` stale mode?

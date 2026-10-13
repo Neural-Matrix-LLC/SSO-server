@@ -226,21 +226,26 @@ def with_backoff(call, tries=5):
 > which derives the client IP from the socket peer and trusted proxies, and wraps introspection, caching and
 > permission checks (`@require_permission`). See [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md) and
 > [client-IP rules](DESIGN-v1.2-requirements.md#45-how-the-client-ip-is-determined). The raw HTTP API below
-> stays the contract for non-Python services.
+> stays the contract for non-Python services. Library decisions: package `sso-client` (import `sso_client`;
+> `nm-sso-client` kept as an alternative name), source in `clients/python/` of this repo, installed with `pip`
+> from git; fail-closed 503 when the SSO is unreachable; caches only `active:true` answers for 30 s; uses httpx.
 
 ### 3.1 Register your service
 
 Ask an SSO admin to run (or do it in the admin UI at `/<SSO_ADMIN_PATH>`):
 
 ```bash
-python manage.py create_app_permission app2 "Can use app2 (reporting)"   # -> application.app2
-python manage.py create_service_client reporting --name "Reporting"       # prints client_secret once
+python manage.py register_service reporting --name "Reporting" --app app2 \
+    --app-name "Can use app2 (reporting)"      # creates application.app2 if missing; prints client_secret once
 ```
 
-Then grant `application.app2` to users or groups in the admin. Codenames match `^[a-z][a-z0-9_]{1,62}$`.
+(v1.2a. Equivalent two-step form: `create_app_permission app2 "…"` then `create_service_client reporting
+--name "Reporting" --app app2`. In the admin: *Application permissions → Add*, then *Service clients → Add* with
+"App codename" `app2`.) Then grant `application.app2` to users or groups in the admin (actions *Grant app
+access…* on the user or group list). Codenames match `^[a-z][a-z0-9_]{1,62}$`.
 You receive: issuer, JWKS URL (`<issuer>/.well-known/jwks.json`), audience (`myfin-services` unless configured
 otherwise; one token is valid for all services), `client_id` / `client_secret`, and your permission name.
-**Planned v1.2a**: one `register_service` command.
+`--notify-url` stores your future webhook endpoint (HTTPS); nothing is sent before v1.4.
 
 ### 3.2 Verify tokens locally (JWKS)
 
@@ -391,8 +396,18 @@ SameSite=Lax; Path=/api/v1/auth/; Max-Age=604800`). Errors: 400 `invalid_request
 ### refresh — `POST /api/v1/auth/refresh`
 
 Native: `{"refresh_token": "<jwt>"}` (≤ 8192). Cookie: `{}` + cookie + allowed `Origin`. 200 like login, new
-refresh token. Errors: 400, 401 `token_invalid` (missing, expired, blacklisted/reused, wrong type, revoked,
-lost race), 401 `invalid_client`, 403 `account_inactive`, 403 `origin_not_allowed`, 429.
+refresh token, same session id `sid` (v1.2a). Errors: 400, 401 `token_invalid` (missing, expired,
+blacklisted/reused, wrong type, revoked, session revoked, lost race), 401 `invalid_client`, 403
+`account_inactive` (user suspended; also for a refresh token that the suspension blacklisted), 403
+`origin_not_allowed`, 429.
+
+**Reuse (v1.2a).** Presenting a refresh token that was already used gets 401 `token_invalid`. If it was used
+more than `SSO_REFRESH_REUSE_GRACE_SECONDS` (default 10) ago, the SSO treats it as stolen and **revokes the
+whole session** (every token with that `sid`): the legitimate holder's newer refresh token and its access
+tokens stop working too and the user must log in again. Within the grace window (two tabs refreshing at once,
+a retry after a lost response) only the late request fails; the session survives. Clients should still
+serialise refreshes (one in flight per session) and never retry a refresh with the old token after a
+successful one.
 
 ### logout — `POST /api/v1/auth/logout`
 
@@ -406,7 +421,8 @@ Bearer. 204: blacklists all outstanding refresh tokens, sets the revocation time
 
 ### me — `GET /api/v1/auth/me`
 
-Bearer. 200 `user` object from the database. 401 / 403 as logout-all.
+Bearer. 200 `user` object from the database. 401 / 403 as logout-all; 401 also for a token of a revoked
+session (v1.2a) or of a suspended user.
 
 ### introspect — `POST /api/v1/auth/introspect`
 
@@ -439,9 +455,10 @@ realm="sso-introspect"`).
 | `groups` | sorted group names | no |
 | `perms` | sorted `application.*` (explicit user + group grants; superusers only if `SSO_SUPERUSER_ALL_APPS=true`) | no |
 | `cip` | **Planned v1.2b** (HMAC of client IP; opaque to services) | **Planned v1.2b** |
-| `sid` | **Planned v1.2a** (session id) | **Planned v1.2a** |
+| `sid` | session id (v1.2a): one per login, unchanged by refresh | same |
 
-Claims are a snapshot at issue time; changes reach new tokens at the next refresh.
+Claims are a snapshot at issue time; changes reach new tokens at the next refresh. Tokens issued before v1.2a
+have no `sid`; refreshing one starts a new session. Treat `sid` as opaque.
 
 ## 6. Error codes
 
@@ -449,7 +466,7 @@ Claims are a snapshot at issue time; changes reach new tokens at the next refres
 |---|---|---|
 | 400 | `invalid_request` | malformed body/fields, bad `client_ip`, disallowed Host |
 | 401 | `invalid_credentials` | wrong username/password |
-| 401 | `token_invalid` | token missing, bad, expired, wrong type, blacklisted, revoked |
+| 401 | `token_invalid` | token missing, bad, expired, wrong type, blacklisted, revoked (user or session) |
 | 401 | `invalid_client` | ServiceClient Basic auth failed |
 | 403 | `account_inactive` | user suspended (`is_active=false`) |
 | 403 | `origin_not_allowed` | cookie mode without an allowed `Origin` |
@@ -464,13 +481,13 @@ Claims are a snapshot at issue time; changes reach new tokens at the next refres
 
 ## 7. Planned v1.2 features
 
-None of the following exists yet; do not code against it until it is released. Agreed design (decisions of
+Rows marked **Planned** do not exist yet; do not code against them until they are released. Agreed design (decisions of
 2026-10-13): [DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md). Later ideas: [TODOS.md](../TODOS.md).
 
 | Feature | Sketch |
 |---|---|
-| **Planned v1.2a** Suspend revokes immediately | setting `is_active=false` revokes all of the user's tokens (revocation marker + refresh blacklist); introspect returns `active:false` at once |
-| **Planned v1.2a** `register_service` command and admin actions | service permission CRUD, grant/revoke app access, ServiceClient `app_codename` |
+| **Done in v1.2a** Suspend revokes immediately | `is_active=false` revokes all of the user's tokens (revocation marker + refresh blacklist); introspect `active:false`, refresh 403 `account_inactive`, `/me` 401. Unsuspending does not revive old tokens |
+| **Done in v1.2a** `register_service`, admin actions, `sid`, refresh-reuse session revocation | see §3.1, §4 refresh, §5 |
 | **Planned v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
 | **Planned v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
 | **Planned v1.4** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |

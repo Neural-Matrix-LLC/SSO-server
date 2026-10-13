@@ -49,7 +49,7 @@ In scope (implemented):
 - Throttling with a shared cache (Redis), structured security logs, Docker deployment behind nginx.
 
 Out of scope today (see §12): hosted login page, authorization code + PKCE, account endpoints (sign-up,
-password reset), OIDC ID tokens, refresh-token family reuse detection.
+password reset), OIDC ID tokens. (Refresh-token reuse now revokes the session, v1.2a, §7.4.)
 
 ## 2. Glossary
 
@@ -139,7 +139,7 @@ flowchart TB
   CACHE[("Django cache - Redis via SSO_CACHE_URL")]
   APP["application app - permissions.py user_app_perms, post_migrate sync, admin, create_app_permission"]
   ADM["Django admin at SSO_ADMIN_PATH - ServiceClient, UserTokenRevocation, application permissions"]
-  CMD["Management commands - create_service_client, create_app_permission, migrate, createsuperuser"]
+  CMD["Management commands - register_service, create_service_client, create_app_permission, revoke_inactive_users, migrate, createsuperuser"]
   CHK["Start-up checks - settings fail-fast, sso/checks.py E001 E002 W001, sso/signals.py"]
 
   L1 --> L2 --> L3 --> L4 --> L5
@@ -198,6 +198,7 @@ erDiagram
   auth_user ||--o{ token_blacklist_outstandingtoken : "refresh tokens issued"
   token_blacklist_outstandingtoken ||--o| token_blacklist_blacklistedtoken : "blacklisted"
   auth_user ||--o| sso_usertokenrevocation : "revoked_at"
+  auth_user ||--o{ sso_revokedsession : "revoked sessions (sid)"
   sso_serviceclient ||--o{ sso_authorizationcode : "phase 5, unused"
   auth_user ||--o{ sso_authorizationcode : "phase 5, unused"
   sso_application_permission_record }o..o| auth_permission : "permission_id, no FK"
@@ -244,6 +245,15 @@ erDiagram
     json redirect_uris
     json allowed_origins
     bool is_active
+    string app_codename "v1.2a, nullable"
+    string notify_url "v1.2a, nullable, v1.4 webhooks"
+  }
+  sso_revokedsession {
+    bigint id PK
+    string sid UK
+    int user_id FK
+    datetime revoked_at
+    string reason "refresh_reuse"
   }
   sso_application_permission_record {
     bigint id PK
@@ -300,10 +310,11 @@ What is stored where, precisely:
 |---|---|---|---|
 | User, password hash, `is_active`, `is_staff`, groups | `auth_user`, `auth_group`, `auth_user_groups` | myFinance and SSO admin | Stock User model, no `AUTH_USER_MODEL` |
 | `application.*` permission rows | `auth_permission` on content type `application.applicationaccess` | `migrate` (app1), `create_app_permission` | Grants in `auth_user_user_permissions` / `auth_group_permissions` |
-| Every issued refresh token | `token_blacklist_outstandingtoken` | `issue_token_pair` via `RefreshToken.for_user` | Includes the raw token text (simplejwt). Access tokens are **not** stored anywhere |
+| Every issued refresh token | `token_blacklist_outstandingtoken` | `issue_token_pair` via `SSORefreshToken.for_session` | Includes the raw token text, with its `sid` (the session family is found by decoding these). Access tokens are **not** stored anywhere |
 | Used / logged-out refresh tokens | `token_blacklist_blacklistedtoken` | `/refresh`, `/logout`, `/logout-all` | `flushexpiredtokens` is not run automatically (Dockerfile R6) |
-| Revocation epoch | `sso_usertokenrevocation` | `/logout-all`, password change signal, admin | One row per user, `update_or_create` |
-| Service clients | `sso_serviceclient` | admin, `create_service_client` | Secret stored as a Django password hash |
+| Revocation epoch | `sso_usertokenrevocation` | `/logout-all`, password change signal, suspend / unsuspend (`is_active` change), inactive user seen on use, `revoke_inactive_users`, admin | One row per user, `update_or_create` |
+| Revoked sessions | `sso_revokedsession` | `/refresh` on refresh-token reuse (v1.2a) | One row per revoked `sid`; checked by `/refresh`, `/me`, `/introspect` |
+| Service clients | `sso_serviceclient` | admin, `register_service`, `create_service_client` | Secret stored as a Django password hash; `app_codename` links `application.<codename>` |
 | Throttle counters | Redis | DRF throttles | Lost on Redis restart (by design) |
 | Signing key | `/run/keys/<SSO_JWT_PRIVATE_KEY>` | `scripts/gen_keys.sh` | Read once at process start |
 
@@ -320,11 +331,13 @@ flowchart LR
     A3["iss SSO_ISSUER, aud SSO_AUDIENCE"]
     A4["username, email, is_staff, groups"]
     A5["perms - application.* only"]
+    A6["sid - session id (v1.2a)"]
   end
   subgraph Refresh["Refresh token claims"]
     R1["token_type refresh"]
     R2["sub, exp, iat, jti"]
     R3["iss, aud"]
+    R4["sid - session id (v1.2a)"]
   end
   H --> Access
   H --> Refresh
@@ -814,18 +827,20 @@ sequenceDiagram
   participant S as SSO
   U->>S: refresh R1
   S-->>U: 200 R2, R1 blacklisted
-  X->>S: refresh R1
+  X->>S: refresh R1 (more than SSO_REFRESH_REUSE_GRACE_SECONDS after its first use)
+  S->>S: R1 is ours, valid, already blacklisted: reuse of session sid
+  S->>S: sso_revokedsession sid, blacklist R2 and every other refresh token of sid
   S-->>X: 401 token_invalid
-  Note over S: implemented - reuse is rejected
-  Note over S: NOT implemented - no detection event, R2 and later tokens stay valid
-  opt operator or user reaction, manual
-    U->>S: POST /logout-all with a valid access token
-    S-->>U: 204, every refresh token blacklisted and revoked_at set
-  end
+  U->>S: refresh R2
+  S-->>U: 401 token_invalid, log in again
+  Note over S: access tokens of sid fail at /me and /introspect at once
 ```
 
-If the attacker uses R1 **first**, the attacker gets the new pair and the legitimate client gets 401 and must log
-in again. Family-wide revocation on reuse (OAuth 2.0 BCP) is **not implemented** (§12).
+Implemented in v1.2a (OAuth 2.0 BCP family revocation, family = `sid`). Whoever uses R1 second ends the whole
+session, so it also helps when the attacker used R1 **first**. Grace: a reuse within
+`SSO_REFRESH_REUSE_GRACE_SECONDS` (default 10) of the first use, or a request that loses the blacklist insert
+to a concurrent one, only gets 401 (two tabs, retries); the session is kept (§7.3). Local verifiers still see a
+revoked session's access tokens as valid until `exp`. Details: DESIGN-v1.2 §10.
 
 ### 7.5 SSO unreachable, 5xx or timeout
 
@@ -991,11 +1006,12 @@ sequenceDiagram
   participant S as SSO
   participant C as Client
   participant API as Service
-  A->>S: set is_active false
+  A->>S: set is_active false (admin action, form, save())
+  S->>S: v1.2a: revoked_at = now, all refresh tokens blacklisted (same transaction)
   C->>API: Bearer access, still before exp
   API-->>C: 200, local verification does not see is_active
   C->>S: GET /me
-  S-->>C: 403 account_inactive
+  S-->>C: 401 (inactive user / revoked token)
   C->>S: POST /refresh
   S-->>C: 403 account_inactive
   Note over C: llm-wiki deletes the session, cookie cleared
@@ -1005,7 +1021,10 @@ sequenceDiagram
   end
 ```
 
-Worst case exposure at local verifiers: one access TTL (15 min, plus 30 s leeway).
+Worst case exposure at local verifiers: one access TTL (15 min, plus 30 s leeway). Unsuspending revokes again,
+so tokens from before the reactivation stay dead; `QuerySet.update()` / myFinance writes send no signal and are
+caught on the next refresh or introspect of a live token, or by `manage.py revoke_inactive_users`
+(DESIGN-v1.2 §10).
 
 ### 7.11 Permission revoked mid-session
 
@@ -1177,14 +1196,14 @@ Native: body `{"refresh_token": "<jwt>"}` (max 8192). Cookie: body `{}` with coo
 `Origin` header. Optional Basic + `client_ip` as for login.
 
 Response 200: same shape as login. Native returns the new `refresh_token` in the body, cookie mode sets a new
-cookie. The presented refresh token is blacklisted.
+cookie. The presented refresh token is blacklisted. The new pair keeps the session id `sid` (v1.2a).
 
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid_request` | body not an object, `refresh_token` blank or too long, bad `client_ip` |
-| 401 | `token_invalid` | no token ("No refresh token supplied."), bad signature or unknown `kid`, wrong `iss`/`aud`, expired, `token_type` not `refresh` (an access token here fails), blacklisted, user deleted, `iat` before `revoked_at`, lost a concurrent-refresh race |
+| 401 | `token_invalid` | no token ("No refresh token supplied."), bad signature or unknown `kid`, wrong `iss`/`aud`, expired, `token_type` not `refresh` (an access token here fails), blacklisted, user deleted, `iat` before `revoked_at`, `sid` revoked, lost a concurrent-refresh race. Reuse of an already-used token more than `SSO_REFRESH_REUSE_GRACE_SECONDS` after its first use also revokes its session (§7.4) |
 | 401 | `invalid_client` | bad Basic credentials |
-| 403 | `account_inactive` | user disabled |
+| 403 | `account_inactive` | user disabled (also when the suspension already blacklisted this token) |
 | 403 | `origin_not_allowed` | cookie mode, `Origin` missing or not allowed |
 | 429 | `rate_limited` | over `refresh` (60/min per IP), `Retry-After` |
 
@@ -1283,8 +1302,11 @@ healthcheck (`docker/healthcheck.py`) sends the right `Host` and `X-Forwarded-Pr
 
 Django admin at `/<SSO_ADMIN_PATH>` (default `sso-admin/`; README advises a non-default value). Staff session login,
 Django CSRF applies. nginx can restrict it by IP via `SSO_ADMIN_ALLOW_DIR` snippets. Registered: stock Users and
-Groups, `ServiceClient` (secret generated and shown once on create or "regenerate secret"), `UserTokenRevocation`,
-`ApplicationPermission` (read-only filtered list), `ApplicationPermissionRecord` (read-only).
+Groups with v1.2a actions (Users: *Suspend*, *Unsuspend*, *Grant / Revoke app access…*; Groups: *Grant / Revoke
+app access…*), `ServiceClient` (secret generated and shown once on create or "regenerate secret"; `app_codename`,
+`notify_url`, users-with-access count), `UserTokenRevocation`, `RevokedSession` (read-only),
+`ApplicationPermission` (add / rename via `ensure_permission`, delete with an affected-users confirmation; `app1`
+not deletable), `ApplicationPermissionRecord` (read-only). Actions write `LogEntry` and `sso.admin` JSON lines.
 
 ### 8.11 Error codes
 
@@ -1370,7 +1392,8 @@ From `ssoproject/settings.py` (env or `.env`; `SSO_ENV_FILE` chooses the file, d
 | `SSO_DB_SSL_MODE` | empty | `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY` |
 | `SSO_TEST_DBNAME` | `test_dcWebUsers` | Test DB name |
 | `SSO_CACHE_URL` | empty, fatal (debug: LocMem); compose `redis://redis:6379/0` | Shared throttle cache; LocMem/dummy fatal. Key prefix `sso` |
-| `SSO_NUM_PROXIES` | `0` (compose `1`) | Trusted proxy hops for `X-Forwarded-For` |
+| `SSO_NUM_PROXIES` | `0` (compose `1`) | Trusted proxy hops for `X-Forwarded-For`. v1.2b: replaced by `SSO_TRUSTED_PROXIES` (CIDR list), this stays as a deprecated fallback |
+| `SSO_REFRESH_REUSE_GRACE_SECONDS` | `10` | v1.2a: reuse of a refresh token this soon after its first use is a concurrent refresh (401, session kept); later reuse revokes the session. `0` = no grace |
 | `SSO_THROTTLE_LOGIN` | `10/min` | per client IP |
 | `SSO_THROTTLE_LOGIN_USER` | `5/min` | per lowercased username/email |
 | `SSO_THROTTLE_REFRESH` | `60/min` | per client IP, `/refresh` and `/logout` |
@@ -1412,12 +1435,13 @@ Compose / runtime only: `GUNICORN_WORKERS` (3), `SSO_FORWARDED_ALLOW_IPS` (edge 
 | Password guessing | 10/min per IP, 5/min per username, nginx 30/min | `sso/throttles.py`, `nginx.conf` |
 | Throttle bypass via headers | `NUM_PROXIES` default 0, nginx overwrites XFF, `client_ip` only from authenticated ServiceClients | `settings.py`, `delegation.py` |
 | User enumeration | same 401 for unknown user, one hash on every path, dummy hash for unknown ServiceClients | `serializers.check_credentials`, `authentication._dummy_check` |
-| Session after compromise | `logout-all`, password change sets `revoked_at` | `views.LogoutAllView`, `signals.py` |
+| Session after compromise | `logout-all`, password change and suspend set `revoked_at`; refresh-token reuse revokes the session (`sid`) | `views.LogoutAllView`, `signals.py`, `revocation.py`, `views.handle_refresh_reuse` |
 | Container compromise | non-root uid 10001 (fatal as root), read-only root fs, `cap_drop ALL`, `no-new-privileges`, keys mounted read-only, Redis on an internal network | `Dockerfile`, `docker-compose.yml` |
 | Secret leakage in logs | JSON log lines without tokens/passwords; key errors never print key contents | `sso/logs.py`, `sso/keys.py` |
 
-Known limits: local verifiers cannot see logout, revocation or deactivation before `exp`; refresh-token reuse is
-rejected but not detected; password changes in myFinance do not revoke tokens.
+Known limits: local verifiers cannot see logout, revocation or deactivation before `exp`; reuse within the grace
+window is not treated as theft; password changes and suspensions written by myFinance do not revoke tokens until
+a token is used or `revoke_inactive_users` runs.
 
 ### 11.2 Deployment view
 
@@ -1498,7 +1522,7 @@ HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `
 | Hosted login page, `GET /sso/authorize`, `POST /api/v1/auth/token`, auth code + PKCE, `sso/logout` (phase 5) | Not routed. `AuthorizationCode` model, `ServiceClient.redirect_uris` and `SSO_CODE_TTL_SEC` exist unused |
 | Account endpoints `api/v1/account/*` (sign-up, activation, password reset) | Not routed |
 | OIDC ID tokens, userinfo, `authorization_endpoint` in discovery | Not implemented |
-| Refresh-token family revocation on reuse | Not implemented; reuse only gets 401 |
+| Refresh-token family revocation on reuse | **Implemented v1.2a** (§7.4); `sso_revokedsession` rows are not pruned yet |
 | Absolute SSO-side session cap | Not implemented; each refresh issues a new 7-day token |
 | Revocation for local verifiers before `exp` | By design only via `/introspect` |
 | Revocation on password change in myFinance | Not implemented (other process) |
@@ -1524,4 +1548,4 @@ Found while writing this document. None of them changes behaviour; they are docu
 | D9 | `docs/sso-integration-design.md` v1.1 item 4 | "Without valid Basic auth the `client_ip` field is ignored" | Since v1.2 (C-19): a Basic header that fails is 401 `invalid_client`; only a request with **no** Basic header ignores `client_ip` (`sso/delegation.py`). The doc's later v1.2 section has it right, item 4 was not amended |
 | D10 | `docs/SSO-server.md` §6.3 | Logout "clears the cookie", 204 | 204 only for a valid token or no cookie; an invalid/blacklisted token gives 401 `token_invalid` (cookie still cleared in cookie mode) |
 | D11 | llm-wiki-svc `auth/client.py` vs design v1.1 item 4 | Server-side calls pass the browser IP | `logout()` sends Basic but **no** `client_ip`, so all llm-wiki logouts count against the llm-wiki server's own IP in the SSO `refresh` throttle (60/min shared with refresh). Low impact; worth passing `client_ip` there too |
-| D12 | `sso/admin.py` docstring | "read-only revocation markers" | `UserTokenRevocationAdmin` has no read-only override; rows can be added and edited in the admin (useful as a manual revoke, but the docstring is wrong) |
+| D12 (fixed v1.2a) | `sso/admin.py` docstring | "read-only revocation markers" | `UserTokenRevocationAdmin` has no read-only override; rows can be added and edited in the admin (useful as a manual revoke, but the docstring is wrong) |

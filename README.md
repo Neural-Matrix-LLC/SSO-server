@@ -157,13 +157,14 @@ certificate. For a throw-away local MySQL instead, see "Local dev with self-sign
 | `sso/throttles.py` | `LoginIPThrottle` (10/min), `LoginUserThrottle` (5/min per lowercased username/email), `RefreshThrottle` (60/min) |
 | `sso/errors.py` | Uniform `{"error","detail"}` handler for DRF and Django-level errors |
 | `sso/logs.py` | One structured JSON log line per login attempt (username, IP, result). Never tokens or passwords |
-| `sso/models.py` | `ServiceClient`, `UserTokenRevocation`, `AuthorizationCode` (phase 5, unused) |
-| `sso/signals.py` | A password change made through this project revokes the user's tokens. A login rehash does not |
-| `sso/admin.py` | ServiceClient admin. The secret is generated and shown once; only its hash is stored |
-| `sso/management/commands/create_service_client.py` | CLI registration and secret rotation |
+| `sso/models.py` | `ServiceClient` (v1.2a: `app_codename`, `notify_url`), `UserTokenRevocation`, `RevokedSession` (v1.2a), `AuthorizationCode` (phase 5, unused) |
+| `sso/signals.py` | A password change made through this project revokes the user's tokens (a login rehash does not). v1.2a: suspending or unsuspending (`is_active` change via `save()`) revokes all of the user's tokens |
+| `sso/revocation.py` | v1.2a: revoke a user (marker + blacklist) or one session (`sid` family, `RevokedSession`) |
+| `sso/admin.py` | ServiceClient admin (secret generated and shown once; only its hash is stored). User / Group admin actions: suspend, unsuspend, grant / revoke app access |
+| `sso/management/commands/` | `create_service_client` (registration, secret rotation, `--app`), `register_service` (v1.2a: permission + client in one step), `revoke_inactive_users` (v1.2a sweep) |
 | `sso/checks.py`, `sso/runtime.py` | System checks (Errors) with `SSO_DEBUG=False`: `sso.E001` per-process/no-op cache, `sso.E002` running as root |
-| `sso/migrations/0001_initial.py` | SSO's own tables (`sso_*`) |
-| `application/` | Central application permissions (`application.<codename>`, §6a): `ApplicationAccess` anchor model, SSO-side permission registry, `create_app_permission` command, read-only admin, post-migrate re-sync. Its migration only creates `sso_application_*` tables |
+| `sso/migrations/` | SSO's own tables (`sso_*`); `0002` (v1.2a) is additive: nullable `sso_serviceclient` columns, new `sso_revokedsession` |
+| `application/` | Central application permissions (`application.<codename>`, §6a): `ApplicationAccess` anchor model, SSO-side permission registry, `create_app_permission` command, admin, post-migrate re-sync. Its migration only creates `sso_application_*` tables |
 | `sso/tests/` | pytest suite (see §9 for the spec §11 mapping) |
 | `examples/verifier/` | Spec §8.2 PyJWT verifier (`sso_verifier.py`, with `JWKSCache`: keys cached 1 h, an unknown `kid` refetches the JWKS at most once per 60 s, spec §8.1) plus a FastAPI demo (`verifier_app.py`) and its Dockerfile |
 | `examples/frontend/` | `index.html` test page plus the spec §7.2 `auth.js` (SSO base URL configurable) |
@@ -256,6 +257,7 @@ The complete annotated list is in `.env.example`. The most important ones:
 | `SSO_JWT_PUBLIC_KEYS` | — | Comma list of file names of **all** published or accepted public keys (rotation: append). The signing key's own public key is always published even if not listed |
 | `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS` | — | **Deprecated** full-path forms (and the v1.0 singular `SSO_JWT_PUBLIC_KEY_PATH`). Still read, with warning `sso.W001` (logged once per process). Setting one together with its new form is an `ImproperlyConfigured` error |
 | `SSO_ACCESS_TTL_MIN` / `SSO_REFRESH_TTL_DAYS` | `15` / `7` | |
+| `SSO_REFRESH_REUSE_GRACE_SECONDS` | `10` | v1.2a. Reusing a refresh token later than this after its first use revokes the whole session (`sid`); sooner is a concurrent refresh (401 only). `0` = no grace |
 | `SSO_CORS_ALLOWED_ORIGINS` | — | Front-end origins. Also the allow-list for the cookie-mode `Origin` check |
 | `SSO_COOKIE_DOMAIN` | host-only | e.g. `.example.com` so sibling sub-domains share the cookie |
 | `SSO_CACHE_URL` | none (`locmemcache://` only when `SSO_DEBUG=True`) | Throttle counters, shared by all gunicorn workers. **Required when `SSO_DEBUG=False`**: empty, `locmemcache://` or `dummycache://` stop the server at startup (`ImproperlyConfigured`), and `manage.py check` reports `sso.E001` if `CACHES` is overridden to one of them. `docker-compose.yml` defaults it to `redis://redis:6379/0`; on a single host without Redis use `filecache:///path`. Keys are prefixed with `sso` |
@@ -329,6 +331,10 @@ UPDATE, DELETE`. That covers `flushexpiredtokens`, `last_login`, and the PBKDF2 
   "regenerate secret" to rotate it.
 * CLI: `docker compose exec web python manage.py create_service_client rebalance-api --name "Rebalance API"`
   prints `client_id=…` and `client_secret=…` once. Add `--rotate-secret` to issue a new one.
+* v1.2a, new service in one step (creates `application.app2` if missing and links it as `app_codename`):
+  `docker compose exec web python manage.py register_service reporting --name "Reporting" --app app2
+  --app-name "Can use app2 (reporting)" [--notify-url https://reporting.example.com/sso/events]`.
+  `notify_url` is stored for the v1.4 webhooks; nothing is sent yet.
 
 Hand the secret to the service owner through the password manager. The service calls
 `POST /api/v1/auth/introspect` with HTTP Basic `client_id:client_secret` and the body `{"token": "<access token>"}`.
@@ -429,8 +435,11 @@ One permission per application, checked by that application in the access token'
 * **Add an application (no code change):**
   `docker compose exec web python manage.py create_app_permission app2 "Can use app2 (reports)"`.
   Idempotent (re-running only updates the description, grants are kept). Codename `^[a-z][a-z0-9_]{1,62}$`.
-* **See them:** admin → Applications → "Application permissions" (read-only list with grant counts) and
-  "Application permission records" (the SSO-side registry).
+  v1.2a: also in the admin (*Application permissions → Add*), or with the service: `register_service … --app app2`.
+* **See and manage them:** admin → Applications → "Application permissions" (grant counts; v1.2a: add, rename,
+  delete one at a time with a list of the users and groups that lose access; `app1` cannot be deleted) and
+  "Application permission records" (the SSO-side registry). v1.2a bulk grants: select users or groups, action
+  *Grant app access…* / *Revoke app access…*.
 * Tokens export only `application.*` permissions, never the full Django permission list. `perms` is always
   present (`[]` when the user has none).
 * Superusers administer `dcWebUsers`; they get **no automatic app access**. `perms` is computed from real
@@ -468,7 +477,7 @@ per-username throttle still applies) - rotate it with `create_service_client <id
 | Method and path | Auth | Notes |
 |---|---|---|
 | `POST /api/v1/auth/login` | — | `{username\|email, password, client: browser\|native}`. Throttled 10/min/IP and 5/min/username |
-| `POST /api/v1/auth/refresh` | refresh token (body or cookie plus allowed `Origin`) | Rotates. Rejects tokens that are blacklisted, revoked, or belong to inactive users |
+| `POST /api/v1/auth/refresh` | refresh token (body or cookie plus allowed `Origin`) | Rotates, keeps the session id `sid`. Rejects tokens that are blacklisted, revoked, of a revoked session, or of inactive users (403). Reusing a used token after `SSO_REFRESH_REUSE_GRACE_SECONDS` revokes the session |
 | `POST /api/v1/auth/logout` | same | 204. Blacklists the token and clears the cookie |
 | `POST /api/v1/auth/logout-all` | Bearer access | 204. Blacklists all refresh tokens and sets `UserTokenRevocation` |
 | `GET /api/v1/auth/me` | Bearer access | Fresh from the DB |

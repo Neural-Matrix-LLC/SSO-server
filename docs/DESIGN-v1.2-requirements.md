@@ -1,7 +1,8 @@
 # SSO-server design v1.2: company-wide auth server requirements
 
-Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). Documentation only, nothing here is implemented unless the
-traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
+Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). **v1.2a is implemented** on
+branch `feat/v1.2a` (see §10 for the as-built notes and the decisions taken during implementation); v1.2b and
+v1.4 are design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the as-built system and [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
 for the developer manual.
 
@@ -16,6 +17,7 @@ for the developer manual.
 7. [Online sign-up and password change (future)](#7-online-sign-up-and-password-change-future)
 8. [Phasing plan](#8-phasing-plan)
 9. [Decisions (2026-10-13)](#9-decisions-2026-10-13)
+10. [v1.2a as built](#10-v12a-as-built-implementation-notes-and-decisions)
 
 The service-side Python library is designed in [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md).
 
@@ -36,10 +38,10 @@ document), **future** (agreed later phase).
 | 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | new | §4, `SSO_IP_BINDING_MODE = NOIP / WARNING / ENFORCE` |
 | 2b-1 | SSO sends an Expire message to client and services | new (services, v1.4) | §6 webhooks; clients: rejection only (push in TODOS) |
 | 2b-2 | Requests with an expired token are rejected | implemented | `exp` checked with 30 s leeway (`sso/tokens.py`, verifier step 4); 401 `token_invalid` on the SSO |
-| 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Decision: **one token / one `aud` for all services** (kept). Missing: link between a ServiceClient and its app permission. §2, §3 |
-| 3a | Admin: create / delete / suspend users | gap | Django admin stock User admin at `SSO_ADMIN_PATH` covers create/delete and `is_active` (suspend). Gap: suspending does not revoke already issued tokens. Decision: suspend revokes immediately (v1.2a). §5 |
-| 3b | Admin: create / modify / delete a user's permissions | implemented | Stock User/Group admin "user permissions" / "group permissions"; `perms` built by `user_app_perms` (`application/permissions.py`). Gap: no bulk grant/revoke action, change does not reach existing access tokens until refresh (≤ 15 min) |
-| 3c | Admin: create / modify / delete a service's permissions | gap | Create: `manage.py create_app_permission <codename> "<desc>"` only; admin list is read-only (`application/admin.py`, `has_add/change/delete_permission = False`). §5 |
+| 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Decision: **one token / one `aud` for all services** (kept). v1.2a: `ServiceClient.app_codename` links a service to its permission (`register_service`). §2, §3 |
+| 3a | Admin: create / delete / suspend users | implemented (v1.2a) | Stock User admin plus *Suspend* / *Unsuspend* actions. Any `is_active` True→False through `save()` revokes all of the user's tokens at once (`sso/signals.py`, `sso/revocation.py`); signal-less writes are caught on use and by `revoke_inactive_users` (§10). §5 |
+| 3b | Admin: create / modify / delete a user's permissions | implemented | Stock User/Group admin "user permissions" / "group permissions"; v1.2a adds bulk *Grant / Revoke app access…* actions for users and groups. `perms` built by `user_app_perms` (`application/permissions.py`). A change does not reach existing access tokens until refresh (≤ 15 min); introspect sees it at once |
+| 3c | Admin: create / modify / delete a service's permissions | implemented (v1.2a) | Admin add / rename (through `ensure_permission`) / delete (confirmation lists affected users and groups; code-defined `app1` refused) in `application/admin.py`; `register_service` and `create_app_permission` commands. §5 |
 | 4 | Online sign-up and change password | future | Reserved, not routed (`api/v1/account/*` comment in `urls.py`). Password change through Django revokes tokens (`sso/signals.py`). Tracked in [TODOS.md](../TODOS.md). §7 |
 | 5 | API Reference Manual for client and service developers | implemented (doc) | [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md) |
 
@@ -127,6 +129,10 @@ classDiagram
 ```
 
 - `app_codename` ties a service to its permission so the admin can show "who can use this service".
+- **As built (v1.2a):** `app_codename` and `notify_url` are added as **nullable** columns (rollback-safe on the
+  shared MySQL: an older image's INSERTs still work). `notify_url` must be HTTPS and is stored only.
+  `notify_secret` is **not** added in v1.2a: it must be encrypted at rest and shown once, which needs a key
+  and rotation design that belongs with the webhooks (v1.4).
 - No per-service audience and no per-service IP-binding override: IP binding is one server-wide setting (§4).
 
 ### 3.3 Onboarding a new service
@@ -147,8 +153,10 @@ sequenceDiagram
   Svc->>Svc: per request: introspect(token, observed IP), require application.app2
 ```
 
-Proposed: one command `manage.py register_service <client_id> --name --app <codename> [--notify-url]` doing both
-steps (new).
+Implemented (v1.2a): `manage.py register_service <client_id> --name <name> --app <codename> [--app-name "<desc>"]
+[--notify-url https://…] [--origin …]` does both steps in one transaction and prints the secret once. An
+existing `client_id` is refused (rotate with `create_service_client <id> --rotate-secret`). An existing
+permission is reused and keeps its description unless `--app-name` is given.
 
 ## 4. Client-IP token binding
 
@@ -367,7 +375,7 @@ Taking the leftmost entry blindly, or trusting the header from any peer, lets an
 
 | Side | Setting today | Recommendation |
 |---|---|---|
-| SSO-server | DRF `NUM_PROXIES=1` (count of hops behind our nginx) | Move to `SSO_TRUSTED_PROXIES` (CIDR list) using the same algorithm as the library, so SSO and services cannot disagree. Keep `NUM_PROXIES` as a fallback with a deprecation warning. |
+| SSO-server | DRF `NUM_PROXIES=1` (count of hops behind our nginx) | **Decided (2026-10-13), v1.2b:** move to `SSO_TRUSTED_PROXIES` (CIDR list) using the same algorithm as the library, so SSO and services cannot disagree. `SSO_NUM_PROXIES` stays as a deprecated fallback (used only when `SSO_TRUSTED_PROXIES` is unset, with a deprecation warning). Not implemented in v1.2a. |
 | llm-wiki-svc | `TRUSTED_PROXY_IPS` | Replace its own code with `sso_client.get_client_ip` (v1.2b). |
 | Other services | — | `SSO_TRUSTED_PROXIES` via `sso_client`. |
 
@@ -525,8 +533,8 @@ change passwords in myFinance.
 | Phase | Content |
 |---|---|
 | current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
-| v1.2a | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
-| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES`, **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
+| v1.2a (**implemented**, §10) | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
+| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
 | v1.4 | Signed webhooks to registered services |
 | future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
 
@@ -547,3 +555,69 @@ Recorded from Thomas:
 9. myFinance is phasing out; the SSO-server is the new authentication server.
 10. Client IP is derived from the socket peer (`getpeername`); forwarded headers only from trusted proxies (§4.5).
 11. A Python library (`sso-client`) provides this and the SSO permission query for all services (v1.2b).
+
+Library and proxy decisions, reported as approved by Thomas (relayed 2026-10-13; they settle the open decisions
+of [SSO-CLIENT-LIBRARY-DESIGN.md §16](SSO-CLIENT-LIBRARY-DESIGN.md#16-open-decisions)):
+
+12. The library lives in **`clients/python/` of this repo** and services install it with **pip from git**
+    (tag `sso-client-vX.Y.Z`, `#subdirectory=clients/python`); no package index for now.
+13. Distribution name **`sso-client`** (import `sso_client`). `nm-sso-client` is recorded as the alternative if
+    the name ever clashes on a public index.
+14. **Fail closed**: when the SSO is unreachable (timeout, connect error, 5xx) the service answers **503**, never
+    accepts an unverified token. No stale-cache mode by default.
+15. Cache: only **active** results, **30 s** (never beyond `exp`); `active:false` is never cached.
+16. HTTP client: **httpx** (sync and async).
+17. The SSO-server moves from `SSO_NUM_PROXIES` to **`SSO_TRUSTED_PROXIES`** (CIDR list, §4.5.2 algorithm), with
+    `SSO_NUM_PROXIES` kept as a deprecated fallback. This is **v1.2b** work: documented here, not implemented.
+
+## 10. v1.2a as built (implementation notes and decisions)
+
+Branch `feat/v1.2a`. Where this section is more specific than §3–§5 it records how the design was implemented.
+
+**Suspend (decision 6).** `pre_save`/`post_save` receivers on `User` (`sso/signals.py`) detect an `is_active`
+change written by `save()` (admin form, admin action, shell, any code; `save(update_fields=[…])` only when
+`is_active` is among them). True→False: `UserTokenRevocation` marker + every outstanding refresh token
+blacklisted (`sso/revocation.py`), inside the save's transaction, plus an `sso.admin` log line
+`user.suspended`. False→True (unsuspend) **revokes again**, so tokens issued before the reactivation stay dead
+even if the suspension itself bypassed the signal; new logins work at once.
+`QuerySet.update(is_active=…)` and writes by other processes (myFinance) **cannot be caught** (Django sends no
+signals for them). Handled by defence in depth: (1) refresh, introspect and `/me` reject inactive users anyway;
+(2) the first refresh or introspect that sees a still-valid token of an inactive user revokes the user on the
+spot; (3) `manage.py revoke_inactive_users [--dry-run]` sweeps all inactive users that still hold live tokens
+(cron-able). Residual gap: suspended and reactivated with `update()` both times, with no token use in between,
+and no sweep → pre-suspension tokens survive. Refresh by a suspended user answers 403 `account_inactive` (as
+in §5), also when the suspension already blacklisted that refresh token. The `user.suspended` webhook is v1.4.
+
+**Sessions and reuse.** Login creates `sid` (`secrets.token_urlsafe(16)`), on both tokens; refresh copies it to
+the new pair. The `sid` is written into the refresh token **before** simplejwt stores it as an
+`OutstandingToken`, so a session's refresh tokens (its "family") are found by decoding the stored token strings
+of that user; no table links tokens to sessions. Revoking a session: a row in the new SSO-owned table
+`sso_revokedsession` (sid, user, revoked_at, reason) plus the family blacklisted; refresh, introspect and `/me`
+reject any token whose `sid` is there (DB lookup; the Redis set of §4.2 is deferred to v1.2b, where introspect
+load matters). Reuse = a validly signed, unexpired refresh token of ours that is already blacklisted.
+**Concurrency (decision taken):** a reuse less than `SSO_REFRESH_REUSE_GRACE_SECONDS` (default **10 s**, `0`
+disables the grace) after the token was first used is treated as two legitimate concurrent refreshes (two
+tabs, a retry after a lost response): the late request gets 401 and **no** tokens, but the session is kept.
+The same holds for requests that validated the token at the same time and lost the blacklist insert. Later
+reuse revokes the session (`reason=refresh_reuse`, `sso.auth` warning `session_revoked`). The losing tab is
+still logged out (accepted; cross-tab coordination is in TODOS). Tokens from before v1.2a have no `sid`: their
+reuse is only rejected, and refreshing one starts a new session. Replays of tokens blacklisted by logout or
+logout-all also revoke the (already ended) session; replays by a suspended user do not (already revoked).
+
+**Admin** (`sso/admin.py`, `application/admin.py`): User actions *Suspend*, *Unsuspend* (a user cannot suspend
+themself), *Grant / Revoke app access…* (intermediate page, only `application.*` permissions); the same grant /
+revoke actions on Groups. Application permissions: add and rename through `ensure_permission`
+(codename read-only after creation); delete one at a time (bulk delete action removed) with a confirmation page
+listing direct users, groups and the count of active users with access; `app1` (code-defined) cannot be
+deleted. ServiceClient: `app_codename` (validated against existing `application.*`, accepts `application.app2`
+or `app2`), `notify_url`, users-with-access count, link to the permission. Read-only `RevokedSession` admin.
+Every action writes a Django `LogEntry` and an `sso.admin` JSON line.
+
+**Migration** `sso/0002_v12a_service_registry_sessions`: additive only, SSO-owned tables only: two nullable
+columns on `sso_serviceclient`, new table `sso_revokedsession`. No shared table is touched; a previous image
+keeps working against the migrated schema (rollback-safe).
+
+**Open questions** (decided provisionally as above): grace default 10 s; should replaying a token that was
+ended by a plain logout revoke the session (today: yes, harmless); retention of `sso_revokedsession` rows (rows
+are only useful until the session's last refresh token expires, ≤ `SSO_REFRESH_TTL_DAYS`; no prune command yet);
+whether `revoke_inactive_users` should be scheduled in the deployment.
