@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+import secrets
 import time
 from functools import lru_cache
 from typing import Any
@@ -16,10 +17,17 @@ import jwt
 from django.conf import settings
 from django.contrib.auth.models import User
 from rest_framework_simplejwt.backends import TokenBackend
-from rest_framework_simplejwt.exceptions import TokenBackendError
+from rest_framework_simplejwt.exceptions import TokenBackendError, TokenError
+from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
+from rest_framework_simplejwt.utils import datetime_from_epoch
 
 from application.permissions import user_app_perms
+
+
+#: session id claim (design §4.2): one value per login, kept through every refresh
+SID_CLAIM = "sid"
 
 
 class KidTokenBackend(TokenBackend):
@@ -78,7 +86,42 @@ class SSOAccessToken(_SSOBackendMixin, AccessToken):
 
 class SSORefreshToken(_SSOBackendMixin, RefreshToken):
     access_token_class = SSOAccessToken
-    # Refresh tokens carry only the standard claims; profile claims go on the access token.
+    # Refresh tokens carry only the standard claims plus ``sid``; profile claims go on the access token.
+
+    @classmethod
+    def for_session(cls, user: User, sid: str) -> "SSORefreshToken":
+        """Like simplejwt's ``for_user`` (blacklist app: records an OutstandingToken) but with ``sid`` set
+        BEFORE the token string is stored, so a session's refresh tokens can be found by their claim."""
+        token = cls()
+        token[api_settings.USER_ID_CLAIM] = str(getattr(user, api_settings.USER_ID_FIELD))
+        token[SID_CLAIM] = sid
+        OutstandingToken.objects.create(
+            user=user, jti=token[api_settings.JTI_CLAIM], token=str(token), created_at=token.current_time,
+            expires_at=datetime_from_epoch(token["exp"]))
+        return token
+
+
+class _ReplayProbeRefreshToken(SSORefreshToken):
+    """Full validation (signature by kid, iss, aud, exp, type) EXCEPT the blacklist: used only to classify a
+    token that SSORefreshToken rejected, i.e. to recognise a replayed (already used) refresh token."""
+
+    def check_blacklist(self) -> None:
+        return None
+
+
+def replayed_refresh(raw: str) -> "SSORefreshToken | None":
+    """The token, if ``raw`` is a genuine, unexpired refresh token of ours that is blacklisted; else None."""
+    try:
+        token = _ReplayProbeRefreshToken(raw)
+    except TokenError:
+        return None
+    if not BlacklistedToken.objects.filter(token__jti=token[api_settings.JTI_CLAIM]).exists():
+        return None
+    return token
+
+
+def new_sid() -> str:
+    return secrets.token_urlsafe(16)
 
 
 def user_groups(user: User) -> list[str]:
@@ -116,10 +159,14 @@ def _wait_past_revocation(user: User) -> None:
         time.sleep(delay + 0.001)
 
 
-def issue_token_pair(user: User) -> tuple[SSORefreshToken, SSOAccessToken]:
-    """Create a refresh token (recorded as outstanding) and an access token with profile claims."""
+def issue_token_pair(user: User, sid: str | None = None) -> tuple[SSORefreshToken, SSOAccessToken]:
+    """Create a refresh token (recorded as outstanding) and an access token with profile claims.
+
+    ``sid``: the session id; a login passes None (new session), a refresh passes the old token's ``sid``.
+    Both tokens carry it (the access token inherits it from the refresh token).
+    """
     _wait_past_revocation(user)
-    refresh = SSORefreshToken.for_user(user)
+    refresh = SSORefreshToken.for_session(user, sid or new_sid())
     access = refresh.access_token
     access["username"] = user.get_username()
     access["email"] = user.email or ""

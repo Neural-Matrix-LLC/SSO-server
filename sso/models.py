@@ -6,6 +6,7 @@ import secrets
 
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.validators import URLValidator
 from django.db import models
 from django.utils import timezone
 
@@ -20,6 +21,14 @@ class ServiceClient(models.Model):
     allowed_origins = models.JSONField(default=list, blank=True, help_text="Informational in sprint 1; CORS uses SSO_CORS_ALLOWED_ORIGINS.")
     is_active = models.BooleanField(default=True)
     created = models.DateTimeField(auto_now_add=True)
+    # v1.2a (design §3.2). Nullable on purpose: a previous image (rollback) inserts rows without these columns,
+    # and Django 4.2 has no db_default, so NOT NULL columns would break its INSERTs on MySQL.
+    app_codename = models.CharField(
+        max_length=63, null=True, blank=True,
+        help_text="The application.<codename> permission a user needs to use this service, e.g. app2.")
+    notify_url = models.URLField(
+        max_length=500, null=True, blank=True, validators=[URLValidator(schemes=["https"])],
+        help_text="HTTPS webhook endpoint (v1.4; stored only, nothing is sent yet).")
 
     class Meta:
         ordering = ["client_id"]
@@ -76,3 +85,19 @@ class AuthorizationCode(models.Model):
 
     def __str__(self) -> str:
         return f"code for {self.client_id}/{self.user_id}"
+
+
+class RevokedSession(models.Model):
+    """A revoked login session (design §4.2 "Session"): every token carrying ``sid`` is dead.
+
+    Rows exist only for revoked sessions (refresh-token reuse; v1.2b adds IP-binding mismatches). Live
+    sessions need no row: their refresh tokens are found through ``OutstandingToken`` and the ``sid`` claim.
+    """
+
+    sid = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sso_revoked_sessions")
+    revoked_at = models.DateTimeField(default=timezone.now)
+    reason = models.CharField(max_length=32)
+
+    def __str__(self) -> str:
+        return f"session {self.sid} of {self.user_id} revoked ({self.reason})"

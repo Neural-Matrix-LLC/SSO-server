@@ -12,14 +12,15 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
-from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+from django.utils import timezone
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 
 from application.permissions import user_app_perms
 
 from .authentication import ServiceClientBasicAuthentication, ServicePrincipal, SSOAccessTokenAuthentication
 from .errors import AccountInactive, InvalidClient, InvalidCredentials, InvalidRequest, OriginNotAllowed, TokenInvalid
 from .logs import log_login, log_token_event
-from .models import UserTokenRevocation
+from .revocation import is_session_revoked, revoke_session, revoke_user_tokens
 from .serializers import (
     IntrospectSerializer,
     LoginSerializer,
@@ -29,12 +30,14 @@ from .serializers import (
 )
 from .throttles import LoginIPThrottle, LoginUserThrottle, RefreshThrottle
 from .tokens import (
+    SID_CLAIM,
     SSOAccessToken,
     SSORefreshToken,
     access_ttl_seconds,
     is_revoked,
     issue_token_pair,
     refresh_ttl_seconds,
+    replayed_refresh,
     user_groups,
 )
 
@@ -64,8 +67,8 @@ def clear_refresh_cookie(response: Response) -> None:
     )
 
 
-def token_response(user: User, *, browser: bool) -> Response:
-    refresh, access = issue_token_pair(user)
+def token_response(user: User, *, browser: bool, sid: str | None = None) -> Response:
+    refresh, access = issue_token_pair(user, sid=sid)
     body = {
         "access_token": str(access),
         "token_type": "Bearer",
@@ -104,18 +107,61 @@ def read_refresh_input(request) -> tuple[str | None, bool]:
     return request.COOKIES.get(settings.SSO_COOKIE_NAME) or None, True
 
 
-def load_refresh(raw: str) -> tuple[SSORefreshToken, User]:
-    """Validate a refresh token: signature (by kid), iss, aud, exp, type, blacklist, user, revocation."""
+def load_refresh(raw: str, *, require_active: bool = False) -> tuple[SSORefreshToken, User]:
+    """Validate a refresh token: signature (by kid), iss, aud, exp, type, blacklist, user, revocation.
+
+    ``require_active``: a suspended user gets 403 ``account_inactive`` (design §5) even though suspending
+    also revoked the token; checked before the revocation so the client sees why.
+    """
     try:
         token = SSORefreshToken(raw)
     except TokenError:
+        if require_active:  # suspending blacklisted it: still say why
+            used = replayed_refresh(raw)
+            if used is not None and User.objects.filter(pk=used.get("sub"), is_active=False).exists():
+                raise AccountInactive() from None
         raise TokenInvalid() from None
     user = User.objects.select_related("sso_token_revocation").filter(pk=token.get("sub")).first()
     if user is None:
         raise TokenInvalid()
-    if is_revoked(user, token.get("iat")):
+    if require_active and not user.is_active:
+        revoke_if_inactive(user, token.get("iat"))
+        raise AccountInactive()
+    if is_revoked(user, token.get("iat")) or is_session_revoked(token.get(SID_CLAIM)):
         raise TokenInvalid()
     return token, user
+
+
+def handle_refresh_reuse(request, raw: str) -> None:
+    """A refresh token was rejected. If it is one of ours that was already used (blacklisted), this is a
+    replay: revoke its whole session (design v1.2a "refresh-reuse family revocation").
+
+    Grace: a reuse within ``SSO_REFRESH_REUSE_GRACE_SECONDS`` of the token being blacklisted is treated as
+    two legitimate concurrent refreshes (two tabs, a client retry after a lost response). The late request
+    still gets 401 and no tokens, but the session survives. Tokens without ``sid`` (issued before v1.2a) have
+    no session to revoke.
+    """
+    token = replayed_refresh(raw)
+    if token is None:
+        return
+    user = User.objects.filter(pk=token.get("sub")).first()
+    sid = token.get(SID_CLAIM)
+    if user is None or not sid or not user.is_active:  # inactive: suspension blacklisted it, all revoked
+        return
+    used = BlacklistedToken.objects.filter(token__jti=token["jti"]).values_list("blacklisted_at", flat=True).first()
+    if used is not None and (timezone.now() - used).total_seconds() < settings.SSO_REFRESH_REUSE_GRACE_SECONDS:
+        log_token_event(request, "refresh", "reuse_within_grace", user_id=user.pk)
+        return
+    log_token_event(request, "refresh", "reuse_detected", user_id=user.pk)
+    revoke_session(user, sid, "refresh_reuse")
+
+
+def revoke_if_inactive(user: User, iat) -> None:
+    """Defence in depth for suspensions that bypassed the model signal (``QuerySet.update()``, myFinance
+    writing auth_user): a still-valid token of an inactive user revokes all of the user's tokens, so they
+    stay dead after a later reactivation."""
+    if user is not None and not user.is_active and not is_revoked(user, iat):
+        revoke_user_tokens(user)
 
 
 # --------------------------------------------------------------------------- auth endpoints
@@ -158,16 +204,24 @@ class RefreshView(_ServiceClientChallenge, APIView):
         raw, cookie_mode = read_refresh_input(request)
         if not raw:
             raise TokenInvalid("No refresh token supplied.")
-        with transaction.atomic():
-            token, user = load_refresh(raw)
-            if not user.is_active:
-                log_token_event(request, "refresh", "account_inactive", user_id=user.pk)
-                raise AccountInactive()
-            _, created = token.blacklist()
-            if not created:  # lost a race with a concurrent refresh of the same token
-                raise TokenInvalid()
+        try:
+            token, user = load_refresh(raw, require_active=True)
+        except AccountInactive:
+            log_token_event(request, "refresh", "account_inactive")
+            raise
+        except TokenInvalid:
+            handle_refresh_reuse(request, raw)
+            raise
+        try:
+            with transaction.atomic():
+                _, created = token.blacklist()
+                if not created:  # lost a race with a concurrent refresh of the same token: no revocation
+                    raise TokenInvalid()
+        except TokenInvalid:
+            handle_refresh_reuse(request, raw)
+            raise
         log_token_event(request, "refresh", "success", user_id=user.pk)
-        return token_response(user, browser=cookie_mode)
+        return token_response(user, browser=cookie_mode, sid=token.get(SID_CLAIM))
 
 
 class LogoutView(_ServiceClientChallenge, APIView):
@@ -205,12 +259,7 @@ class LogoutAllView(APIView):
 
     def post(self, request):
         user = request.user
-        with transaction.atomic():
-            outstanding = OutstandingToken.objects.filter(user=user).exclude(blacklistedtoken__isnull=False)
-            BlacklistedToken.objects.bulk_create(
-                [BlacklistedToken(token=t) for t in outstanding], ignore_conflicts=True
-            )
-            UserTokenRevocation.revoke(user)
+        revoke_user_tokens(user)
         log_token_event(request, "logout_all", "success", user_id=user.pk)
         response = Response(status=status.HTTP_204_NO_CONTENT)
         clear_refresh_cookie(response)
@@ -242,7 +291,10 @@ class IntrospectView(APIView):
         except TokenError:
             return inactive
         user = User.objects.select_related("sso_token_revocation").filter(pk=token.get("sub")).first()
-        if user is None or not user.is_active or is_revoked(user, token.get("iat")):
+        if user is not None and not user.is_active:
+            revoke_if_inactive(user, token.get("iat"))
+            return inactive
+        if user is None or is_revoked(user, token.get("iat")) or is_session_revoked(token.get(SID_CLAIM)):
             return inactive
         return Response(
             {

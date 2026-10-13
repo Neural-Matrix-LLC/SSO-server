@@ -11,7 +11,8 @@ from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from .errors import InvalidClient
 from .models import ServiceClient
-from .tokens import is_revoked
+from .revocation import is_session_revoked
+from .tokens import SID_CLAIM, is_revoked
 
 
 class SSOAccessTokenAuthentication(JWTAuthentication):
@@ -26,7 +27,7 @@ class SSOAccessTokenAuthentication(JWTAuthentication):
         if result is None:
             return None
         user, token = result
-        if is_revoked(user, token.get("iat")):
+        if is_revoked(user, token.get("iat")) or is_session_revoked(token.get(SID_CLAIM)):
             raise exceptions.AuthenticationFailed("Token has been revoked.", code="token_revoked")
         return user, token
 

@@ -231,6 +231,12 @@ REST_FRAMEWORK = {
 
 SSO_ACCESS_TTL = timedelta(minutes=env.int("SSO_ACCESS_TTL_MIN", default=15))
 SSO_REFRESH_TTL = timedelta(days=env.int("SSO_REFRESH_TTL_DAYS", default=7))
+# Refresh-token reuse (v1.2a): presenting an already-used refresh token revokes its whole session (sid),
+# unless it was used less than this many seconds ago (two legitimate concurrent refreshes, a retry after a
+# lost response). The late request gets 401 either way; only the session revocation is skipped.
+SSO_REFRESH_REUSE_GRACE_SECONDS = env.int("SSO_REFRESH_REUSE_GRACE_SECONDS", default=10)
+if SSO_REFRESH_REUSE_GRACE_SECONDS < 0:
+    raise ImproperlyConfigured("SSO_REFRESH_REUSE_GRACE_SECONDS must be >= 0")
 SSO_CODE_TTL = timedelta(seconds=env.int("SSO_CODE_TTL_SEC", default=60))  # phase 5 (unused)
 
 SIMPLE_JWT = {
