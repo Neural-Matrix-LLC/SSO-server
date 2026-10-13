@@ -121,3 +121,33 @@ def user_app_perms(user) -> list[str]:
     if not (user.is_superuser and getattr(settings, "SSO_SUPERUSER_ALL_APPS", False)):
         perms = perms.filter(Q(user=user) | Q(group__user=user))
     return sorted({PREFIX + c for c in perms.values_list("codename", flat=True)})
+
+
+def app_permissions():
+    """Every ``application.*`` permission (on the anchor content type), ordered by codename."""
+    return Permission.objects.filter(content_type__app_label="application",
+                                     content_type__model="applicationaccess").order_by("codename")
+
+
+def code_defined_codenames() -> set[str]:
+    """Permissions defined in code (``ApplicationAccess.Meta.permissions``): recreated after migrate, so the
+    admin refuses to delete them."""
+    return {code for code, _ in ApplicationAccess._meta.permissions}
+
+
+def users_with_access(perm: Permission):
+    """Active users holding ``perm`` directly or through a group (what ``perms`` reports; superusers only by
+    grant, see ``user_app_perms``)."""
+    from django.contrib.auth.models import User
+
+    return User.objects.filter(is_active=True).filter(
+        Q(user_permissions=perm) | Q(groups__permissions=perm)).distinct()
+
+
+def delete_permission(perm: Permission) -> None:
+    """Delete an ``application.*`` permission, its grants (auth M2M rows, by CASCADE) and its registry record."""
+    if perm.codename in code_defined_codenames():
+        raise ValueError(f"{PREFIX}{perm.codename} is defined in code and recreated after every migrate")
+    with transaction.atomic():
+        ApplicationPermissionRecord.objects.filter(codename=perm.codename).delete()
+        perm.delete()

@@ -2,6 +2,9 @@
 
     python manage.py create_service_client rebalance-api --name "Rebalance API"
     python manage.py create_service_client rebalance-api --rotate-secret
+    python manage.py create_service_client reporting --app app2     # link to application.app2 (must exist)
+
+Prefer ``register_service`` for a new service (creates the permission too).
 
 The plaintext secret is printed once to stdout; only its hash is stored.
 """
@@ -18,8 +21,15 @@ class Command(BaseCommand):
         parser.add_argument("--name", default="")
         parser.add_argument("--rotate-secret", action="store_true")
         parser.add_argument("--origin", action="append", default=[], dest="origins")
+        parser.add_argument("--app", default="", help="link to an EXISTING application.<codename> permission")
 
-    def handle(self, client_id, name, rotate_secret, origins, **options):
+    def handle(self, client_id, name, rotate_secret, origins, app="", **options):
+        app = (app or "").removeprefix("application.")
+        if app:
+            from application.permissions import app_permissions
+
+            if not app_permissions().filter(codename=app).exists():
+                raise CommandError(f"application.{app} does not exist; use register_service or create_app_permission.")
         client = ServiceClient.objects.filter(client_id=client_id).first()
         if client and not rotate_secret:
             raise CommandError(f"ServiceClient {client_id!r} exists; use --rotate-secret to issue a new secret.")
@@ -27,6 +37,8 @@ class Command(BaseCommand):
             if rotate_secret:
                 raise CommandError(f"ServiceClient {client_id!r} does not exist.")
             client = ServiceClient(client_id=client_id, name=name or client_id, allowed_origins=origins)
+        if app:
+            client.app_codename = app
         secret = ServiceClient.generate_secret()
         client.set_secret(secret)
         client.full_clean()

@@ -323,6 +323,6 @@ def test_admin_lists_only_application_permissions(make_user, client):
     assert r.status_code == 200
     html = r.content.decode()
     assert "app1" in html and "app2" in html and "change_user" not in html
-    assert client.get(base + "application/applicationpermission/add/").status_code == 403
+    assert client.get(base + "application/applicationpermission/add/").status_code == 200  # v1.2a: add in admin
     r = client.get(base + "application/applicationpermissionrecord/")
     assert r.status_code == 200 and "app2" in r.content.decode()

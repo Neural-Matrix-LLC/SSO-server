@@ -1,0 +1,14 @@
+{% extends "admin/delete_confirmation.html" %}
+{% block content %}
+<div class="module">
+  <h2>Access that will be lost</h2>
+  <p>Deleting <strong>application.{{ object.codename }}</strong> removes it from every user and group below.
+     {{ affected_via_groups }} active user(s) currently have access (directly or through a group).
+     Services requiring this permission will answer 403 for all of them.</p>
+  <h3>Users with a direct grant ({{ affected_users|length }})</h3>
+  <ul>{% for u in affected_users %}<li>{{ u }}</li>{% empty %}<li>none</li>{% endfor %}</ul>
+  <h3>Groups with the permission ({{ affected_groups|length }})</h3>
+  <ul>{% for g in affected_groups %}<li>{{ g }}</li>{% empty %}<li>none</li>{% endfor %}</ul>
+</div>
+{{ block.super }}
+{% endblock %}
