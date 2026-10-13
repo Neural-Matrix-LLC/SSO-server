@@ -3,7 +3,7 @@
 For developers of **clients** (browser SPAs, native apps, scripts, MCP clients, server-side "BFF" apps) and
 **services** (back-ends that accept SSO tokens). As-built reference: branch `feat/app-permissions`; every
 implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `application/*.py` and matches
-[ARCHITECTURE.md](ARCHITECTURE.md) §8–9. Items marked **Planned v1.2** are designs from
+[ARCHITECTURE.md](ARCHITECTURE.md) §8–9. Items marked **Planned v1.2a/b** or **v1.4** are designs from
 [DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md) and do **not** exist yet.
 
 ## Contents
@@ -233,8 +233,8 @@ python manage.py create_service_client reporting --name "Reporting"       # prin
 
 Then grant `application.app2` to users or groups in the admin. Codenames match `^[a-z][a-z0-9_]{1,62}$`.
 You receive: issuer, JWKS URL (`<issuer>/.well-known/jwks.json`), audience (`myfin-services` unless configured
-otherwise), `client_id` / `client_secret`, and your permission name. **Planned v1.2**: one `register_service`
-command and a per-service audience.
+otherwise; one token is valid for all services), `client_id` / `client_secret`, and your permission name.
+**Planned v1.2a**: one `register_service` command.
 
 ### 3.2 Verify tokens locally (JWKS)
 
@@ -328,6 +328,8 @@ curl -sS https://sso.example.com/api/v1/auth/introspect -u 'reporting:<client_se
 - `perms`, `groups`, `email`, `is_staff` are **current** database values; `client_id` is **your** client id.
 - 401 `invalid_client` = your credentials are wrong or the client is inactive.
 - Responses are `Cache-Control: no-store`; you may cache an `active:true` answer briefly (e.g. ≤ 30 s) yourself.
+- **Planned v1.2b**: send the client IP you observe as `"ip"`; introspect becomes the authority for permissions
+  and IP binding (`ip_match`), see §7. Always forward the original client IP, never your own.
 
 ```python
 def introspect(token: str) -> dict:
@@ -430,7 +432,8 @@ realm="sso-introspect"`).
 | `username`, `email`, `is_staff` | yes | no |
 | `groups` | sorted group names | no |
 | `perms` | sorted `application.*` (explicit user + group grants; superusers only if `SSO_SUPERUSER_ALL_APPS=true`) | no |
-| `cip` | **Planned v1.2** | **Planned v1.2** |
+| `cip` | **Planned v1.2b** (HMAC of client IP; opaque to services) | **Planned v1.2b** |
+| `sid` | **Planned v1.2a** (session id) | **Planned v1.2a** |
 
 Claims are a snapshot at issue time; changes reach new tokens at the next refresh.
 
@@ -455,14 +458,16 @@ Claims are a snapshot at issue time; changes reach new tokens at the next refres
 
 ## 7. Planned v1.2 features
 
-None of the following exists yet; do not code against it until it is released. Design and open decisions:
-[DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md).
+None of the following exists yet; do not code against it until it is released. Agreed design (decisions of
+2026-10-13): [DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md). Later ideas: [TODOS.md](../TODOS.md).
 
 | Feature | Sketch |
 |---|---|
-| **Planned v1.2** Client-IP binding | `cip` claim from the trusted client IP; services compare with the observed IP; introspect accepts `"ip"`; `SSO_BIND_CLIENT_IP=off\|warn\|enforce` |
-| **Planned v1.2** Per-service audience | `aud` per registered service; `audience` field on login/refresh |
-| **Planned v1.2** `register_service` command and admin actions | suspend with immediate revocation, grant/revoke app access |
-| **Planned (later)** DPoP sender-constrained tokens | `Authorization: DPoP` + `DPoP` proof header, `cnf.jkt` claim (RFC 9449) |
-| **Planned (later)** Event notifications | SSE/WebSocket for clients, webhooks for services: `token.expiring`, `token.revoked`, `user.suspended`, `permission.changed`, `keys.rotated`. Services must still enforce `exp` themselves |
-| **Planned phase 5** Account API | `api/v1/account/*`: sign-up, activation, password change/reset |
+| **Planned v1.2a** Suspend revokes immediately | setting `is_active=false` revokes all of the user's tokens (revocation marker + refresh blacklist); introspect returns `active:false` at once |
+| **Planned v1.2a** `register_service` command and admin actions | service permission CRUD, grant/revoke app access, ServiceClient `app_codename` |
+| **Planned v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
+| **Planned v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
+| **Planned v1.4** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
+
+Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
+change/reset are future items in TODOS.md.

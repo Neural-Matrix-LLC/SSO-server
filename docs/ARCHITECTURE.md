@@ -1,6 +1,6 @@
 # SSO server: technical design and architecture
 
-> **See also:** [v1.2 requirements design](DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](API-REFERENCE-MANUAL.md).
+> **See also:** [v1.2 requirements design](DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](API-REFERENCE-MANUAL.md). Future items: [TODOS.md](../TODOS.md).
 
 | | |
 |---|---|

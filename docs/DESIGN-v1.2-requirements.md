@@ -1,6 +1,6 @@
 # SSO-server design v1.2: company-wide auth server requirements
 
-Status: **proposal for review** by Thomas (owner). Documentation only, nothing here is implemented unless the
+Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). Documentation only, nothing here is implemented unless the
 traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the as-built system and [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
 for the developer manual.
@@ -12,10 +12,12 @@ for the developer manual.
 3. [Service registry](#3-service-registry)
 4. [Client-IP token binding](#4-client-ip-token-binding)
 5. [Admin page](#5-admin-page)
-6. [Event notifications (future phase)](#6-event-notifications-future-phase)
-7. [Online sign-up and password change (phase 5)](#7-online-sign-up-and-password-change-phase-5)
+6. [Event notifications: signed webhooks](#6-event-notifications-signed-webhooks)
+7. [Online sign-up and password change (future)](#7-online-sign-up-and-password-change-future)
 8. [Phasing plan](#8-phasing-plan)
-9. [Decisions needed from Thomas](#9-decisions-needed-from-thomas)
+9. [Decisions (2026-10-13)](#9-decisions-2026-10-13)
+
+Future-phase and not-planned items are tracked in [../TODOS.md](../TODOS.md).
 
 ## 1. Requirements traceability
 
@@ -25,18 +27,18 @@ document), **future** (agreed later phase).
 | # | Requirement | Status | Evidence in the repo / design section |
 |---|---|---|---|
 | 1a | REST API | implemented | JSON-only DRF views, `ssoproject/urls.py`, `sso/views.py`; reference in ARCHITECTURE §8 |
-| 1b | WebSocket/SSE so the SSO can tell clients a token expired | future | §6 of this doc. Nothing in code |
+| 1b | SSO informs about token expiry/revocation | new (services) / future (clients) | §6: signed webhooks to registered services (v1.4). Client push (SSE/WebSocket) moved to [TODOS.md](../TODOS.md); clients learn of expiry by rejection |
 | 2a-1 | Client logs in to the SSO and gets a token | implemented | `LoginView` (`sso/views.py`), `issue_token_pair` (`sso/tokens.py`) |
-| 2a-2 | SSO embeds the client IP into the verification | new | §4 (`cip` claim). Today the IP is only used for throttling/logging (`sso/delegation.py`, `sso/throttles.py`) |
-| 2a-3 | Service verifies the token with the SSO | implemented | Local JWKS check (`/.well-known/jwks.json`, `examples/verifier/sso_verifier.py`) and `/api/v1/auth/introspect` (`IntrospectView`) |
-| 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | new | §4. Includes pitfalls and a stronger alternative (DPoP) |
-| 2b-1 | SSO sends an Expire message to client and services | future | §6 |
+| 2a-2 | SSO embeds the client IP into the verification | new | §4 (`cip` = HMAC of the exact IP). Today the IP is only used for throttling/logging (`sso/delegation.py`, `sso/throttles.py`) |
+| 2a-3 | Service verifies the token and gets the permission list from the SSO | gap | `/api/v1/auth/introspect` exists (`IntrospectView`); v1.2b adds the observed `ip`, `ip_match` and session revocation (§4.4). Local JWKS check stays optional for signature/`exp` |
+| 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | new | §4, `SSO_IP_BINDING_MODE = NOIP / WARNING / ENFORCE` |
+| 2b-1 | SSO sends an Expire message to client and services | new (services, v1.4) | §6 webhooks; clients: rejection only (push in TODOS) |
 | 2b-2 | Requests with an expired token are rejected | implemented | `exp` checked with 30 s leeway (`sso/tokens.py`, verifier step 4); 401 `token_invalid` on the SSO |
-| 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Missing: a single `aud` for all services (`SSO_AUDIENCE`), no link between a ServiceClient and its app permission. §2, §3 |
-| 3a | Admin: create / delete / suspend users | gap | Django admin stock User admin at `SSO_ADMIN_PATH` covers create/delete and `is_active` (suspend). Gap: suspending does not revoke already issued tokens (refresh/introspect check `is_active`, local JWKS verifiers do not). §5 |
+| 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Decision: **one token / one `aud` for all services** (kept). Missing: link between a ServiceClient and its app permission. §2, §3 |
+| 3a | Admin: create / delete / suspend users | gap | Django admin stock User admin at `SSO_ADMIN_PATH` covers create/delete and `is_active` (suspend). Gap: suspending does not revoke already issued tokens. Decision: suspend revokes immediately (v1.2a). §5 |
 | 3b | Admin: create / modify / delete a user's permissions | implemented | Stock User/Group admin "user permissions" / "group permissions"; `perms` built by `user_app_perms` (`application/permissions.py`). Gap: no bulk grant/revoke action, change does not reach existing access tokens until refresh (≤ 15 min) |
 | 3c | Admin: create / modify / delete a service's permissions | gap | Create: `manage.py create_app_permission <codename> "<desc>"` only; admin list is read-only (`application/admin.py`, `has_add/change/delete_permission = False`). §5 |
-| 4 | Online sign-up and change password | future (phase 5) | Reserved, not routed (`api/v1/account/*` comment in `urls.py`). Password change through Django revokes tokens (`sso/signals.py`); changes made by myFinance do not. §7 |
+| 4 | Online sign-up and change password | future | Reserved, not routed (`api/v1/account/*` comment in `urls.py`). Password change through Django revokes tokens (`sso/signals.py`). Tracked in [TODOS.md](../TODOS.md). §7 |
 | 5 | API Reference Manual for client and service developers | implemented (doc) | [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md) |
 
 ## 2. Target architecture: many registered services
@@ -53,49 +55,52 @@ flowchart LR
     S2["reporting (app2, API)"]
     S3["trading-api (app3, API)"]
   end
-  subgraph SSO["SSO-server"]
+  subgraph SSO["SSO-server (company authentication server)"]
     NG["nginx"]
-    DJ["Django: auth API, introspect, JWKS, admin"]
-    EV["Event hub (future: SSE / WebSocket / webhooks)"]
+    DJ["Django: auth API, introspect/permission query, JWKS, admin"]
+    WH["Webhook dispatcher (v1.4)"]
     RD[("Redis")]
   end
-  DB[("MySQL dcWebUsers (shared with myFinance)")]
+  DB[("MySQL dcWebUsers")]
   ADM["Admin (staff)"]
   SPA -- "login / refresh (cookie)" --> NG
   NAT -- "login / refresh (native)" --> NG
   BRW -- "session cookie" --> S1
   S1 -- "login on behalf, Basic + client_ip" --> NG
-  SPA -- "Bearer" --> S2
+  SPA -- "Bearer (one token for all services)" --> S2
   NAT -- "Bearer" --> S3
-  S2 & S3 -- "JWKS (cached) / introspect (Basic)" --> NG
+  S1 & S2 & S3 -- "introspect: token + observed IP (Basic)" --> NG
   NG --> DJ
   DJ --> RD
   DJ --> DB
   ADM -- "admin UI" --> NG
-  DJ -.-> EV
-  EV -. "token.revoked, user.suspended ..." .-> S1 & S2 & S3
-  EV -. "token.expiring" .-> SPA
+  DJ -.-> WH
+  WH -. "signed webhooks: token.revoked, user.suspended ..." .-> S1 & S2 & S3
 ```
 
 Principles:
 
+- The SSO-server is **the** company authentication server: it owns users, passwords and permissions for every
+  application. myFinance is being phased out; `dcWebUsers` is shared with it only during the transition.
 - One issuer (`SSO_ISSUER`), one key set (JWKS), one user table, many services.
-- Each service is a **registered ServiceClient** with its own app permission `application.<app>` and (proposed) its
-  own audience.
-- Services authorise with `perms` locally; sensitive operations use `introspect` for revocation-aware answers.
+- **One token for all services**: a client gets one access token with the single audience `SSO_AUDIENCE`; it is
+  valid at every registered service.
+- Each service is a **registered ServiceClient** with its own app permission `application.<app>`. Services
+  authorise by **asking the SSO** (introspect / permission query, §4.4) with the token and the client IP they
+  observe; the SSO returns `active`, the user, the current permission list and `ip_match`.
 
 ## 3. Service registry
 
 ### 3.1 Today
 
-- `ServiceClient` (`sso/models.py`): `client_id`, `name`, hashed secret, `redirect_uris` (phase 5),
+- `ServiceClient` (`sso/models.py`): `client_id`, `name`, hashed secret, `redirect_uris` (future),
   `allowed_origins` (informational), `is_active`. Created by `manage.py create_service_client <id> --name ...` or
   the admin (secret shown once).
 - App permissions are separate: `manage.py create_app_permission app2 "Can use app2 (reporting)"`.
-- All tokens carry the same `aud` (`SSO_AUDIENCE`, default `myfin-services`), so a token for app1 is accepted by
-  app2's verifier as far as `aud` goes; only the `perms` check separates apps.
+- All tokens carry the same `aud` (`SSO_AUDIENCE`, default `myfin-services`). **This stays** (decision 5); the
+  permission check (`application.<app>` in the SSO's answer) separates apps.
 
-### 3.2 Proposed model changes (new)
+### 3.2 Model changes (new, v1.2a)
 
 ```mermaid
 classDiagram
@@ -105,12 +110,10 @@ classDiagram
     client_secret_hash
     is_active
     app_codename: slug  (NEW, -> application.<codename>)
-    audiences: JSON list (NEW, default [client_id])
-    notify_url: URL (NEW, webhook, future)
-    notify_secret_hash (NEW, future, HMAC)
-    bind_client_ip: off|warn|enforce|inherit (NEW, §4)
+    notify_url: URL (NEW, webhook, v1.4)
+    notify_secret (NEW, v1.4, HMAC key, encrypted at rest)
     allowed_origins: JSON list
-    redirect_uris: JSON list (phase 5)
+    redirect_uris: JSON list (future)
   }
   class Permission {
     content_type = application.applicationaccess
@@ -122,10 +125,7 @@ classDiagram
 ```
 
 - `app_codename` ties a service to its permission so the admin can show "who can use this service".
-- `audiences` enables a per-service `aud`. Login would need to know the target audience: request field
-  `audience` (or `client_id`) on `/login` and `/refresh`, validated against registered services. Keep
-  `SSO_AUDIENCE` as the default/legacy audience so llm-wiki-svc keeps working (`aud` may be a list in JWT).
-- Introspect could additionally answer `"aud_ok": true|false` for the calling client.
+- No per-service audience and no per-service IP-binding override: IP binding is one server-wide setting (§4).
 
 ### 3.3 Onboarding a new service
 
@@ -138,14 +138,14 @@ sequenceDiagram
   participant Svc as New service
   Admin->>CLI: create_app_permission app2 "Can use app2 (reporting)"
   CLI->>DB: auth_permission application.app2 + sso_application_permission_record
-  Admin->>CLI: create_service_client reporting --name Reporting (planned: --app app2 --audience reporting)
+  Admin->>CLI: create_service_client reporting --name Reporting (planned: --app app2)
   CLI-->>Admin: client_secret (shown once)
-  Admin->>Svc: configure SSO_ISSUER, JWKS URL, audience, client_id/secret, required perm application.app2
+  Admin->>Svc: configure SSO_ISSUER, introspect URL, client_id/secret, required perm application.app2
   Admin->>CLI: grant application.app2 to users or groups (admin)
-  Svc->>Svc: verify tokens via JWKS, require application.app2
+  Svc->>Svc: per request: introspect(token, observed IP), require application.app2
 ```
 
-Proposed: one command `manage.py register_service <client_id> --name --app <codename> [--audience]` doing both
+Proposed: one command `manage.py register_service <client_id> --name --app <codename> [--notify-url]` doing both
 steps (new).
 
 ## 4. Client-IP token binding
@@ -155,50 +155,79 @@ steps (new).
 Thomas: "use IP + token to avoid multiple clients accessing the system using the same token issued to one client
 instance". Threat: a copied access/refresh token is replayed from another machine.
 
-### 4.2 Proposed design (new)
+### 4.2 Design (new, v1.2b)
 
 1. **Trusted IP at login.** The SSO already computes a trusted client IP: DRF `NUM_PROXIES = SSO_NUM_PROXIES`
    over `X-Forwarded-For` (nginx overwrites it), or the `client_ip` body field when an authenticated ServiceClient
-   logs in on behalf of a browser (`sso/delegation.py`). This same value is bound.
-2. **Claim `cip`.** Added to both access and refresh tokens. Options: plain IP (`"cip": "203.0.113.7"`) or a
-   keyed hash `cip_h = base64url(HMAC-SHA256(k, ip))[:22]` to avoid putting IPs (personal data) into tokens that
-   are logged by services. Plain IP is simpler for local verification; the hash requires services to know `k` or
-   use introspect. **Recommendation: plain IP, with an optional prefix mode** (`/32` IPv4, `/64` IPv6) carried as
-   `cip` = `"2001:db8:1:2::/64"`.
-3. **Service check.** A service compares `cip` with the IP it observes (its own trusted-proxy logic). Locally after
-   JWKS verification, or by calling introspect with `{"token": "...", "ip": "<observed ip>"}`; introspect answers
-   `active:false` (plus `"reason": "ip_mismatch"` only in warn/log, never to the end user) on mismatch.
-4. **Refresh.** `/refresh` compares the refresh token's `cip` with the caller's trusted IP. Policy options:
-   `strict` (mismatch → 401 `token_invalid`, user logs in again) or `rebind` (accept, issue new pair bound to new
-   IP, log `ip_changed`). Recommendation: `rebind` for browsers/mobile, `strict` for machine clients.
-5. **Configuration.** `SSO_BIND_CLIENT_IP = off | warn | enforce` (default `off`), `SSO_BIND_PREFIX_V4 = 32`,
-   `SSO_BIND_PREFIX_V6 = 64`, `SSO_REFRESH_IP_POLICY = rebind | strict`; per-service override
-   `ServiceClient.bind_client_ip` (§3.2). `warn` issues `cip` and logs mismatches without rejecting, for a
-   measurement period before `enforce`.
+   logs in on behalf of a browser (`sso/delegation.py`). This value is bound. **Exact IP only**, no prefixes
+   (IPv6 is normalised to its canonical compressed form, IPv4-mapped IPv6 to IPv4).
+2. **Claim `cip`.** Added to access and refresh tokens:
+   `cip = base64url_nopad(HMAC-SHA256(SSO_IP_BINDING_KEY, canonical_ip))`. `SSO_IP_BINDING_KEY` is a server
+   secret (default: derived from `DJANGO_SECRET_KEY` with a fixed label). **Why HMAC and not a bare SHA-256:**
+   the IPv4 space has only 2^32 addresses; anyone holding a token could hash all of them in minutes and recover
+   the IP. A keyed HMAC cannot be reversed or recomputed without the server secret, so the token does not leak the
+   client's IP, and services cannot check `cip` locally — they ask the SSO (§4.4).
+3. **Service check.** The service sends the token and the IP it observes (its own trusted-proxy logic) to the
+   introspect / permission query; the SSO recomputes the HMAC and compares in constant time.
+4. **Refresh.** `/refresh` compares the refresh token's `cip` with the caller's trusted IP (or delegated
+   `client_ip`). There is **no rebind**: in `ENFORCE` mode a mismatch ends the session.
+5. **Configuration.** One server setting `SSO_IP_BINDING_MODE`:
+
+| Mode | `cip` issued | On mismatch (introspect or refresh) |
+|---|---|---|
+| `NOIP` (default) | no | no check |
+| `WARNING` | yes | allowed; `ip_match:false` returned, `sso.auth` log + audit line `ip_mismatch` |
+| `ENFORCE` | yes | introspect answers `active:false`; refresh 401 `token_invalid`; **the session is revoked** (refresh-token family blacklisted); client must log in again to get a token for its new IP |
+
+Tokens issued under `NOIP` carry no `cip`; after switching to `WARNING`/`ENFORCE` they are treated as unbound
+until they expire (≤ 15 min access, refresh re-issues with `cip`). Removed from the earlier proposal:
+`SSO_BIND_CLIENT_IP`, `SSO_BIND_PREFIX_V4/V6`, `SSO_REFRESH_IP_POLICY`, `ServiceClient.bind_client_ip`.
+
+"Session" = the refresh-token family started by one login. Implementation: refresh tokens carry a `sid`
+(family id) claim; revoking a session blacklists all outstanding refresh tokens with that `sid` and records the
+`sid` in a revoked-session set (Redis + DB) that introspect checks, so access tokens of that session fail at once.
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant C as Client (IP 203.0.113.7)
-  participant N as nginx
   participant S as SSO
   participant API as Service (app2)
   participant X as Other client (198.51.100.9)
-  C->>N: POST /api/v1/auth/login
-  N->>S: X-Forwarded-For: 203.0.113.7
-  S->>S: trusted IP via NUM_PROXIES, check password
-  S-->>C: access token {sub, perms, cip:"203.0.113.7"}
-  C->>API: GET /data, Bearer token (from 203.0.113.7)
-  API->>API: JWKS verify, compare observed IP with cip
+  C->>S: POST /api/v1/auth/login
+  S->>S: trusted IP, check password
+  S-->>C: access token {sub, sid, cip: HMAC(203.0.113.7)}
+  C->>API: GET /data, Bearer (from 203.0.113.7)
+  API->>S: introspect {token, ip: 203.0.113.7} (Basic)
+  S-->>API: active, perms, ip_match true
   API-->>C: 200
   Note over C,API: Token copied to another host
   X->>API: GET /data, same Bearer
-  API->>API: cip 203.0.113.7 != 198.51.100.9
-  alt enforce
-    API-->>X: 401 token_invalid (WWW-Authenticate error="invalid_token")
-  else warn
-    API-->>X: 200, log ip_mismatch
+  API->>S: introspect {token, ip: 198.51.100.9}
+  alt ENFORCE
+    S->>S: revoke session sid (blacklist refresh family)
+    S-->>API: active false
+    API-->>X: 401 token_invalid
+    Note over C: next refresh from C also fails: log in again
+  else WARNING
+    S-->>API: active true, ip_match false (logged)
+    API-->>X: 200
   end
+```
+
+Note: in `ENFORCE` the legitimate client loses its session too when its token is replayed elsewhere (by design:
+the token is compromised) or when its own IP changes (Wi-Fi ↔ mobile): it must log in again.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Active: login (cip bound)
+  Active --> Active: request / refresh from same IP
+  Active --> Active: other IP, WARNING (logged)
+  Active --> Revoked: other IP, ENFORCE
+  Active --> Revoked: logout-all / suspend
+  Active --> Ended: logout / refresh exp
+  Revoked --> [*]: client must log in again
+  Ended --> [*]
 ```
 
 BFF case (llm-wiki-svc):
@@ -211,71 +240,107 @@ sequenceDiagram
   participant S as SSO
   B->>W: POST /login (form)
   W->>S: POST /login, Basic llm-wiki, client_ip=203.0.113.7
-  S-->>W: tokens with cip=203.0.113.7
-  W->>W: store tokens in server session, bind session to browser IP
-  B->>W: request with session cookie
-  W->>W: compare browser IP with session cip (the SSO never sees the browser here)
-  W->>S: refresh, Basic + client_ip=<current browser IP>
-  S->>S: compare cip with client_ip (rebind or strict)
+  S-->>W: tokens with cip=HMAC(203.0.113.7)
+  W->>W: store tokens in server session
+  B->>W: request with session cookie (now from 198.51.100.9)
+  W->>S: introspect {token, ip: 198.51.100.9}
+  S-->>W: ENFORCE: active false, session revoked
+  W->>W: destroy server session, redirect to login
 ```
 
-In the BFF case the token never leaves the server, so the SSO check is only meaningful at refresh; the useful
-check is the BFF's own session-to-IP comparison.
+The BFF must always pass the **browser's** IP (`client_ip` on login/refresh/logout, `ip` on introspect), never
+its own.
 
-### 4.3 Pitfalls (honest assessment)
+### 4.3 Pitfalls (accepted)
 
 | Pitfall | Effect |
 |---|---|
-| NAT / shared IP (office, carrier-grade NAT, VPN exit) | All clients behind the same address look identical: binding does **not** stop token sharing inside one office/VPN, only from outside it |
-| Mobile clients, Wi-Fi ↔ 4G, roaming | IP changes mid-session; `enforce` causes 401s and re-logins every few minutes on phones |
-| IPv6 privacy addresses (RFC 8981) | Interface ID rotates (often daily or per connection); full-address binding breaks, hence `/64` prefix mode |
-| Corporate proxies, CDNs, load balancers | Service sees the proxy IP unless it trusts and parses `X-Forwarded-For` correctly; wrong `NUM_PROXIES` either breaks binding or lets clients spoof it |
-| BFF / server-to-server | Service sees the server IP, not the user's; binding must use the delegated `client_ip` |
-| Service-to-service calls with a user token | The calling service's IP differs from the bound IP; needs token exchange or an exemption |
+| NAT / shared IP (office, carrier-grade NAT, VPN exit) | Clients behind one address look identical: binding does not stop sharing inside one office/VPN |
+| Mobile clients, Wi-Fi ↔ 4G, IPv6 privacy addresses | IP changes mid-session; in `ENFORCE` the user must log in again (accepted by decision 3) |
+| Proxies / load balancers | Services must trust and parse `X-Forwarded-For` correctly; wrong config breaks binding or allows spoofing |
+| Service-to-service calls with a user token | Calling service's IP differs; it must forward the original client IP |
 | Spoofing | IP is not a secret; an attacker on the same network/NAT passes the check |
-| Privacy | IP in a JWT is readable by anyone holding the token (base64), and lands in logs |
 
-Conclusion: IP binding is a cheap **defence-in-depth** signal, not proof that the caller is the original client.
+IP binding is the agreed control (decision 4: no DPoP). Use `WARNING` first to measure mismatch rates.
 
-### 4.4 Recommended stronger complement: sender-constrained tokens
+### 4.4 Introspect / permission query (v1.2b)
 
-- **DPoP (RFC 9449).** Client generates a key pair (WebCrypto non-extractable key in browsers, keystore on
-  mobile). Login/refresh send a `DPoP` proof JWT; SSO puts `cnf.jkt` (key thumbprint) into the token. Each
-  request to a service carries a fresh proof signed by that key (`htm`, `htu`, `iat`, `jti`, `ath`). A stolen
-  token is useless without the private key, regardless of IP, NAT or mobility. Libraries exist for Python and
-  JS. Cost: client changes, services must validate proofs and keep a short `jti` replay cache.
-- **Device-bound refresh tokens.** Lighter step: bind only the refresh token to a device key (proof required on
-  `/refresh`), keep access tokens short (15 min) and bearer.
-- **mTLS (RFC 8705)** for service-to-service clients.
+Services verify every request (or per short cache window) by asking the SSO. `POST /api/v1/auth/introspect`,
+ServiceClient Basic auth (required).
+
+Request:
+
+```json
+{"token": "eyJ...", "ip": "203.0.113.7"}
+```
+
+`ip` = client IP observed by the service. Optional in `NOIP`; **required** in `WARNING`/`ENFORCE` for tokens with
+`cip` (missing → treated as mismatch).
+
+Response (active):
+
+```json
+{"active": true, "sub": "42", "username": "thomas", "email": "thomas@example.com", "is_staff": false,
+ "groups": ["trader"], "perms": ["application.app1", "application.app2"],
+ "ip_binding": "ENFORCE", "ip_match": true,
+ "token_type": "access", "iat": 1791800000, "exp": 1791800900, "iss": "https://sso.example.com",
+ "aud": "myfin-services", "client_id": "reporting"}
+```
+
+- `perms` / `groups` are **current** database values, so permission changes and suspensions take effect
+  immediately for services that query.
+- `ip_binding`: active mode. `ip_match`: `true`, `false` (only possible in `WARNING`), or `null` (`NOIP` or token
+  without `cip`).
+- Inactive: `{"active": false}` (invalid, expired, revoked session, suspended user, `ENFORCE` IP mismatch). The
+  reason is logged on the SSO, not returned.
+- Optional convenience field `"require": "application.app2"` in the request: response adds `"allowed": bool`.
+
+Local JWKS verification remains available as a cheap pre-check (signature, `exp`, `iss`, `aud`) to reject garbage
+without a network call, but **authority for permissions and IP is the SSO's answer**.
+
+Caching and load: services may cache an `active:true` answer keyed by `(sha256(token), ip)` for a short TTL
+(default recommendation 30 s, never beyond `exp`); never cache `active:false`. Load is one indexed lookup plus
+Redis checks per call; with 30 s caching, N services × active users gives ≤ 1 query per user per service per 30 s.
+Introspect gets its own throttle scope per ServiceClient (`introspect`, e.g. 6000/min) and runs on the existing
+gunicorn workers; scale horizontally behind nginx if needed.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant C as Client (holds private key K)
-  participant S as SSO
+  participant C as Client
   participant API as Service
-  C->>S: POST /login + DPoP: proof(K, htm=POST, htu=/login)
-  S-->>C: access token {cnf: {jkt: thumb(K)}}
-  C->>API: GET /x, Authorization: DPoP <token>, DPoP: proof(K, GET, /x, ath=hash(token))
-  API->>API: verify token (JWKS), verify proof signature == cnf.jkt, jti unseen, iat fresh
-  API-->>C: 200
+  participant K as Service cache (30 s)
+  participant S as SSO
+  C->>API: request + Bearer
+  API->>API: optional JWKS pre-check (sig, exp)
+  API->>K: lookup (hash(token), ip)
+  alt hit
+    K-->>API: cached active answer
+  else miss
+    API->>S: introspect {token, ip}
+    alt SSO answers
+      S-->>API: active, perms, ip_match
+      API->>K: store if active (≤ 30 s, ≤ exp)
+    else timeout / 5xx
+      API-->>C: 503 (never accept unverified)
+    end
+  end
+  API->>API: require application.<app> in perms
+  API-->>C: 200 / 401 / 403
 ```
-
-**Recommendation:** ship `cip` in `warn` mode first (cheap, measures real IP churn), plan DPoP for native/MCP
-clients and refresh tokens as the actual anti-sharing control.
 
 ## 5. Admin page
 
-| Need | Django admin today | Gap / proposal |
+| Need | Django admin today | Gap / proposal (v1.2a) |
 |---|---|---|
 | Create user | stock User admin | none |
-| Delete user | stock User admin (CASCADE deletes revocation row, blacklist rows) | warn: user is shared with myFinance; prefer suspend |
-| Suspend user | untick `is_active` | **gap**: does not set `revoked_at`; local verifiers accept access tokens until `exp` (≤ 15 min). Proposal: admin actions "Suspend (revoke tokens)" / "Unsuspend" = `is_active=False` + `UserTokenRevocation.revoke(user)` + blacklist outstanding refresh tokens (same as `LogoutAllView`); emit `user.suspended` (§6) |
-| Grant / revoke user permission | User admin "user permissions", Group admin | Proposal: actions "Grant app access…" / "Revoke app access…" on the user list (pick `application.*`), and optional "revoke tokens now" so the change is immediate instead of ≤ 15 min |
-| Create service permission | `create_app_permission` command only | Proposal: allow add/change(name) in `ApplicationPermissionAdmin` through `ensure_permission()` (keeps the registry record) |
-| Delete service permission | not allowed in admin (deliberate) | Proposal: delete action with confirmation that lists affected users/groups; also deletes the record; refuses `app1` while code-defined |
-| Register service | `ServiceClient` admin (secret shown once) | Proposal: fields of §3.2, link to permission, "users with access" count |
-| Audit | `sso.auth` logs only | Proposal: Django `LogEntry` already records admin changes; add `sso.admin` JSON log lines for the new actions |
+| Delete user | stock User admin (CASCADE deletes revocation row, blacklist rows) | allowed; prefer suspend to keep audit history. During the myFinance transition the row is shared |
+| Suspend user | untick `is_active` | **Decision 6: suspend revokes immediately.** Any change to `is_active=false` (admin action, form edit, shell) triggers a `pre_save`/`post_save` signal: `UserTokenRevocation.revoke(user)` + blacklist all outstanding refresh tokens + emit `user.suspended` webhook. Introspect returns `active:false` at once |
+| Grant / revoke user permission | User admin "user permissions", Group admin | Proposal: actions "Grant app access…" / "Revoke app access…"; effective immediately for services that query the SSO |
+| Create service permission | `create_app_permission` command only | allow add/change(name) in `ApplicationPermissionAdmin` through `ensure_permission()` |
+| Delete service permission | not allowed in admin (deliberate) | delete action with confirmation listing affected users/groups; refuses `app1` while code-defined |
+| Register service | `ServiceClient` admin (secret shown once) | fields of §3.2, link to permission, "users with access" count |
+| Audit | `sso.auth` logs only | Django `LogEntry` + `sso.admin` JSON log lines for new actions |
 
 ```mermaid
 sequenceDiagram
@@ -283,131 +348,119 @@ sequenceDiagram
   actor A as Admin
   participant AD as Django admin
   participant DB as dcWebUsers
-  participant EV as Event hub (future)
+  participant WH as Webhook dispatcher (v1.4)
   participant SV as Services
-  A->>AD: action "Suspend (revoke tokens)" on user 42
+  A->>AD: suspend user 42 (is_active=false)
   AD->>DB: is_active=false, revoked_at=now, blacklist refresh tokens (one transaction)
-  AD->>EV: user.suspended {sub:42}
-  EV-->>SV: webhook / SSE
-  Note over SV: Without events: refresh fails at once (403 account_inactive), introspect active:false, local JWKS checks pass until exp
+  AD->>WH: user.suspended {sub:42}
+  WH-->>SV: signed webhook
+  Note over SV: Even without the webhook: next introspect returns active false, refresh fails 403 account_inactive
 ```
 
-## 6. Event notifications (future phase)
+## 6. Event notifications: signed webhooks
 
-### 6.1 Channels
+Decision 7: the API supports **one** mechanism — **signed webhooks to registered services** (v1.4). SSE/WebSocket
+push to clients is not planned (see [TODOS.md](../TODOS.md)); clients learn about expiry or revocation when a
+service or `/refresh` rejects their token.
 
-| Audience | Channel | Auth |
-|---|---|---|
-| Browser SPA | SSE `GET /api/v1/events/stream` (simpler than WebSocket, works through nginx with buffering off) | access token (query/cookie issue: prefer `fetch`-based SSE with `Authorization` header) |
-| Native/MCP client | SSE or WebSocket `wss://…/api/v1/events/ws` | Bearer |
-| Service | Webhook POST to `ServiceClient.notify_url`, HMAC-signed (`X-SSO-Signature`), or SSE `GET /api/v1/events/service-stream` with Basic | ServiceClient |
+### 6.1 Registration
+
+`ServiceClient.notify_url` (HTTPS) and `notify_secret` (shown once, used as HMAC key). Set in the admin or
+`register_service --notify-url`.
 
 ### 6.2 Events
 
-| Event | Sent to | Payload (besides `id`, `type`, `time`) |
-|---|---|---|
-| `token.expiring` | client | `sub`, `exp` (e.g. 60 s before) — hint to refresh |
-| `token.expired` | client | `sub`, `jti` |
-| `token.revoked` | client, services | `sub`, `revoked_at` (logout-all, password change) |
-| `user.suspended` / `user.reactivated` | services, client | `sub` |
-| `permission.changed` | services, client | `sub`, `app`, `granted:bool` |
-| `keys.rotated` | services | `kid` list — hint to refetch JWKS |
+| Event | Payload (besides `id`, `type`, `time`) |
+|---|---|
+| `token.revoked` | `sub`, `revoked_at`, optional `sid` (logout-all, password change, `ENFORCE` IP mismatch) |
+| `user.suspended` / `user.reactivated` | `sub` |
+| `user.deleted` | `sub` |
+| `permission.changed` | `sub`, `app`, `granted: bool` |
+| `keys.rotated` | `kid` list (hint to refetch JWKS) |
 
-Services get user-level events, not one message per expiring token (expiry is already in `exp`).
+No per-token `token.expired` events: expiry is already in `exp` and enforced on every check.
 
-### 6.3 Delivery semantics
+### 6.3 Request format and delivery
 
-- At-least-once; every event has a monotonic `id`; consumers must be idempotent.
-- SSE reconnect with `Last-Event-ID`; the hub keeps a bounded replay window (e.g. Redis Stream, 15 min =
-  access TTL). Webhooks retry with exponential backoff up to the same window.
-- Missed events (gap beyond the window, hub down) fall back to normal rules: **services still reject on `exp`
-  themselves** and use introspect for sensitive calls. Events speed up revocation; they are never required for
-  correctness.
+```http
+POST <notify_url>
+Content-Type: application/json
+X-SSO-Event-Id: 46
+X-SSO-Timestamp: 1791800123
+X-SSO-Signature: v1=<hex HMAC-SHA256(notify_secret, timestamp + "." + body)>
+
+{"id": 46, "type": "user.suspended", "time": "2026-10-13T09:15:23Z", "sub": "42"}
+```
+
+- Receiver verifies the signature in constant time and rejects timestamps older than 5 min (replay).
+- Any 2xx = delivered. **At-least-once**: retries with exponential backoff + jitter (1 s, 2 s, 4 s … capped at
+  10 min) for up to 24 h; then marked failed and visible in the admin. Consumers must dedupe on `id`.
+- Queue: Redis list/stream with a worker process (`manage.py run_webhook_worker`); events persisted in DB for
+  the retry window.
+- Webhooks speed up reaction; they are never required for correctness: services still introspect and enforce
+  `exp`.
 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant C as SPA
-  participant H as SSO event hub
   participant S as SSO API
-  participant W as Service webhook
-  C->>H: GET /api/v1/events/stream (Bearer), Last-Event-ID: 41
-  H-->>C: replay 42..45, then live
-  S->>H: publish token.revoked {sub:42} id=46
-  H-->>C: event 46 token.revoked
-  C->>C: drop access token, show login
-  H->>W: POST notify_url (HMAC) id=46
-  W-->>H: 5xx
-  H->>W: retry after backoff
-  W-->>H: 204
-  Note over C,H: connection drops
-  C->>H: reconnect, Last-Event-ID: 46
-  H-->>C: events > 46 or 'reset' if outside window -> client calls /refresh
+  participant Q as Queue (Redis)
+  participant D as Webhook worker
+  participant W as Service notify_url
+  S->>Q: enqueue user.suspended id=46
+  D->>Q: dequeue
+  D->>W: POST signed (attempt 1)
+  W-->>D: 503
+  D->>D: backoff 1 s + jitter
+  D->>W: POST signed (attempt 2)
+  W-->>D: 204
+  D->>Q: ack id=46
 ```
 
 ```mermaid
 stateDiagram-v2
-  [*] --> Connecting
-  Connecting --> Live: 200 stream open
-  Connecting --> Backoff: network error / 5xx
-  Live --> Backoff: connection lost
-  Backoff --> Connecting: wait 1,2,4..60 s + jitter
-  Live --> Resync: 'reset' event (gap)
-  Resync --> Connecting: refresh token, then reconnect
-  Live --> Closed: logout / 401
-  Closed --> [*]
+  [*] --> Pending
+  Pending --> Sending
+  Sending --> Delivered: 2xx
+  Sending --> Retrying: timeout / 5xx / 429 / network error
+  Retrying --> Sending: backoff elapsed
+  Retrying --> Failed: older than 24 h
+  Delivered --> [*]
+  Failed --> [*]
 ```
 
-## 7. Online sign-up and password change (phase 5)
+## 7. Online sign-up and password change (future)
 
-Reserved routes (`urls.py` comment): `api/v1/account/*`.
+Decision 8: kept for a future phase; tracked in [TODOS.md](../TODOS.md). Reserved routes (`urls.py` comment):
+`api/v1/account/*` — sign-up, activation, password change, password reset. Password changes through Django
+already revoke tokens (`sso/signals.py`).
 
-| Endpoint | Purpose |
-|---|---|
-| `POST /api/v1/account/signup` | username, email, password; creates inactive user, sends activation mail |
-| `POST /api/v1/account/activate` | token from mail → `is_active=true` |
-| `POST /api/v1/account/password/change` | Bearer + old/new password; revokes all tokens (`revoked_at`), returns a fresh pair for the current client |
-| `POST /api/v1/account/password/reset` | request mail (same 204 for unknown addresses) |
-| `POST /api/v1/account/password/reset/confirm` | token + new password; revokes all tokens |
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Client
-  participant S as SSO
-  participant DB as dcWebUsers
-  C->>S: POST /api/v1/account/password/change (Bearer, old, new)
-  S->>S: check old password, Django validators, throttle
-  S->>DB: set_password -> pre_save signal sets revoked_at (sso/signals.py)
-  S->>DB: blacklist outstanding refresh tokens
-  S-->>C: 200 new token pair
-  S-->>S: event token.revoked (future)
-```
-
-Known gap (D-noted in ARCHITECTURE §12): password changes made in **myFinance** write `auth_user` from another
-process and do not revoke SSO tokens. Options: myFinance calls an SSO endpoint, or the SSO compares a password-hash
-fingerprint (`pwd_h` claim / stored hash prefix) at refresh and introspect.
+Decision 9: myFinance is being phased out and the SSO-server is the authentication server, so password changes
+happen only through the SSO. No myFinance → SSO password sync is designed; during the transition users should not
+change passwords in myFinance.
 
 ## 8. Phasing plan
 
 | Phase | Content |
 |---|---|
-| current (sprint 1, v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
-| v1.2a | Admin actions (suspend with revocation, grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, API reference manual, refresh-reuse family revocation |
-| v1.2b | `cip` IP binding in `off/warn/enforce`, introspect `ip` param, per-service audience |
-| v1.3 | DPoP / device-bound refresh tokens for native and MCP clients |
-| v1.4 | Event hub: webhooks for services, SSE for clients |
-| phase 5 | Hosted login + PKCE, sign-up, activation, password change/reset |
+| current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
+| v1.2a | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
+| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere |
+| v1.4 | Signed webhooks to registered services |
+| future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
 
-## 9. Decisions needed from Thomas
+## 9. Decisions (2026-10-13)
 
-1. IP binding: go ahead as `warn` first, or straight to `enforce`? Which clients are exempt (mobile, VPN users)?
-2. IP binding granularity: full address or prefix (/24 IPv4, /64 IPv6)? Plain IP in token or hashed?
-3. Refresh from a new IP: `rebind` (keep session) or `strict` (re-login)?
-4. Is DPoP (key-bound tokens) acceptable as the real anti-sharing control, and for which clients first?
-5. Per-service audience (`aud` per app) or keep the single `myfin-services` audience?
-6. Suspend semantics: should suspend always revoke tokens immediately (recommended)? May the admin delete users that
-   myFinance also uses?
-7. Events: webhooks, SSE, or both? Which phase?
-8. Sign-up: open self-registration or invite/approval only? Email provider for activation mails?
-9. How to handle myFinance password changes (call SSO vs. fingerprint check)?
+Recorded from Thomas:
+
+1. IP binding is a server setting `SSO_IP_BINDING_MODE` with `NOIP`, `WARNING`, `ENFORCE`.
+2. Exact IP only; the token holds a (keyed) hash of the IP (`cip`).
+3. `ENFORCE` + new IP: service requests are rejected, the session is disconnected, the client logs in again to
+   get a token for the new IP. No rebind.
+4. No DPoP; IP binding is sufficient (DPoP listed in TODOS as not planned).
+5. One token for all services (single audience). Services verify permissions by querying the SSO with the token
+   and get the permission list back.
+6. Suspending a user immediately invalidates all of the user's tokens.
+7. One notification mechanism in the API: signed webhooks to services.
+8. Sign-up and other future items are tracked in TODOS.md.
+9. myFinance is phasing out; the SSO-server is the new authentication server.
