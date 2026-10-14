@@ -18,8 +18,10 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 
 ## Scheduled follow-ups
 
-- [ ] **v1.2b: prune `sso_revokedsession`** — the `revoke_inactive_users` sweep deletes rows older than the refresh-token lifetime + 1 day (their sessions can no longer refresh).
-- [ ] **v1.2b: Redis cache for revoked sessions** — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
+- [x] **v1.2b: prune `sso_revokedsession`** (done on `feat/v1.2b`) — the `revoke_inactive_users` sweep deletes rows older than the refresh-token lifetime + 1 day (their sessions can no longer refresh).
+- [x] **v1.2b: Redis cache for revoked sessions** (done on `feat/v1.2b`, shared Django cache) — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
+- [ ] **sso-client 0.2: deferred library features** — local JWKS pre-check (`[jwt]`), circuit breaker, `cached` fail mode, `Retry-After` on 429, generic WSGI/ASGI middleware classes.
+- [ ] **v1.2b follow-up: llm-wiki-svc on `sso-client`** (branch `feat/sso-client`), incl. `client_ip` on logout.
 - [ ] **v1.4: encrypt `notify_secret` at rest** (webhook signing secret).
 
 ## Ecosystem (decisions 2026-10-14 rounds 1-2, see [ECOSYSTEM-INTEGRATION.md](docs/ECOSYSTEM-INTEGRATION.md))

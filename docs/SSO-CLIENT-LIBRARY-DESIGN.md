@@ -1,6 +1,8 @@
 # `sso-client` — Python library for services (design)
 
-> **Status: planned, v1.2b.** Nothing here is implemented yet. Contract source of truth: the
+> **Status: implemented as `sso-client` 0.1.0 (v1.2b, `clients/python/`).** What 0.1.0 leaves out (JWKS
+> pre-check, circuit breaker, `cached` fail mode, generic WSGI/ASGI middleware, webhooks) is listed in
+> [DESIGN-v1.2-requirements.md §11](DESIGN-v1.2-requirements.md#11-v12b-as-built-implementation-notes-and-decisions). Contract source of truth: the
 > [API Reference Manual](API-REFERENCE-MANUAL.md) and [v1.2 design §4.4–4.5](DESIGN-v1.2-requirements.md#45-how-the-client-ip-is-determined).
 
 | | |

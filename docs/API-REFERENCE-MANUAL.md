@@ -223,13 +223,16 @@ def with_backoff(call, tries=5):
 
 ## 3. Service developers
 
-> **Planned v1.2b — Python library.** Python services should use the `sso-client` package (`import sso_client`),
+> **v1.2b — Python library (implemented, `clients/python/`, version 0.1.0).** Python services should use the
+> `sso-client` package (`import sso_client`),
 > which derives the client IP from the socket peer and trusted proxies, and wraps introspection, caching and
 > permission checks (`@require_permission`). See [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md) and
 > [client-IP rules](DESIGN-v1.2-requirements.md#45-how-the-client-ip-is-determined). The raw HTTP API below
 > stays the contract for non-Python services. Library decisions: package `sso-client` (import `sso_client`;
 > `nm-sso-client` kept as an alternative name), source in `clients/python/` of this repo, installed with `pip`
 > from git; fail-closed 503 when the SSO is unreachable; caches only `active:true` answers for 30 s; uses httpx.
+> Install: `pip install "sso-client[fastapi] @ git+https://github.com/Neural-Matrix-LLC/SSO-server.git@<tag or branch>#subdirectory=clients/python"`;
+> usage in [clients/python/README.md](../clients/python/README.md).
 
 ### 3.1 Register your service
 
@@ -327,26 +330,41 @@ Local verification cannot see logout-all, suspension, password change or a permi
 
 ```bash
 curl -sS https://sso.example.com/api/v1/auth/introspect -u 'reporting:<client_secret>' \
-  -H 'Content-Type: application/json' -d '{"token":"eyJ..."}'
+  -H 'Content-Type: application/json' \
+  -d '{"token":"eyJ...", "ip":"203.0.113.7", "require":"application.app2"}'
 ```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `token` | string ≤ 8192 | yes | the user's access token |
+| `ip` | string | in `WARNING`/`ENFORCE` | end-user IP **as your service observed it** (socket peer + your trusted proxies, §4.5 of the design); normalised by the SSO (port, brackets, zone id stripped, `::ffff:a.b.c.d` → `a.b.c.d`). Missing or unparseable = mismatch for a bound token |
+| `require` | string or list of strings | no | permission(s) to test; the response adds `allowed` (true only if **all** are held) |
 
 ```json
 {"active": true, "sub": "42", "username": "thomas", "email": "thomas@example.com", "is_staff": false,
- "groups": ["trader"], "perms": ["application.app1"], "token_type": "access", "iat": 1791800000,
- "exp": 1791800900, "iss": "https://sso.example.com", "aud": "myfin-services", "client_id": "reporting"}
+ "groups": ["trader"], "perms": ["application.app1", "application.app2"], "sid": "Yp3…",
+ "ip_binding": "ENFORCE", "ip_match": true, "allowed": true,
+ "token_type": "access", "iat": 1791800000, "exp": 1791800900, "iss": "https://sso.example.com",
+ "aud": "myfin-services", "client_id": "reporting"}
 ```
 
 - `{"active": false}` for invalid, expired, refresh, revoked tokens or inactive/missing users. Treat as 401.
 - `perms`, `groups`, `email`, `is_staff` are **current** database values; `client_id` is **your** client id.
 - 401 `invalid_client` = your credentials are wrong or the client is inactive.
-- Responses are `Cache-Control: no-store`; you may cache an `active:true` answer briefly (e.g. ≤ 30 s) yourself.
-- **Planned v1.2b**: send the client IP you observe as `"ip"`; introspect becomes the authority for permissions
-  and IP binding (`ip_match`), see §7. Always forward the original client IP, never your own.
+- Responses are `Cache-Control: no-store`; you may cache an `active:true` answer briefly (≤ 30 s, never past
+  `exp`, keyed by token hash **and** ip) yourself. Never cache `active:false`.
+- **v1.2b IP binding** (`SSO_IP_BINDING_MODE`): `ip_binding` is the server mode; `ip_match` is `true`, `false`
+  (only in `WARNING`: allowed, logged as `ip_mismatch`) or `null` (`NOIP`, or a token issued without `cip`).
+  In `ENFORCE` a mismatch (or a missing `ip`) answers `{"active": false}` **and revokes the session**: the
+  user's refresh fails too and they must log in again. Always send the original client IP, never your own.
+- `sid` is the session id (opaque). `allowed` appears only when `require` was sent.
+- Throttle: scope `introspect`, per ServiceClient (default `6000/min`, `SSO_THROTTLE_INTROSPECT`); 429
+  `rate_limited` with `Retry-After`.
 
 ```python
-def introspect(token: str) -> dict:
+def introspect(token: str, client_ip: str) -> dict:
     r = requests.post(f"{ISSUER}/api/v1/auth/introspect", auth=(CLIENT_ID, CLIENT_SECRET),
-                      json={"token": token}, timeout=5)
+                      json={"token": token, "ip": client_ip}, timeout=5)
     r.raise_for_status()
     return r.json()
 ```
@@ -376,7 +394,7 @@ def introspect(token: str) -> dict:
 | POST | `/api/v1/auth/logout` | same as refresh | `refresh` |
 | POST | `/api/v1/auth/logout-all` | Bearer access token | none |
 | GET | `/api/v1/auth/me` | Bearer access token | none |
-| POST | `/api/v1/auth/introspect` | ServiceClient Basic (required) | none |
+| POST | `/api/v1/auth/introspect` | ServiceClient Basic (required) | `introspect` (per client, v1.2b) |
 | GET | `/.well-known/jwks.json` | none | none |
 | GET | `/.well-known/openid-configuration` | none | none |
 | GET | `/healthz` | none | none |
@@ -401,6 +419,11 @@ refresh token, same session id `sid` (v1.2a). Errors: 400, 401 `token_invalid` (
 blacklisted/reused, wrong type, revoked, session revoked, lost race), 401 `invalid_client`, 403
 `account_inactive` (user suspended; also for a refresh token that the suspension blacklisted), 403
 `origin_not_allowed`, 429.
+
+**IP binding (v1.2b).** In `WARNING`/`ENFORCE` the refresh token's `cip` is compared with the caller's client
+IP (a ServiceClient BFF passes the browser's IP as `client_ip`, as on login and logout). `ENFORCE` + other IP:
+401 `token_invalid` and the session is revoked; `WARNING`: allowed and logged. The new pair keeps the session's
+original binding; a token issued under `NOIP` gets bound to the refreshing IP.
 
 **Reuse (v1.2a).** Presenting a refresh token that was already used gets 401 `token_invalid`. If it was used
 more than `SSO_REFRESH_REUSE_GRACE_SECONDS` (default 10) ago, the SSO treats it as stolen and **revokes the
@@ -427,8 +450,8 @@ session (v1.2a) or of a suspended user.
 
 ### introspect — `POST /api/v1/auth/introspect`
 
-See §3.3. 400 `invalid_request` (no `token`), 401 `invalid_client` (`WWW-Authenticate: Basic
-realm="sso-introspect"`).
+See §3.3. 400 `invalid_request` (no `token`, bad `require`), 401 `invalid_client` (`WWW-Authenticate: Basic
+realm="sso-introspect"`), 429 `rate_limited`.
 
 ### jwks — `GET /.well-known/jwks.json`
 
@@ -455,7 +478,7 @@ realm="sso-introspect"`).
 | `username`, `email`, `is_staff` | yes | no |
 | `groups` | sorted group names | no |
 | `perms` | sorted `application.*` (explicit user + group grants; superusers only if `SSO_SUPERUSER_ALL_APPS=true`) | no |
-| `cip` | **Planned v1.2b** (HMAC of client IP; opaque to services) | **Planned v1.2b** |
+| `cip` | v1.2b, only in `WARNING`/`ENFORCE`: base64url(HMAC-SHA256(`SSO_IP_BINDING_KEY`, client IP)); opaque, services cannot check it locally | same (refresh keeps the session's binding, no rebind) |
 | `sid` | session id (v1.2a): one per login, unchanged by refresh | same |
 
 Claims are a snapshot at issue time; changes reach new tokens at the next refresh. Tokens issued before v1.2a
@@ -489,8 +512,8 @@ Rows marked **Planned** do not exist yet; do not code against them until they ar
 |---|---|
 | **Done in v1.2a** Suspend revokes immediately | `is_active=false` revokes all of the user's tokens (revocation marker + refresh blacklist); introspect `active:false`, refresh 403 `account_inactive`, `/me` 401. Unsuspending does not revive old tokens |
 | **Done in v1.2a** `register_service`, admin actions, `sid`, refresh-reuse session revocation | see §3.1, §4 refresh, §5 |
-| **Planned v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
-| **Planned v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
+| **Done in v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
+| **Done in v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
 | **Planned v1.4** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password

@@ -269,9 +269,10 @@ flowchart TB
   CHK -.-> L3
 ```
 
-Planned layers (not implemented): v1.2b adds the introspect/permission query and the `sso-client` library on the
-**service** side (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its
-handlers). v1.3a adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
+v1.2b (implemented on `feat/v1.2b`) adds the introspect/permission query with client-IP binding
+(`sso/ipbinding.py`, `sso/clientip.py`) and the `sso-client` library (`clients/python/`) on the **service** side
+(each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its handlers).
+Planned (not implemented): v1.3a adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
 `sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
 
 ## 4. Component responsibilities
@@ -431,7 +432,7 @@ What is stored where, precisely:
 | Every issued refresh token | `token_blacklist_outstandingtoken` | `issue_token_pair` via `SSORefreshToken.for_session` | Includes the raw token text, with its `sid` (the session family is found by decoding these). Access tokens are **not** stored anywhere |
 | Used / logged-out refresh tokens | `token_blacklist_blacklistedtoken` | `/refresh`, `/logout`, `/logout-all` | `flushexpiredtokens` is not run automatically (Dockerfile R6) |
 | Revocation epoch | `sso_usertokenrevocation` | `/logout-all`, password change signal, suspend / unsuspend (`is_active` change), inactive user seen on use, `revoke_inactive_users`, admin | One row per user, `update_or_create` |
-| Revoked sessions | `sso_revokedsession` | `/refresh` on refresh-token reuse (v1.2a) | One row per revoked `sid`; checked by `/refresh`, `/me`, `/introspect` |
+| Revoked sessions | `sso_revokedsession` | `/refresh` on refresh-token reuse (v1.2a, `reason=refresh_reuse`); introspect / refresh IP mismatch under `ENFORCE` (v1.2b, `reason=ip_mismatch`) | One row per revoked `sid`; checked by `/refresh`, `/me`, `/introspect` through the shared cache (v1.2b: `revoked_sid:<sid>` = 1 for refresh lifetime + 1 day, = 0 for `SSO_REVOKED_SESSION_CACHE_SECONDS`; written at once on revoke; cache errors fall back to the DB). Rows older than refresh lifetime + 1 day are pruned by `revoke_inactive_users` |
 | Service clients | `sso_serviceclient` | admin, `register_service`, `create_service_client` | Secret stored as a Django password hash; `app_codename` links `application.<codename>` |
 | Throttle counters | Redis | DRF throttles | Lost on Redis restart (by design) |
 | Signing key | `/run/keys/<SSO_JWT_PRIVATE_KEY>` | `scripts/gen_keys.sh` | Read once at process start |
@@ -1253,8 +1254,19 @@ Routes from `ssoproject/urls.py` (nothing else is routed). Base URL = `SSO_ISSUE
   must be an IP address (else 400) and then replaces the caller's IP for the `login`/`refresh` throttles and the
   login log. Without a Basic header, `client_ip` is ignored. 401 answers on these three endpoints carry
   `WWW-Authenticate: Basic realm="sso-service-client"`.
-- **Client IP**: `REST_FRAMEWORK["NUM_PROXIES"] = SSO_NUM_PROXIES` (compose: 1, nginx overwrites
-  `X-Forwarded-For`).
+- **Client IP** (v1.2b, `sso/clientip.py`, design §4.5): socket peer `REMOTE_ADDR`; `X-Forwarded-For` is read only
+  when the peer is in `SSO_TRUSTED_PROXIES` (IPs/CIDRs) and walked right to left (first untrusted entry; malformed
+  entry stops the walk; all trusted = leftmost). Normalised: port/brackets/zone id stripped, `::ffff:a.b.c.d` →
+  `a.b.c.d`, IPv6 compressed. Without `SSO_TRUSTED_PROXIES` the deprecated `SSO_NUM_PROXIES` hop count (DRF) is
+  used, with check warning `sso.W002`. The same algorithm is in `sso_client.get_client_ip` (parity test
+  `sso/tests/test_clientip_parity.py`). Used for throttles, logs and the `cip` binding.
+- **IP binding** (v1.2b, `sso/ipbinding.py`, design §4.2): `SSO_IP_BINDING_MODE` `NOIP` (default) / `WARNING` /
+  `ENFORCE`. In `WARNING`/`ENFORCE` login puts `cip = base64url(HMAC-SHA256(SSO_IP_BINDING_KEY, client IP))` into
+  both tokens (the delegated `client_ip` for a BFF login). Refresh compares it with the caller's client IP and
+  keeps the original binding (no rebind; a `NOIP`-era token is bound on its first refresh). Introspect compares it
+  with the `ip` the service sends. Mismatch (incl. missing/unparseable IP): `WARNING` allows and logs `sso.auth`
+  `ip_mismatch`; `ENFORCE` answers inactive / 401 and revokes the session (`revoke_session(..., "ip_mismatch")`).
+  Only user tokens are bound; ServiceClient credentials never are (ECOSYSTEM-INTEGRATION §4.1).
 
 ### 8.1 POST /api/v1/auth/login
 
@@ -1361,25 +1373,31 @@ Headers: `Authorization: Bearer <access token>`. Response 200: the `user` object
 ### 8.6 POST /api/v1/auth/introspect
 
 Headers: `Authorization: Basic base64(client_id:client_secret)` of an active ServiceClient (required).
-Body: `{"token": "<access jwt>"}` (max 8192).
+Body: `{"token": "<access jwt>", "ip": "<client IP seen by the service>", "require": "application.app2"}`
+(`token` max 8192; `ip` optional in `NOIP`, needed for bound tokens; `require` optional, string or list).
+Throttle scope `introspect` per ServiceClient (`SSO_THROTTLE_INTROSPECT`, default `6000/min`).
 
 Response 200 active:
 
 ```json
 {
   "active": true, "sub": "42", "username": "thomas", "email": "thomas@example.com",
-  "is_staff": false, "groups": ["trader"], "perms": ["application.app1"],
+  "is_staff": false, "groups": ["trader"], "perms": ["application.app1"], "sid": "Yp3…",
+  "ip_binding": "WARNING", "ip_match": true, "allowed": true,
   "token_type": "access", "iat": 1791800000, "exp": 1791800900,
   "iss": "https://sso.example.com", "aud": "myfin-services", "client_id": "llm-wiki"
 }
 ```
 
 Response 200 inactive: `{"active": false}` when the token is invalid, expired, a refresh token, the user is missing
-or inactive, or `iat < revoked_at`. Both carry `Cache-Control: no-store`.
+or inactive, `iat < revoked_at`, the session is revoked, or (v1.2b, `ENFORCE`) the IP does not match (that also
+revokes the session). `ip_match`: `true` / `false` (`WARNING` only) / `null` (`NOIP` or unbound token); `allowed`
+only when `require` was sent. Both carry `Cache-Control: no-store`.
 
 | Status | `error` | When |
 |---|---|---|
-| 400 | `invalid_request` | missing `token`, body not an object |
+| 400 | `invalid_request` | missing `token`, body not an object, bad `require` |
+| 429 | `rate_limited` | `introspect` throttle (per ServiceClient) |
 | 401 | `invalid_client` | no Basic header, wrong secret, unknown or inactive client. `WWW-Authenticate: Basic realm="sso-introspect"` |
 
 Note: `perms`, `groups`, `email`, `is_staff` here come from the DB **now**, not from the token.
@@ -1465,6 +1483,8 @@ Header (both tokens): `{"alg": "RS256", "typ": "JWT", "kid": "<16 hex>"}`.
 | `is_staff` | yes | no | `issue_token_pair` |
 | `groups` | sorted group names | no | `user_groups` |
 | `perms` | sorted `application.*` | no | `user_app_perms` |
+| `sid` | session id, one per login (v1.2a) | same | `issue_token_pair` / `for_session` |
+| `cip` | v1.2b, `WARNING`/`ENFORCE` only: base64url HMAC-SHA256 of the client IP | same | `sso/ipbinding.cip_for` |
 
 Example decoded access token payload:
 
@@ -1510,7 +1530,12 @@ From `ssoproject/settings.py` (env or `.env`; `SSO_ENV_FILE` chooses the file, d
 | `SSO_DB_SSL_MODE` | empty | `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY` |
 | `SSO_TEST_DBNAME` | `test_dcWebUsers` | Test DB name |
 | `SSO_CACHE_URL` | empty, fatal (debug: LocMem); compose `redis://redis:6379/0` | Shared throttle cache; LocMem/dummy fatal. Key prefix `sso` |
-| `SSO_NUM_PROXIES` | `0` (compose `1`) | Trusted proxy hops for `X-Forwarded-For`. v1.2b: replaced by `SSO_TRUSTED_PROXIES` (CIDR list), this stays as a deprecated fallback |
+| `SSO_TRUSTED_PROXIES` | empty | v1.2b: comma list of proxy IPs/CIDRs whose `X-Forwarded-For` is trusted (right-to-left walk). `/0` is fatal. When set, `SSO_NUM_PROXIES` is ignored |
+| `SSO_NUM_PROXIES` | `0` (compose `1`) | **Deprecated** (v1.2b, warning `sso.W002`): trusted proxy hops for `X-Forwarded-For`, used only while `SSO_TRUSTED_PROXIES` is empty |
+| `SSO_IP_BINDING_MODE` | `NOIP` | v1.2b: `NOIP`, `WARNING` or `ENFORCE` (other values fatal) |
+| `SSO_IP_BINDING_KEY` | derived from `SSO_SECRET_KEY` | v1.2b: HMAC key for `cip`; changing it (or the secret key) makes every bound token mismatch |
+| `SSO_REVOKED_SESSION_CACHE_SECONDS` | `10` | v1.2b: how long "session not revoked" is cached; `0` = always ask the DB |
+| `SSO_THROTTLE_INTROSPECT` | `6000/min` | v1.2b: per ServiceClient, `/introspect` |
 | `SSO_REFRESH_REUSE_GRACE_SECONDS` | `10` | v1.2a: reuse of a refresh token this soon after its first use is a concurrent refresh (401, session kept); later reuse revokes the session. `0` = no grace |
 | `SSO_THROTTLE_LOGIN` | `10/min` | per client IP |
 | `SSO_THROTTLE_LOGIN_USER` | `5/min` | per lowercased username/email |
@@ -1551,7 +1576,8 @@ Compose / runtime only: `GUNICORN_WORKERS` (3), `SSO_FORWARDED_ALLOW_IPS` (edge 
 | CSRF on llm-wiki forms | login double-submit cookie, per-session token on writes | `llmwiki/api/login.py`, `routes.py` |
 | Replay of a used refresh token | blacklist on rotation, atomic | `RefreshView` |
 | Password guessing | 10/min per IP, 5/min per username, nginx 30/min | `sso/throttles.py`, `nginx.conf` |
-| Throttle bypass via headers | `NUM_PROXIES` default 0, nginx overwrites XFF, `client_ip` only from authenticated ServiceClients | `settings.py`, `delegation.py` |
+| Throttle bypass / IP spoofing via headers | XFF read only from `SSO_TRUSTED_PROXIES` peers (v1.2b; deprecated `NUM_PROXIES` default 0), nginx overwrites XFF, `client_ip` only from authenticated ServiceClients | `clientip.py`, `settings.py`, `delegation.py` |
+| Copied token replayed from another host | v1.2b `cip` IP binding (`WARNING` logs, `ENFORCE` revokes the session); limits in design §4.3 (NAT, mobile, spoofing on the same network) | `ipbinding.py`, `views.py` |
 | User enumeration | same 401 for unknown user, one hash on every path, dummy hash for unknown ServiceClients | `serializers.check_credentials`, `authentication._dummy_check` |
 | Session after compromise | `logout-all`, password change and suspend set `revoked_at`; refresh-token reuse revokes the session (`sid`) | `views.LogoutAllView`, `signals.py`, `revocation.py`, `views.handle_refresh_reuse` |
 | Container compromise | non-root uid 10001 (fatal as root), read-only root fs, `cap_drop ALL`, `no-new-privileges`, keys mounted read-only, Redis on an internal network | `Dockerfile`, `docker-compose.yml` |
@@ -1645,7 +1671,7 @@ HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `
 | Hosted login page, `GET /sso/authorize`, `POST /api/v1/auth/token`, auth code + PKCE, `sso/logout` (phase 5) | Not routed. `AuthorizationCode` model, `ServiceClient.redirect_uris` and `SSO_CODE_TTL_SEC` exist unused |
 | Account endpoints `api/v1/account/*` (sign-up, activation, password reset) | Not routed |
 | OIDC ID tokens, userinfo, `authorization_endpoint` in discovery | Not implemented |
-| Refresh-token family revocation on reuse | **Implemented v1.2a** (§7.4); `sso_revokedsession` rows are not pruned yet |
+| Refresh-token family revocation on reuse | **Implemented v1.2a** (§7.4); `sso_revokedsession` rows pruned by `revoke_inactive_users` since v1.2b |
 | Absolute SSO-side session cap | Not implemented; each refresh issues a new 7-day token |
 | Revocation for local verifiers before `exp` | By design only via `/introspect` |
 | Revocation on password change in myFinance | Not implemented (other process) |
@@ -1670,5 +1696,5 @@ Found while writing this document. None of them changes behaviour; they are docu
 | D8 | `docs/DESIGN-ADDENDUM-v1.1.md` B.11 | The only migrations SSO owns are `sso` and `token_blacklist` | Also `application` (0001_initial); the compose header and README already say so |
 | D9 | `docs/sso-integration-design.md` v1.1 item 4 | "Without valid Basic auth the `client_ip` field is ignored" | Since v1.2 (C-19): a Basic header that fails is 401 `invalid_client`; only a request with **no** Basic header ignores `client_ip` (`sso/delegation.py`). The doc's later v1.2 section has it right, item 4 was not amended |
 | D10 | `docs/SSO-server.md` §6.3 | Logout "clears the cookie", 204 | 204 only for a valid token or no cookie; an invalid/blacklisted token gives 401 `token_invalid` (cookie still cleared in cookie mode) |
-| D11 | llm-wiki-svc `auth/client.py` vs design v1.1 item 4 | Server-side calls pass the browser IP | `logout()` sends Basic but **no** `client_ip`, so all llm-wiki logouts count against the llm-wiki server's own IP in the SSO `refresh` throttle (60/min shared with refresh). Low impact; worth passing `client_ip` there too |
+| D11 (fix planned with the sso-client migration) | llm-wiki-svc `auth/client.py` vs design v1.1 item 4 | Server-side calls pass the browser IP | `logout()` sends Basic but **no** `client_ip`, so all llm-wiki logouts count against the llm-wiki server's own IP in the SSO `refresh` throttle (60/min shared with refresh). Low impact; worth passing `client_ip` there too |
 | D12 (fixed v1.2a) | `sso/admin.py` docstring | "read-only revocation markers" | `UserTokenRevocationAdmin` has no read-only override; rows can be added and edited in the admin (useful as a manual revoke, but the docstring is wrong) |

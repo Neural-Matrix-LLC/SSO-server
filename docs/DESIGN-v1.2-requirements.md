@@ -1,8 +1,8 @@
 # SSO-server design v1.2: company-wide auth server requirements
 
 Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). **v1.2a is implemented** on
-branch `feat/v1.2a` (see §10 for the as-built notes and the decisions taken during implementation); v1.2b and
-v1.4 are design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
+branch `feat/v1.2a` (see §10 for the as-built notes and the decisions taken during implementation); **v1.2b is
+implemented** on branch `feat/v1.2b` (§11; llm-wiki-svc migration still open); v1.4 is design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the as-built system and [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
 for the developer manual.
 
@@ -18,6 +18,7 @@ for the developer manual.
 8. [Phasing plan](#8-phasing-plan)
 9. [Decisions (2026-10-13)](#9-decisions-2026-10-13)
 10. [v1.2a as built](#10-v12a-as-built-implementation-notes-and-decisions)
+11. [v1.2b as built](#11-v12b-as-built-implementation-notes-and-decisions)
 
 The service-side Python library is designed in [SSO-CLIENT-LIBRARY-DESIGN.md](SSO-CLIENT-LIBRARY-DESIGN.md).
 
@@ -33,9 +34,9 @@ document), **future** (agreed later phase).
 | 1a | REST API | implemented | JSON-only DRF views, `ssoproject/urls.py`, `sso/views.py`; reference in ARCHITECTURE §8 |
 | 1b | SSO informs about token expiry/revocation | new (services) / future (clients) | §6: signed webhooks to registered services (v1.4). Client push (SSE/WebSocket) moved to [TODOS.md](../TODOS.md); clients learn of expiry by rejection |
 | 2a-1 | Client logs in to the SSO and gets a token | implemented | `LoginView` (`sso/views.py`), `issue_token_pair` (`sso/tokens.py`) |
-| 2a-2 | SSO embeds the client IP into the verification | new | §4 (`cip` = HMAC of the exact IP). Today the IP is only used for throttling/logging (`sso/delegation.py`, `sso/throttles.py`) |
-| 2a-3 | Service verifies the token and gets the permission list from the SSO | gap | `/api/v1/auth/introspect` exists (`IntrospectView`); v1.2b adds the observed `ip`, `ip_match` and session revocation (§4.4). Local JWKS check stays optional for signature/`exp` |
-| 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | new | §4, `SSO_IP_BINDING_MODE = NOIP / WARNING / ENFORCE` |
+| 2a-2 | SSO embeds the client IP into the verification | implemented (v1.2b) | §4 (`cip` = HMAC of the exact IP). Today the IP is only used for throttling/logging (`sso/delegation.py`, `sso/throttles.py`) |
+| 2a-3 | Service verifies the token and gets the permission list from the SSO | implemented (v1.2b) | `/api/v1/auth/introspect` exists (`IntrospectView`); v1.2b adds the observed `ip`, `ip_match` and session revocation (§4.4). Local JWKS check stays optional for signature/`exp` |
+| 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | implemented (v1.2b) | §4, `SSO_IP_BINDING_MODE = NOIP / WARNING / ENFORCE` |
 | 2b-1 | SSO sends an Expire message to client and services | new (services, v1.4) | §6 webhooks; clients: rejection only (push in TODOS) |
 | 2b-2 | Requests with an expired token are rejected | implemented | `exp` checked with 30 s leeway (`sso/tokens.py`, verifier step 4); 401 `token_invalid` on the SSO |
 | 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Decision: **one token / one `aud` for all services** (kept). v1.2a: `ServiceClient.app_codename` links a service to its permission (`register_service`). §2, §3 |
@@ -375,7 +376,7 @@ Taking the leftmost entry blindly, or trusting the header from any peer, lets an
 
 | Side | Setting today | Recommendation |
 |---|---|---|
-| SSO-server | DRF `NUM_PROXIES=1` (count of hops behind our nginx) | **Decided (2026-10-13), v1.2b:** move to `SSO_TRUSTED_PROXIES` (CIDR list) using the same algorithm as the library, so SSO and services cannot disagree. `SSO_NUM_PROXIES` stays as a deprecated fallback (used only when `SSO_TRUSTED_PROXIES` is unset, with a deprecation warning). Not implemented in v1.2a. |
+| SSO-server | DRF `NUM_PROXIES=1` (count of hops behind our nginx) | **Decided (2026-10-13), v1.2b:** move to `SSO_TRUSTED_PROXIES` (CIDR list) using the same algorithm as the library, so SSO and services cannot disagree. `SSO_NUM_PROXIES` stays as a deprecated fallback (used only when `SSO_TRUSTED_PROXIES` is unset, with a deprecation warning). Not implemented in v1.2a; **implemented in v1.2b** (§11). |
 | llm-wiki-svc | `TRUSTED_PROXY_IPS` | Replace its own code with `sso_client.get_client_ip` (v1.2b). |
 | Other services | — | `SSO_TRUSTED_PROXIES` via `sso_client`. |
 
@@ -534,7 +535,7 @@ change passwords in myFinance.
 |---|---|
 | current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
 | v1.2a (**implemented**, §10) | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
-| v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
+| v1.2b (**implemented**, §11; llm-wiki-svc migration open) | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
 | v1.3a (**new**, updated 2026-10-14 round 2) | SSO admin REST API + audit log + step-up reauth (`POST /api/v1/admin/reauth`, `X-SSO-Reauth`), bulk permission import from each app's `sso_permissions.py`, service tokens (client credentials, no IP binding) + on-behalf-of, **device clients** for the FUND Local Gateway (`POST /api/v1/devices`, `private_key_jwt`, revoked on suspend), inactive-users feed ([ecosystem design](ECOSYSTEM-INTEGRATION.md) §2, §4.1, §5, §7) |
 | v1.3b (FUND repo) | `AUTH_PROVIDER=legacy\|both\|sso`; agents on `sso-client` with one ServiceClient per service (confirmed); llm-wiki behind configurable `/proxy/llmwiki/` |
 | v1.3c (FUND repo) | Admin UI `/admin` (users, permissions, services, devices, permission import, step-up, interim suspend calls); Django admin stays break-glass |
@@ -630,3 +631,61 @@ keeps working against the migrated schema (rollback-safe).
 ended by a plain logout revoke the session (today: yes, harmless); retention of `sso_revokedsession` rows (rows
 are only useful until the session's last refresh token expires, ≤ `SSO_REFRESH_TTL_DAYS`; no prune command yet);
 whether `revoke_inactive_users` should be scheduled in the deployment.
+
+## 11. v1.2b as built (implementation notes and decisions)
+
+Branch `feat/v1.2b` (off `docs/ecosystem` @ `75b44ea`, which includes v1.2a). Where this section is more specific
+than §4 it records how the design was implemented. Contract for clients: [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
+§3.3, §4, §5; operator view: [ARCHITECTURE.md](ARCHITECTURE.md) §8, §10.
+
+**Client IP (§4.5, decision 17).** `sso/clientip.py`: socket peer `REMOTE_ADDR`; `X-Forwarded-For` only when the
+peer is in `SSO_TRUSTED_PROXIES` (IPs/CIDRs, `/0` refused at start), walked right to left exactly as §4.5.2.
+Normalisation per §4.5.4 (port, brackets, quotes and zone id stripped; `::ffff:a.b.c.d` → `a.b.c.d`; IPv6
+compressed; `::ffff:` CIDRs in the trusted list are mapped to IPv4 too). `SSO_NUM_PROXIES` is the deprecated
+fallback, used only while `SSO_TRUSTED_PROXIES` is empty, with system-check warning `sso.W002` (shown by
+`manage.py check` / at start, not on every request). The delegated `client_ip` of a ServiceClient is normalised
+the same way (so `1.2.3.4:5678` is now accepted as `1.2.3.4`; a value that does not normalise is still 400).
+The library carries the same algorithm; `sso/tests/test_clientip_parity.py` checks both give identical results.
+
+**Binding (§4.2).** `sso/ipbinding.py`. `SSO_IP_BINDING_MODE` (`NOIP` default; other values fatal at start).
+`SSO_IP_BINDING_KEY` defaults to `HMAC-SHA256(SSO_SECRET_KEY, "sso-ip-binding-v1")`. `cip` is written into the
+refresh token before it is stored and copied to the access token. Login binds the client IP (the delegated
+browser IP for a BFF). Refresh: mismatch (incl. no IP) in `WARNING` is logged (`sso.auth` `ip_mismatch`, with
+`where`, `mode`, `user_id`, `ip`) and allowed; in `ENFORCE` the session is revoked (`reason=ip_mismatch`) and the
+answer is 401 `token_invalid`. **No rebind**: the new pair keeps the session's original `cip`, also in `WARNING`.
+A token without `cip` (issued under `NOIP`) is unbound (`ip_match: null`) until refreshed; its first refresh in
+`WARNING`/`ENFORCE` binds the refreshing IP. Switching back to `NOIP` drops `cip` on the next refresh. Logout does
+not check the binding (it only ends the session). `/me` does not check it either (it has no service-observed IP;
+it is the user's own call).
+
+**Introspect (§4.4).** Request `{"token", "ip"?, "require"?}`; `require` is a string or a list (≤ 50), `allowed` is
+true only if all are held. Response adds `sid`, `ip_binding`, `ip_match`; field names follow §4.4 (`perms`, `sub`,
+`username`…; the library maps them to `CheckResult.permissions` / `.user`). An unparseable `ip` is treated as no
+IP (a mismatch for a bound token), not as 400. `ENFORCE` mismatch: `{"active": false}` and the session is
+revoked. Throttle scope `introspect`, keyed by the authenticated ServiceClient (`SSO_THROTTLE_INTROSPECT`,
+default `6000/min`); requests without Basic auth are not throttled there and get 401 as before.
+
+**Service clients are never bound** (ECOSYSTEM-INTEGRATION §4.1). In v1.2b the only tokens are user tokens;
+a ServiceClient authenticates with Basic and has no token to bind. Service tokens (`typ=service`, v1.3a) must be
+issued without `cip`; introspect already returns `ip_match: null` for any token without `cip`.
+
+**Revoked sessions.** `is_session_revoked` reads the shared cache (Redis in production; key `revoked_sid:<sid>`)
+first: "revoked" is cached for refresh lifetime + 1 day, "not revoked" for `SSO_REVOKED_SESSION_CACHE_SECONDS`
+(default 10 s, `0` = off). `revoke_session` writes "revoked" at once (before the transaction commits; a rollback
+leaves a harmless stale "revoked"), so across workers a revocation is seen immediately except by a request whose
+negative entry was written in the same instant (bounded by the 10 s). Cache errors fall back to the DB. The sweep
+`revoke_inactive_users` now also deletes `sso_revokedsession` rows older than `SSO_REFRESH_TTL` + 1 day (every
+refresh token of such a session has expired); `--dry-run` reports the count. No migration was needed in v1.2b.
+
+**Library.** `clients/python/` (`sso-client` 0.1.0, hatchling, `pip install "...#subdirectory=clients/python"`
+verified from a local git URL). Implemented: `get_client_ip` / `normalize_ip` / `parse_trusted` /
+`peer_from_socket`, `SSOClient` and `AsyncSSOClient.check(token, client_ip, require)`, active-only 30 s cache
+(never past `exp`, key `sha256(token):ip`; `require` checked locally against the cached permissions, so it is not
+sent to the SSO), fail closed (`SSOUnavailable` → 503 + `Retry-After: 5`), retries for connect errors / timeouts /
+502-504, Django middleware + `require_permission`, FastAPI `SSO` dependencies, Flask extension, `FakeSSO`
+(httpx `MockTransport`) with pytest fixtures. Not in 0.1.0: local JWKS pre-check, circuit breaker, `cached` fail
+mode, generic WSGI/ASGI middleware classes, `Retry-After` handling for 429 (429 fails closed at once), webhook
+receiver (v1.4).
+
+**Open.** llm-wiki-svc migration to `sso-client` (pass `client_ip` on logout too, D11). Rollout: run `WARNING`
+first and check the `ip_mismatch` rate and the derived IPs (Docker userland-proxy, §4.5.5) before `ENFORCE`.
