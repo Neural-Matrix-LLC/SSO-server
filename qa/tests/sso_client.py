@@ -6,6 +6,7 @@ when the test server is plain http, and so tests can inspect every cookie attrib
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
@@ -126,4 +127,8 @@ class SSOClient:
         return self.get(ME, bearer=access_token)
 
     def introspect(self, token, auth):
-        return self.post(INTROSPECT, json={"token": token}, auth=auth)
+        body = {"token": token}
+        ip = os.environ.get("SSO_TEST_INTROSPECT_IP")  # v1.2b ENFORCE regression: the IP the logins came from
+        if ip:
+            body["ip"] = ip
+        return self.post(INTROSPECT, json=body, auth=auth)

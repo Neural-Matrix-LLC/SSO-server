@@ -454,6 +454,68 @@ ADM-07/07b, CMD-03, MIG-01; §3.3 onboarding → CMD-01..06; §4.2 "Session"/`si
 §10 migration → MIG-01/02; v1.1 regression → V12A-REG. Not testable in v1.2a: webhooks (`user.suspended` event, v1.4),
 IP binding / `cip` / introspect `ip_match` (v1.2b), Redis revoked-session set (deferred to v1.2b).
 
+### 3.15 v1.2b (branch feat/v1.2b: 6fdfe7f server, 605873c sso-client, a368f1f docs, 345eed7 / c4a3fde / b7570cf; spec `docs/DESIGN-v1.2-requirements.md` §4.2, §4.4, §4.5, §11; `docs/SSO-CLIENT-LIBRARY-DESIGN.md`)
+Server tests: `qa/tests/test_v12b.py`. Each case starts its own gunicorn(s) on 8061-8068 against the round's
+throw-away DB with the setting under test, and stops it by PID. The socket peer is always 127.0.0.1, so the user
+IP is set with `X-Forwarded-For` through `SSO_TRUSTED_PROXIES=127.0.0.1/32`, or with `client_ip` for BFF cases.
+Library tests: `qa/tests_client/`, run from a fresh venv that installed the library with
+`pip install 'sso-client[...] @ git+file://…#subdirectory=clients/python'`. It is a separate directory because
+`qa/tests/sso_client.py` would shadow the import name. Live SSOs run on 8065 (ENFORCE) and 8066 (NOIP); stub/closed
+ports are 8067/8068.
+Runners:
+- `harness/run_v12b_round.sh VENV TAG MODE`: full v1.1 + v1.2a + v1.2b suite with the main servers in MODE.
+- `run_v12b_only.sh`
+- `run_v12b_client.sh`
+- `run_v12b_e2e.sh`: `qa/e2e/drive_e2e.py` with FastAPI/uvicorn, Flask and Django runserver sample services.
+
+| ID | Steps | Expected | Req | Auto |
+|---|---|---|---|---|
+| V12B-BIND-01 | NOIP: login (XFF 203.0.113.7); introspect with/without ip | no `cip` in either token; `ip_binding:"NOIP"`, `ip_match:null`; ip optional | §4.2 tbl, §4.4 | A |
+| V12B-BIND-02 | WARNING / ENFORCE login | `cip` = b64url(HMAC-SHA256(HMAC(SECRET,"sso-ip-binding-v1"), ip)) on access + refresh; ≠ bare SHA-256; no raw IP in either payload; different IP → different cip | §4.2 (2), §11 | A |
+| V12B-BIND-03 | ENFORCE: two sessions of one user; introspect with the bound IP, then one address off | match → active, `ip_match:true`, `sid`; mismatch → `{"active":false}`, `RevokedSession` row, the session stays dead (also with the right IP; refresh 401 `token_invalid`); the other session is unaffected; `ip_mismatch` log line | §4.2 tbl, §11 | A |
+| V12B-BIND-04 | ENFORCE introspect with ip missing / null / "" / garbage / CIDR / 999.1.1.1 | inactive + session revoked (missing = mismatch), never 400 | §4.4, §4.5.4, §11 | A |
+| V12B-BIND-05 | login IP vs introspect IP spelled differently (upper case, zero runs, `[v6]:port`, zone id, `::ffff:` both ways, `v4:port`) | match | §4.5.4 | A |
+| V12B-BIND-06 | ENFORCE refresh from the same IP, then from another IP | same → 200, same cip (no rebind); other → 401 `token_invalid`, session revoked, `where:refresh` log | §4.2 (4), §11 | A |
+| V12B-BIND-07 | WARNING: introspect from another IP / without ip; refresh from another IP | active, `ip_match:false`; refresh 200 with the ORIGINAL cip; nothing revoked; `ip_mismatch` lines (`where`, `mode`, `user_id`, `ip`, `client_id`) | §4.2 tbl, §11 | A |
+| V12B-BIND-08 | NOIP token introspected on ENFORCE; refreshed on ENFORCE; refreshed again on NOIP | unbound (`ip_match:null`); first refresh binds the refreshing IP; NOIP drops cip | §11 | A |
+| V12B-BIND-09 | ENFORCE: `/me` and logout from another IP | 200, no revocation (not checked) | §11 | A |
+| V12B-BIND-10 | `SSO_IP_BINDING_MODE=STRICT` / `enforce` | fatal at start / accepted (case-insensitive) | §11 | A |
+| V12B-BIND-11 | BFF login (Basic + client_ip); ServiceClient credentials at /login | cip = HMAC(delegated user IP), never the service's address; a ServiceClient gets no token | §11 "never bound" | A |
+| V12B-BFF-01 | client_ip `v4:port`, `[v6]:port`, `::ffff:`, padded | normalised and bound; login log `ip` normalised; BFF refresh with the same client_ip 200 | §4.5.3, §11 | A |
+| V12B-BFF-02 | client_ip without Basic auth | ignored (the trusted socket/XFF IP is bound and checked) | §4.5.3 | A |
+| V12B-BFF-03 | Basic + garbage client_ip; inactive ServiceClient + client_ip; BFF refresh with a moved browser IP | 400 `invalid_request`; 401 `invalid_client`; 401 `token_invalid` | §4.5.3, §11 | A |
+| V12B-INTRO-01 | `require` as string / list, held / missing / bare codename; grant a perm while the token lives | `allowed` true only if all held; absent without `require`; perms are current DB values | §4.4, §11 | A |
+| V12B-INTRO-02 | `require` = [], [""], [1], {}, 5, 51 items, 256 chars, null | 400 `invalid_request` | §11 (≤ 50) | A |
+| V12B-INTRO-03 | `require` with an invalid token | `{"active":false}` only | §4.4 | A |
+| V12B-INTRO-04 | `SSO_THROTTLE_INTROSPECT=5/min`; 7 calls; other ServiceClient; no Basic / wrong secret | 6th+ 429 with Retry-After; the other client is unaffected; unauthenticated 401, never 429 | §4.4, §11 | A |
+| V12B-INTRO-05 | introspect `ip` = 129+ chars, int, list, object, bool | treated as no IP (`ip_match:false` in WARNING), not 400 | §11 | A |
+| V12B-PROXY-01 | 12 rows: trusted lists × XFF (right-to-left, all trusted → leftmost, malformed → last good, port/brackets, `::ffff:` CIDR, mixed v4/v6 lists, untrusted peer) | login log `ip` = expected | §4.5.2, §11 | A |
+| V12B-PROXY-02 | ENFORCE without trusted proxies, spoofed XFF | bound to the socket peer | §4.5.2 | A |
+| V12B-PROXY-03 | `SSO_TRUSTED_PROXIES` = `0.0.0.0/0`, `::/0`, list containing /0, junk, /33 | fatal at start | §4.5.2, §11 | A |
+| V12B-PROXY-04 | `SSO_NUM_PROXIES=1` alone / 0 / together with TRUSTED | W002 / none / none; NUM_PROXIES fallback still works (rightmost XFF); with both set TRUSTED wins | §4.5.2 tbl, §11 | A |
+| V12B-HDR-01 | `SSO_CLIENT_IP_HEADER=cf-connecting-ip`, 10 rows: header only, header + XFF (header wins), absent / garbage / empty (→ XFF), chain walk, all-trusted, `[v6]:port`, `::ffff:`, untrusted peer | login log `ip` = expected; untrusted peer → socket IP (header and XFF ignored) | §11 follow-up (345eed7) | A |
+| V12B-HDR-02 | header without TRUSTED_PROXIES; header name `X-Forwarded-For` | fatal at start; plain XFF walk | §11 follow-up | A |
+| V12B-HDR-03 | ENFORCE + `SSO_CLIENT_IP_HEADER=x-real-ip`: login, refresh with the same header IP, then a different header IP (XFF = the old IP) | cip = HMAC(header IP); 200; 401 (the header decides, not XFF) | §4.2, §11 | A |
+| V12B-LIB-IP-07/08 | 12 header rows through the library and the server; `client_ip_header` without trusted proxies | identical; SSOConfigError | lib §3 follow-up | A |
+| V12B-LIB-ADP-06 | adapters with `client_ip_header` from a trusted / untrusted peer | header IP used / ignored | lib §4 | A |
+| V12B-CACHE-01 | ENFORCE, 2 gunicorn workers, shared cache: prime "not revoked", revoke by mismatch, 20 fresh connections | all inactive at once | §11 | A |
+| V12B-CACHE-02 | two servers with SEPARATE caches: B primes a negative entry, A revokes | B sees it within ≤ 10 s (+0.5 s) | §11 (bounded by 10 s) | A |
+| V12B-CACHE-03 | `SSO_REVOKED_SESSION_CACHE_SECONDS=0`, separate caches | immediate | §11 | A |
+| V12B-CACHE-04 | RevokedSession rows: 2 old (> TTL+1 d), 1 edge (TTL+23 h), 1 new; sweep `--dry-run`, real | dry-run counts, deletes nothing; real run deletes exactly the 2 old rows | §11 | A |
+| V12B-LIB-IP-01/02/03 | 39 (peer, XFF instances, trusted) rows + 22 normalize inputs through `sso_client` AND server `sso/clientip.py` | identical results; spot-checked expected values | §4.5, lib §3, §11 | A |
+| V12B-LIB-IP-04/05/06 | parse_trusted rejects /0, junk; 500 random spoof rows; peer_from_socket TCP / AF_UNIX | ValueError; never changes the result; `127.0.0.1` / None | lib §3 | A |
+| V12B-LIB-CHK-01..05 | SSOClient / AsyncSSOClient against the live SSO: bound active + require, mismatch, missing IP, NOIP, no token, garbage, wrong service secret | CheckResult fields; PermissionDenied(missing); TokenInactive; NotAuthenticated; SSOProtocolError | lib §5 | A |
+| V12B-LIB-CACHE-01..05 | counting transport, fake clock | active cached (require checked locally, `::ffff:` same key); inactive never cached; TTL capped at 30 (cache_ttl=300 → 30), 0 = off; never past exp; other IP = separate key; cached legit entry stays ≤ 30 s after revocation (documented) | lib §6, dec. 15 | A |
+| V12B-LIB-FAIL-01..04 | stub returning 500/502/503/504/429/400/non-JSON; closed port; 3 s stall with timeout 0.5; logs at DEBUG | 5xx/429 → SSOUnavailable (retries only 502-504); 4xx/bad JSON → SSOProtocolError; refused → 2 retries then unavailable; timeout bounded; no token/secret/Authorization in logs | lib §6, §10 | A |
+| V12B-LIB-CFG-01/02 | invalid config; from_env with secret file | SSOConfigError; https required unless allow_http; TTL cap; secret not in repr | lib §9 | A |
+| V12B-LIB-ADP-01..04 | Django / FastAPI / Flask in-process apps vs the live SSO | 401 + `WWW-Authenticate: Bearer`; 200 with `client_ip`; 403 `missing`; 401 `token_inactive` (mismatch kills the session); trusted-proxy XFF honoured, spoofed XFF from an untrusted peer not; SSO down → 503 `Retry-After: 5` | lib §4, §7 | A |
+| V12B-LIB-ADP-05 | Django `request.sso` (lazy) without the decorator, no token | records the status (V12B-02) | lib §4 | A |
+| V12B-LIB-PIP-01 | fresh Py3.13 venv: `pip install 'sso-client[fastapi,flask,django] @ git+file://…@a368f1f#subdirectory=clients/python'` | installs 0.1.0; library's own tests pass | lib §12, §11 | A (harness) |
+| V12B-E2E-01 | `run_v12b_e2e.sh`: live SSO (ENFORCE) + 3 real sample services; real login; bound IP / other IP / missing perm / no token; legit refresh after the replay; SSO killed | 200 / 401 + session revoked / 403 / 401; refresh 401; 503 + Retry-After for uncached tokens; cached ≤ 30 s keeps 200 | §4.4 seq., lib §14 | A |
+| V12B-REG-OFF / ON | full v1.1 + v1.2a regression with the main servers in NOIP / ENFORCE | NOIP: all pass; ENFORCE: only cases that introspect without `ip` (missing ip = mismatch, by spec) may change | §11 | A |
+| V12B-MYSQL-01 | developer suite on MySQL 8.4 (compose test image, shared-netns workaround) | 0 failures; MySQL-only tests run | — | A |
+| V12B-REDIS-01 | real Redis 7 as `SSO_CACHE_URL`, gunicorn with 2+ workers (and 2 servers): CACHE-01/02 + introspect/login throttle shared across workers | revocation visible at once across workers/servers (shared cache); throttle counts are global | §11 | A |
+
 ---
 
 ## 4. Automation approach
@@ -501,7 +563,8 @@ IP binding / `cip` / introspect `ip_match` (v1.2b), Redis revoked-session set (d
 | Deployment / docs | 18 | 0 | 9 | 27 |
 | Key configuration (§3.13) | 22 | 0 | 0 | 22 |
 | v1.2a (§3.14) | 40 | 0 | 0 (+1 blocked: REUSE-08) | 41 |
-| **Total** | **228** | **2** | **23** (+1 blocked) | **254** |
+| v1.2b (§3.15) | 45 | 0 | 0 | 45 |
+| **Total** | **273** | **2** | **23** (+1 blocked) | **299** |
 
 pytest collects 269 items @ d784f10 (was 211 before the deploy and key cases) because of parametrization (`pytest --collect-only` passes with no errors).
 
@@ -546,6 +609,30 @@ pytest collects 269 items @ d784f10 (was 211 before the deploy and key cases) be
 | §11 access rejected at /refresh; refresh rejected by §8.2 | REFRESH-06, SEC-14 |
 | §11 JWKS kid matches; expired/wrong aud/iss | JWKS-05, SEC-08/09/10 |
 | §11 cookie HttpOnly/Secure + Origin | SEC-20..25 |
+
+### 5.4 v1.2b spec → tests
+| Spec item | Tests |
+|---|---|
+| §4.2 (1) trusted IP at login, exact IP, normalisation | BIND-03, BIND-05, PROXY-01, BFF-01 |
+| §4.2 (2) `cip` = keyed HMAC, no raw IP in token | BIND-02 |
+| §4.2 (3) service check via introspect `ip` | BIND-03, BIND-04, LIB-CHK-01/02, E2E-01 |
+| §4.2 (4) refresh: no rebind; ENFORCE mismatch ends session | BIND-06, BIND-07, BFF-03, E2E-01 |
+| §4.2 (5) modes table NOIP / WARNING / ENFORCE | BIND-01, BIND-03, BIND-07, BIND-10, REG-OFF/ON |
+| §4.2 "Session": revoke the sid family, other sessions fine | BIND-03, CACHE-01..03 |
+| §4.4 request/response fields, `ip` required when bound | BIND-01, BIND-03, BIND-04, INTRO-05 |
+| §4.4 `require` / `allowed`; perms current | INTRO-01..03 |
+| §4.4 caching rules (active only, ≤ 30 s, ≤ exp); fail closed 503 | LIB-CACHE-01..05, LIB-FAIL-01..03, LIB-ADP-04, E2E-01 |
+| §4.4 / §11 introspect throttle per ServiceClient | INTRO-04, REDIS-01 |
+| §4.5.1-4.5.2 socket peer root of trust, right-to-left walk, CIDRs, /0 refused | PROXY-01..03, LIB-IP-01..05, LIB-ADP-03 |
+| §4.5.2 tbl / §11 NUM_PROXIES deprecated, W002 | PROXY-04 |
+| §4.5.3 delegated client_ip only from an authenticated active ServiceClient | BFF-01..03, BIND-11 |
+| §4.5.4 normalisation (ports, brackets, zone, `::ffff:`, unparseable = no IP) | BIND-04/05, BFF-01, LIB-IP-02, INTRO-05 |
+| §11 Service clients never bound | BIND-11 |
+| §11 follow-up `SSO_CLIENT_IP_HEADER` (server + library) | HDR-01..03, LIB-IP-07/08, LIB-ADP-06 |
+| §11 revoked-session cache (10 s negative, immediate positive) and pruning | CACHE-01..04, REDIS-01 |
+| §11 logout / `/me` not binding-checked | BIND-09 |
+| §11 library: parity, adapters, cache, fail closed, require_permission, pip from git | LIB-*, LIB-PIP-01, E2E-01 |
+| Regression v1.1 + v1.2a with binding off / on | REG-OFF, REG-ON, MYSQL-01 |
 
 ### 5.3 Gaps
 1. R-01b: myFinance `settings.py` isn't available to QA (Q-18).
