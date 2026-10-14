@@ -91,6 +91,48 @@ def test_user_form_edit_unticking_active_revokes(admin_client, base, api, user):
     assert not user.is_active and UserTokenRevocation.objects.filter(user=user).exists()
 
 
+
+def test_admin_cannot_untick_own_is_active_on_change_form(admin_client, base, admin_user):
+    """V12A-01: the change-form path is guarded too; error on is_active, nothing saved."""
+    data = {"username": admin_user.username, "email": admin_user.email, "first_name": "Changed", "last_name": "",
+            "is_staff": "on", "is_superuser": "on",
+            "date_joined_0": "2026-01-01", "date_joined_1": "00:00:00", "initial-date_joined_0": "2026-01-01",
+            "initial-date_joined_1": "00:00:00"}
+    r = admin_client.post(base + f"auth/user/{admin_user.pk}/change/", data)  # is_active omitted = unticked
+    assert r.status_code == 200 and b"You cannot suspend yourself." in r.content
+    assert "is_active" in r.context["adminform"].form.errors
+    admin_user.refresh_from_db()
+    assert admin_user.is_active and admin_user.first_name != "Changed"
+    r = admin_client.post(base + f"auth/user/{admin_user.pk}/change/", {**data, "is_active": "on"})
+    assert r.status_code == 302
+    admin_user.refresh_from_db()
+    assert admin_user.is_active and admin_user.first_name == "Changed"
+
+
+def test_changelist_formset_refuses_self_suspend(rf, admin_user, make_user):
+    """V12A-01: guard for is_active if it is ever list_editable."""
+    from django.contrib import admin as dj_admin
+
+    other = make_user(username="other", email="other@example.org")
+    ma = dj_admin.site._registry[User]
+    ma.list_editable = ["is_active"]
+    try:
+        request = rf.post("/")
+        request.user = admin_user
+        FS = ma.get_changelist_formset(request)
+        qs = User.objects.filter(pk__in=[admin_user.pk, other.pk]).order_by("pk")
+        data = {"form-TOTAL_FORMS": "2", "form-INITIAL_FORMS": "2",
+                "form-0-id": str(qs[0].pk), "form-1-id": str(qs[1].pk)}  # both unticked
+        fs = FS(data, queryset=qs)
+        assert not fs.is_valid()
+        errs = {f.instance.pk: f.errors for f in fs.forms}
+        assert "is_active" in errs[admin_user.pk] and not errs[other.pk]
+    finally:
+        ma.list_editable = ()
+    admin_user.refresh_from_db()
+    assert admin_user.is_active
+
+
 # --------------------------------------------------------------------------- grant / revoke
 def test_grant_and_revoke_app_access_to_users(admin_client, base, user, make_user, app2, caplog):
     caplog.set_level(logging.INFO, logger="sso.admin")
@@ -214,6 +256,10 @@ def test_service_client_admin_validation(admin_client, base):
     assert r.status_code == 200 and b"application.nope does not exist" in r.content
     r = admin_client.post(base + "sso/serviceclient/add/", {**data, "notify_url": "http://insecure.example.test/x"})
     assert r.status_code == 200 and not ServiceClient.objects.exists()
+    for schemeless in ("reporting.example.test/hook", "//reporting.example.test/hook"):
+        r = admin_client.post(base + "sso/serviceclient/add/", {**data, "notify_url": schemeless})
+        assert r.status_code == 200 and "notify_url" in r.context["adminform"].form.errors, schemeless
+        assert not ServiceClient.objects.exists()
     r = admin_client.post(base + "sso/serviceclient/add/", data, follow=True)
     c = ServiceClient.objects.get()
     assert c.app_codename is None and c.notify_url is None

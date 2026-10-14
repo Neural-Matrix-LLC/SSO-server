@@ -25,8 +25,20 @@ from .models import RevokedSession, ServiceClient, UserTokenRevocation
 
 
 # --------------------------------------------------------------------------- ServiceClient
+class HttpsURLFormField(forms.URLField):
+    """URLField that refuses schemeless input instead of guessing one (Django 4.2 assumes http, 5.x
+    assume_scheme): the same rule as the model / ``register_service`` (``URLValidator(schemes=["https"])``)."""
+
+    def to_python(self, value):
+        value = (value or "").strip()
+        if value and "://" not in value:
+            raise ValidationError("Enter a full URL including the scheme, e.g. https://example.com/hook.",
+                                  code="invalid")
+        return super().to_python(value)
+
+
 class ServiceClientForm(forms.ModelForm):
-    notify_url = forms.URLField(
+    notify_url = HttpsURLFormField(
         required=False, max_length=500, label="Notify URL",
         help_text="HTTPS webhook endpoint (v1.4; stored only, nothing is sent yet).",
         **({"assume_scheme": "https"} if django.VERSION >= (5, 0) else {}))
@@ -167,6 +179,37 @@ def _suspend(modeladmin, request, queryset, *, active: bool):
 
 class SSOUserAdmin(UserAdmin):
     actions = ["suspend_users", "unsuspend_users", "grant_app_access", "revoke_app_access"]
+
+    def get_form(self, request, obj=None, **kwargs):
+        """V12A-01: an admin cannot untick is_active on their OWN change form (the Suspend action has the
+        same guard in ``_suspend``). The error lands on is_active and nothing is saved."""
+        form = super().get_form(request, obj, **kwargs)
+        if obj is None or obj.pk != request.user.pk or "is_active" not in form.base_fields:
+            return form
+
+        class SelfGuardForm(form):
+            def clean_is_active(self):
+                active = self.cleaned_data.get("is_active")
+                if not active:
+                    raise ValidationError("You cannot suspend yourself.", code="self_suspend")
+                return active
+
+        return SelfGuardForm
+
+    def get_changelist_formset(self, request, **kwargs):
+        """V12A-01: same guard if is_active is ever made list_editable."""
+        formset = super().get_changelist_formset(request, **kwargs)
+
+        class SelfGuardFormSet(formset):
+            def clean(self):
+                super().clean()
+                for f in self.forms:
+                    if (f.instance.pk == request.user.pk and "is_active" in f.cleaned_data
+                            and not f.cleaned_data["is_active"]):
+                        f.add_error("is_active", ValidationError("You cannot suspend yourself.",
+                                                                 code="self_suspend"))
+
+        return SelfGuardFormSet
 
     @admin.action(description="Suspend selected users (revokes all their tokens)", permissions=["change"])
     def suspend_users(self, request, queryset):
