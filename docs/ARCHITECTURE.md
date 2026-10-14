@@ -42,12 +42,14 @@ FUND-Financial-Research is the core product: a React SPA plus a group of Python 
 research [Repo]. The SSO server replaces FUND's own login (`fund-auth`, HS256 JWT) and becomes the one
 authentication server for FUND, llm-wiki-svc and Smart_Gateway_MCP; myFinance is phasing out. The day-to-day
 admin page moves into the FUND frontend on top of a new SSO admin REST API; Django admin stays as break-glass.
+FUND users are already in `dcWebUsers` (`fund-auth` shares it), each application declares its permissions in its
+`config.py` for import, and FUND switches provider with `AUTH_PROVIDER` in its root `.env` (decisions 2026-10-14).
 
 ```mermaid
 flowchart LR
   subgraph Internet["Untrusted: internet and user machines"]
     BR["Browser: FUND SPA (React 18 + Vite, app/)"]
-    MCPC["MCP / LLM clients: Claude Desktop, Claude Code, agents"]
+    MCPC["MCP / AI agents and scripts - registered service clients"]
   end
 
   subgraph FUNDH["FUND host - compose network fund-network [Repo]"]
@@ -58,12 +60,12 @@ flowchart LR
       STO["storage :8006"]
       AT["auto-trade :8009 - SGMCP MCP client"]
     end
-    FAUTH["fund-auth :8011 Django - legacy login, retired after cutover"]
+    FAUTH["fund-auth :8011 Django - legacy login on dcWebUsers, retired after cutover"]
     ADMUI["FUND /admin UI [Proposal]"]
   end
 
   subgraph GWH["Gateway host - outside FUND compose [Repo]"]
-    GW["Smart_Gateway_MCP :8080 - /mcp Streamable HTTP, /ui operator login"]
+    GW["Smart_Gateway_MCP :8080 - /mcp, /ui - host TBD"]
     SGDB[("MySQL sgmcp - strategies, accounts, positions, orders")]
     subgraph BROK["Broker connectors - credentials stay here"]
       FUTU["FutuOpenD"]
@@ -73,7 +75,7 @@ flowchart LR
     end
   end
 
-  subgraph LWH["llm-wiki host [Assumption: own VPS or same host]"]
+  subgraph LWH["llm-wiki host - TBD, configurable"]
     LW["llm-wiki-svc :8000 - HTTP API, MCP tools, optional /login"]
   end
 
@@ -90,11 +92,11 @@ flowchart LR
   FNG -- "XFF, Bearer" --> ORC & RES & STO & AT
   FNG -.-> FAUTH
   ADMUI --- BR
-  MCPC -- "native login" --> SNG
-  MCPC -- "MCP + Bearer SSO token" --> GW
-  MCPC -- "MCP + Bearer" --> LW
+  MCPC -- "client credentials: service token" --> SNG
+  MCPC -- "MCP + service token, no IP binding" --> GW
+  MCPC -- "MCP + service token" --> LW
   FNG -- "/proxy/llmwiki/ [Proposal]" --> LW
-  AT -- "MCP: ServiceClient + user token + client_ip" --> GW
+  AT -- "MCP: service token + user token + browser IP" --> GW
   ORC & RES & STO & AT -- "introspect token + ip" --> SNG
   GW -- "introspect token + ip" --> SNG
   LW -- "introspect / BFF login" --> SNG
@@ -109,10 +111,11 @@ flowchart LR
 
 | Boundary | What crosses it | Control |
 |---|---|---|
-| Internet → FUND nginx / SSO nginx / SGMCP / llm-wiki | user tokens, logins | TLS; SSO tokens (RS256, 15 min); IP binding (v1.2b); only nginx-forwarded IPs trusted |
+| Internet → FUND nginx / SSO nginx | people: user login and user tokens | TLS; RS256 user tokens (15 min); **IP binding applies** (v1.2b); only nginx-forwarded IPs trusted |
+| AI agents / MCP / scripts / services → SSO, SGMCP, llm-wiki | service tokens (client credentials) | registered ServiceClient per process, granted permissions, **no IP binding**; on behalf of a user also the user token + browser IP (decision 2026-10-14) |
 | FUND nginx → FUND agents | user requests + `X-Forwarded-For` | agents trust XFF only from the nginx address (`TRUSTED_PROXY_IPS`); every agent checks the token via `sso-client` [Proposal]. Today most agent endpoints are unauthenticated [Repo] |
 | Services → SSO | introspect, BFF login, admin calls | ServiceClient Basic credentials; `client_ip` accepted only from an authenticated ServiceClient |
-| FUND → SGMCP | strategy/trading MCP calls | today one static `SGMCP_AUTH_TOKEN` [Repo]; target: ServiceClient + user token, trading permissions [Proposal] |
+| FUND → SGMCP | strategy/trading MCP calls | today one static `SGMCP_AUTH_TOKEN` [Repo]; target: auto-trade service token + user token, trading permissions; suspend stops and deletes the owner's strategies |
 | SGMCP → brokers | orders, account data | broker credentials and sessions live only on the gateway host (or the user's FUND Local Gateway, `Local_login.md`) [Repo] |
 | Admin | user / permission / service changes | FUND `/admin` → SSO admin REST API with `application.sso_admin`; Django admin = break-glass, superusers only |
 
