@@ -308,9 +308,11 @@ class IntrospectView(APIView):
         inactive = Response({"active": False}, headers={"Cache-Control": "no-store"})
         try:
             token = SSOAccessToken(ser.validated_data["token"])
-        except TokenError:
+            # a validly signed token with a malformed claim (exp as a string, non-numeric sub) is
+            # inactive, never a 500 (found by llm-wiki QA JWTV_03 through sso-client)
+            user = User.objects.select_related("sso_token_revocation").filter(pk=token.get("sub")).first()
+        except (TokenError, TypeError, ValueError, OverflowError):
             return inactive
-        user = User.objects.select_related("sso_token_revocation").filter(pk=token.get("sub")).first()
         if user is not None and not user.is_active:
             revoke_if_inactive(user, token.get("iat"))
             return inactive

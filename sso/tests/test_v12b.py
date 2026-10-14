@@ -274,3 +274,11 @@ def test_prune_in_sweep(user, settings):
     assert "pruned 1 expired" in out.getvalue()
     assert list(RevokedSession.objects.values_list("sid", flat=True)) == ["edge"]
     assert prune_revoked_sessions() == 0
+
+
+@pytest.mark.parametrize("over", [{"exp": "9999999999"}, {"sub": "not-a-number"}, {"iat": "x"}])
+def test_introspect_malformed_claims_are_inactive_not_500(api, user, service, over):
+    from .conftest import claims, sign
+
+    r = _introspect(api, sign(claims(user.pk, **over)))
+    assert r.status_code == 200 and r.json() == {"active": False}
