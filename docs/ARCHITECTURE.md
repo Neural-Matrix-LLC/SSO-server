@@ -43,7 +43,7 @@ research [Repo]. The SSO server replaces FUND's own login (`fund-auth`, HS256 JW
 authentication server for FUND, llm-wiki-svc and Smart_Gateway_MCP; myFinance is phasing out. The day-to-day
 admin page moves into the FUND frontend on top of a new SSO admin REST API; Django admin stays as break-glass.
 FUND users are already in `dcWebUsers` (`fund-auth` shares it), each application declares its permissions in its
-separate `sso_permissions.py` for import, broker logins stay on the user's PC (FUND Local Gateway, outbound link), and FUND switches provider with `AUTH_PROVIDER` in its root `.env` (decisions 2026-10-14).
+separate `sso_permissions.py` for import, strategies run in the FUND cloud while broker logins stay on the user's PC (FUND Local Gateway, pass-through, outbound link), and FUND switches provider with `AUTH_PROVIDER` in its root `.env` (decisions 2026-10-14).
 
 ```mermaid
 flowchart LR
@@ -65,15 +65,17 @@ flowchart LR
     ADMUI["FUND /admin UI [Proposal]"]
   end
 
-  subgraph GWH["User PC - FUND Local Gateway (Docker), no inbound port [Decision 2026-10-14]"]
-    LA["local-agent - device credential, outbound WSS"]
-    GW["Smart_Gateway_MCP local - /mcp, /ui on 127.0.0.1"]
-    SGDB[("MySQL sgmcp - strategies, accounts, positions, orders")]
-    subgraph BROK["Broker connectors - credentials stay here"]
+  subgraph CLD["FUND cloud - strategies [Decision 2026-10-14 round 4]"]
+    GW["Smart_Gateway_MCP - strategy runner, risk, ledgers"]
+    SGDB[("MySQL sgmcp - strategies, orders, fills - system of record")]
+    SIM["Simulator broker=sim"]
+  end
+  subgraph GWH["User PC - FUND Local Gateway (Docker), pass-through only, no inbound port"]
+    LA["local-agent forwarder - device credential, outbound WSS"]
+    subgraph BROK["Broker daemons - logins and credentials stay on the PC"]
       FUTU["FutuOpenD"]
       IBKR["IBKR CP Gateway (+ IBKR MCP companion)"]
       WB["Webull OpenAPI (+ Webull MCP companion)"]
-      SIM["Simulator broker=sim"]
     end
   end
 
@@ -95,13 +97,13 @@ flowchart LR
   FNG -.-> FAUTH
   ADMUI --- BR
   MCPC -- "client credentials: service token" --> SNG
-  MCPC -- "MCP + service token, no IP binding" --> RL
+  MCPC -- "MCP + service token, no IP binding" --> GW
   MCPC -- "MCP + service token" --> LW
   FNG -- "/proxy/llmwiki/ [Proposal]" --> LW
-  AT -- "MCP: service token + user token + browser IP" --> RL
+  AT -- "MCP: service token + user token + browser IP" --> GW
+  GW -- "broker requests" --> RL
   LA -- "outbound WSS, device token" --> FNG
   FNG --> RL
-  LA <--> GW
   LA -- "device token (private_key_jwt)" --> SNG
   ORC & RES & STO & AT -- "introspect token + ip" --> SNG
   RL -- "introspect user, service, device tokens" --> SNG
@@ -109,7 +111,8 @@ flowchart LR
   SNG --> SSO --> DCW
   SSO --> RDS
   GW --> SGDB
-  GW --> FUTU & IBKR & WB & SIM
+  GW --> SIM
+  LA --> FUTU & IBKR & WB
   FUTU & IBKR & WB --> BRKX
 ```
 
@@ -121,7 +124,7 @@ flowchart LR
 | AI agents / MCP / scripts / services → SSO, SGMCP, llm-wiki | service tokens (client credentials) | registered ServiceClient per process, granted permissions, **no IP binding**; on behalf of a user also the user token + browser IP (decision 2026-10-14) |
 | FUND nginx → FUND agents | user requests + `X-Forwarded-For` | agents trust XFF only from the nginx address (`TRUSTED_PROXY_IPS`); every agent checks the token via `sso-client` [Proposal]. Today most agent endpoints are unauthenticated [Repo] |
 | Services → SSO | introspect, BFF login, admin calls | ServiceClient Basic credentials; `client_ip` accepted only from an authenticated ServiceClient |
-| FUND ↔ user PC | strategy/trading MCP calls over the device link | today one static `SGMCP_AUTH_TOKEN` to a host gateway [Repo]; target: the FUND Local Gateway on the user's PC connects **outbound** to `gateway-relay` with a device credential (no IP binding); auto-trade calls the relay with service token + user token; suspend stops and deletes strategies and revokes devices |
+| FUND cloud ↔ user PC | broker requests from cloud strategies over the device link (pass-through; one live connection per broker account) | today one static `SGMCP_AUTH_TOKEN` to a host gateway [Repo]; target: the FUND Local Gateway on the user's PC connects **outbound** to `gateway-relay` with a device credential (no IP binding); auto-trade calls the relay with service token + user token; suspend stops and deletes strategies and revokes devices |
 | SGMCP → brokers | orders, account data | broker credentials, sessions and `/ui` live only on the user's PC [Decision 2026-10-14] |
 | Admin | user / permission / service changes | FUND `/admin` → SSO admin REST API with `application.sso_admin`; Django admin = break-glass, superusers only |
 
@@ -133,7 +136,8 @@ flowchart LR
 | FUND SPA | access token in memory; refresh token only as HttpOnly cookie on the SSO origin [Proposal] (today: HS256 JWT in `localStorage` [Repo]) | passwords after login, service secrets |
 | FUND agents | ServiceClient id/secret, research data (`./data`), `STORAGE_AGENT_SECRET` | user passwords, private keys |
 | auto-trade | ServiceClient for SGMCP + the user's token per request | broker credentials |
-| Smart_Gateway_MCP (user PC) | broker sessions/credentials, `sgmcp` ledgers, strategy `owner_sub`, device private key (local-agent) | user passwords |
+| Smart_Gateway_MCP (FUND cloud) | strategies, `sgmcp` ledgers (system of record, history never purged), `owner_sub` | broker passwords, user passwords |
+| FUND Local Gateway (user PC) | broker logins/sessions/credentials, device private key | strategies, ledgers |
 | gateway-relay (FUND) | online devices, device → broker accounts, routing | broker credentials, device private keys |
 | llm-wiki-svc | knowledge base, its ServiceClient, BFF session (optional) | user passwords |
 | Redis (SSO) | throttle counters, revoked-session cache (v1.2b) | durable data |

@@ -33,9 +33,9 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **v1.3b (FUND): `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso`**; agents on `sso-client`, one ServiceClient per service (confirmed round 3).
 - [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`** (configurable upstream).
 - [ ] **v1.3c (FUND): Admin UI `/admin`** incl. step-up, devices, permission import, interim suspend calls.
-- [ ] **v1.3d (FUND + SGMCP): local broker gateway** - `gateway-relay`, pairing code, outbound WSS (long-poll fallback), heartbeat/replay, multi-PC primary/standby, suspend frame, relay lease.
+- [ ] **v1.3d (FUND + SGMCP): cloud strategies + local broker pass-through** - SGMCP in FUND cloud; `gateway-relay`, pairing code, device credentials, outbound WSS (long-poll fallback), heartbeats + offline alerts, `WAITING_GATEWAY`/halt on PC offline, `UNKNOWN` in-flight orders + reconcile, one live connection per broker account (cold standby), disconnect on suspend.
+- [ ] **v1.3d (FUND UI / local-agent): stay-on warnings** - warn at submit that the PC must stay on, prevent-sleep guidance, per-PC heartbeat status.
 - [ ] **v1.3d (SGMCP): `delete_strategy` soft delete** (`DELETED`, `deleted_at/by/reason`); never purge orders/fills; final position snapshot; optional archive tables; no `DELETE` grant on history tables.
-- [ ] **v1.3d (relay): append-only FUND audit copy** of order/fill events from local gateways (proposal, depends on strategy-location question).
 - [ ] **v1.3e (FUND): `AUTH_PROVIDER=sso`, retire `fund-auth`**.
 - [ ] **v1.4: `user.suspended` webhook** to relay and auto-trade.
 - [ ] **TBD:** llm-wiki deployment host and domain.
