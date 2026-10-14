@@ -30,14 +30,16 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **v1.3a: service tokens** `POST /api/v1/auth/service-token` (client credentials; no IP binding) + on-behalf-of headers.
 - [ ] **v1.3a: device clients** `POST /api/v1/devices` (ServiceClient `kind=device`, owner, Ed25519 `private_key_jwt`); revoked on suspend.
 - [ ] **v1.3a: inactive-users feed** `GET /api/v1/service/users/inactive?since=`.
-- [ ] **v1.3b (FUND): `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso`**; agents on `sso-client`, one ServiceClient per service (recommended).
+- [ ] **v1.3b (FUND): `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso`**; agents on `sso-client`, one ServiceClient per service (confirmed round 3).
 - [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`** (configurable upstream).
 - [ ] **v1.3c (FUND): Admin UI `/admin`** incl. step-up, devices, permission import, interim suspend calls.
 - [ ] **v1.3d (FUND + SGMCP): local broker gateway** - `gateway-relay`, pairing code, outbound WSS (long-poll fallback), heartbeat/replay, multi-PC primary/standby, suspend frame, relay lease.
+- [ ] **v1.3d (SGMCP): `delete_strategy` soft delete** (`DELETED`, `deleted_at/by/reason`); never purge orders/fills; final position snapshot; optional archive tables; no `DELETE` grant on history tables.
+- [ ] **v1.3d (relay): append-only FUND audit copy** of order/fill events from local gateways (proposal, depends on strategy-location question).
 - [ ] **v1.3e (FUND): `AUTH_PROVIDER=sso`, retire `fund-auth`**.
 - [ ] **v1.4: `user.suspended` webhook** to relay and auto-trade.
 - [ ] **TBD:** llm-wiki deployment host and domain.
-- [ ] **Later:** delegated tokens (RFC 8693); order-history archive on strategy delete (pending Q2).
+- [ ] **Later:** delegated tokens (RFC 8693).
 
 ## Not planned (recorded ideas)
 

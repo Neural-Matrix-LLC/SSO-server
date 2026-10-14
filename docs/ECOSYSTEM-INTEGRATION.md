@@ -235,8 +235,8 @@ flowchart LR
 ## 4. (b) FUND backend services verifying tokens via `sso-client`
 
 Each FUND agent (FastAPI) adds the `sso-client` FastAPI dependency (library design §FastAPI). Settings per agent:
-`SSO_URL`, ServiceClient id/secret (**recommended default: one ServiceClient per service/agent**, pending
-Thomas's confirmation, Q1), `TRUSTED_PROXY_IPS` = the `fund-frontend` nginx container address / `fund-network` subnet.
+`SSO_URL`, ServiceClient id/secret (**one ServiceClient per service/agent**, each with its own
+credentials [Decision 2026-10-14 round 3]), `TRUSTED_PROXY_IPS` = the `fund-frontend` nginx container address / `fund-network` subnet.
 
 | Agent | Required permission(s) [Proposal] |
 |---|---|
@@ -335,7 +335,7 @@ trusted hop and `fund-frontend` nginx the second.
 Docker install on their own PC; that starts the local Smart Gateway(s) (SGMCP with IBKR / Webull / Futu / simulator
 connectors), which **connect back outbound** to a new FUND backend service, the **gateway relay**. There is no cloud
 gateway: this replaces the earlier "SGMCP on the FUND host or in the cloud" assumption (and differs from
-`Local_login.md`, which kept SGMCP in the cloud with a forwarder-only container; see Q3).
+`Local_login.md`, which kept SGMCP in the cloud with a forwarder-only container; see Q1).
 
 ### 5.1 Components
 
@@ -426,7 +426,7 @@ sequenceDiagram
 | Caller | Path | Credential | IP binding |
 |---|---|---|---|
 | Person via FUND | SPA → auto-trade → relay → device | auto-trade service token + user token + browser IP; relay checks the user owns the device and holds `gateway` (+`gateway_trade`, +`gateway_live` for live) | yes, browser IP |
-| AI agent / MCP client on the FUND side | agent → relay → device | its own service token; relay requires `gateway_trade` on the client and, per Q4, possibly an explicit grant by the device owner | no |
+| AI agent / MCP client on the FUND side | agent → relay → device | its own service token; relay requires `gateway_trade` on the client and, per Q2, possibly an explicit grant by the device owner | no |
 | Local MCP client on the PC (e.g. Claude Desktop) | direct to local SGMCP `127.0.0.1` | local SGMCP token (unchanged) | n/a |
 | Local `/ui` broker login | `127.0.0.1` only | local `/ui` token (unchanged) | n/a |
 | local-agent → relay | outbound WSS | device credential (device token) | **no** |
@@ -441,7 +441,7 @@ Each PC is its own device (own key, own `dev_…` client). The relay keeps `devi
 routed to the device that holds its target broker account; the SPA shows a device picker when several hold it.
 [Proposal] If the same broker account is online on two PCs, the first connected is **primary** and the other
 **standby** (read-only); the standby takes over only after the primary is offline > 2 min and the user confirms
-(automatic failover could double-trade; Q5).
+(automatic failover could double-trade; Q3).
 
 ```mermaid
 sequenceDiagram
@@ -521,8 +521,8 @@ strategies are untouched.
 ### 5.6 Suspend stops and deletes the user's strategies; device credentials revoked [Decision 2026-10-14]
 
 On suspend, **all the user's running strategies / auto-trade jobs are stopped and deleted** (cancel open orders,
-purge instances). **No action on open broker positions**: the user maintains them through their other broker access.
-Order-history retention after delete is open (Q2). The SSO also **revokes every device credential owned by the user**,
+mark instances deleted). **No action on open broker positions**: the user maintains them through their other broker access.
+**All order/trade history is kept** (§5.7). The SSO also **revokes every device credential owned by the user**,
 so the PC cannot reconnect.
 
 | Phase | Trigger | Backstop |
@@ -566,7 +566,28 @@ sequenceDiagram
 If the PC is **offline** at suspend time, the relay cannot reach it; the device can never reconnect (credential
 revoked), but strategies already running on a PC that is on and disconnected keep running locally. [Proposal] The
 local SGMCP holds a **relay lease**: if the link has been down longer than `FUNDGW_LEASE_SECS` (e.g. 15 min), it stops
-opening new positions until the link is back (Q3).
+opening new positions until the link is back (Q1).
+
+### 5.7 Trade and order history is always kept [Decision 2026-10-14 round 3]
+
+All orders, fills/trades and their strategy context are kept for audit **no matter what**: suspend, strategy
+deletion, user deletion. Nothing in the ecosystem may purge them.
+
+- **Gateway work item (v1.3d)** [Repo: today `delete_strategy` purges the instance's rows, "purge-on-delete"]: change
+  `delete_strategy` to a **soft delete**: `strategies.status = DELETED`, `deleted_at`, `deleted_by` (sub or
+  `svc:<client_id>`), `delete_reason` (`user`, `suspend`, `admin`). `orders` (with `realized_pl`, `dealt_qty`) and the
+  strategy row (`source_code`, `trading_params`, `strategy_parameters`) stay; `positions`/`accounts` get a final
+  snapshot row before the live rows are cleared. Deleted instances are hidden from `list_strategies` unless
+  `include_deleted=true` (owner or `fund_admin`), never auto-resumed, and their `process_id` is never reused.
+- Archive [Proposal]: rows of deleted instances older than N days may move to `*_archive` tables in the same DB; moving
+  is allowed, deleting is not. No DB user used by the services gets `DELETE` on `orders` / archive tables.
+- **User deletion**: SSO user rows can still be deleted (admin + step-up), but trade records keep `owner_sub` and a
+  copied `owner_username` so history stays attributable; [Proposal] the Admin UI recommends suspend over delete for
+  any user with trade history.
+- Where the data lives: strategies run on the user's PC (local SGMCP MySQL) in the current proposal, so the PC is
+  the primary copy; [Proposal] the local-agent also ships each order/fill event over the link to `gateway-relay`, which
+  appends it to an **append-only FUND audit store**, so history survives a lost or wiped PC. This depends on the open
+  strategy-location question (Q1).
 
 ---
 
@@ -800,9 +821,9 @@ Logout of one FUND tab logs out that browser session (refresh cookie gone); othe
 | v1.2a | SSO | **Done** (pushed `107ae38`) | |
 | v1.2b | SSO, llm-wiki | IP binding modes (user tokens only), introspect/permission query, `SSO_TRUSTED_PROXIES`, `sso-client` library, llm-wiki migrates | v1.2a |
 | v1.3a | SSO | SSO admin REST API + audit log + **step-up reauth** (§7.5), bulk permission import (§7.4), service tokens + on-behalf-of (§4.1), **device clients** (`POST /api/v1/devices`, `private_key_jwt`, revoke on suspend, §5.2), `GET /service/users/inactive` feed (§5.6). No user import | v1.2b |
-| v1.3b | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4); agents on `sso-client` with per-service credentials (recommended); llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.2b, v1.3a |
+| v1.3b | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4); agents on `sso-client`, one ServiceClient per service; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.2b, v1.3a |
 | v1.3c | FUND | Admin UI `/admin` incl. step-up, Applications import, devices, interim suspend calls (§7, §5.6) | v1.3a, v1.3b |
-| v1.3d | FUND + SGMCP | **Local gateway**: new `gateway-relay` service, pairing, outbound WSS link, multi-PC routing; FUND Local Gateway package (`local-agent` + SGMCP + broker daemons) on the user's PC; auto-trade points at the relay; `owner_sub`, trade/live permissions, suspend frame + 60 s sweep (§5) | v1.3a, v1.3b |
+| v1.3d | FUND + SGMCP | **Local gateway**: new `gateway-relay` service, pairing, outbound WSS link, multi-PC routing; FUND Local Gateway package (`local-agent` + SGMCP + broker daemons) on the user's PC; auto-trade points at the relay; `owner_sub`, trade/live permissions, suspend frame + 60 s sweep; **`delete_strategy` soft delete, never purge order/trade history** (§5.7) | v1.3a, v1.3b |
 | v1.3e | FUND | `AUTH_PROVIDER=sso`, retire `fund-auth` | v1.3b stable |
 | v1.4 | SSO, relay, auto-trade, llm-wiki | Signed webhooks; `user.suspended` replaces the interim calls (sweep stays) | v1.3d |
 | later | | TODOS.md: sign-up, password change/reset, delegated tokens (RFC 8693), llm-wiki host/domain (TBD) | |
@@ -811,14 +832,13 @@ Logout of one FUND tab logs out that browser session (refresh cookie gone); othe
 
 Answered and removed (2026-10-14, rounds 1 and 2): FUND user DB, permission names and file, domains/locations,
 unauthenticated endpoints, IP binding for agents, suspend behaviour and open positions, service-to-service model,
-SGMCP `/ui` (stays local), admin step-up, the cut-off "4)". See §10.
+SGMCP `/ui` (stays local), admin step-up, the cut-off "4)"; round 3: per-service credentials, order-history retention. See §10.
+The four below have **proposed defaults** in this document that apply unless Thomas decides otherwise.
 
-1. **Service credentials**: recommended default is **one ServiceClient per service/agent** (finer audit and revocation); please confirm (vs one shared `fund-backend` client).
-2. **Order history after delete**: when a suspended user's strategies are deleted, keep their orders/fills for audit (soft delete / archive table), or purge as `delete_strategy` does today?
-3. **Where strategies run** (new): this design runs strategies in the local SGMCP on the PC (they stop when the PC is off), which differs from `Local_login.md` (SGMCP in the cloud, PC only forwards). Confirm local execution, and the proposed relay lease (stop opening positions after 15 min without link)?
-4. **AI agents on the FUND side trading on a user's PC** (new): require the user to grant each agent's service client explicitly ("allow agent X on my gateway"), or is the `gateway_trade` permission on the client enough?
-5. **Same broker account on two PCs** (new): accept primary/standby with manual takeover (§5.4)?
-6. **Permission removal policy**: OK that import never deletes, only marks `missing` permissions deprecated (§7.4)?
+1. **Where strategies run** (new): this design runs strategies in the local SGMCP on the PC (they stop when the PC is off), which differs from `Local_login.md` (SGMCP in the cloud, PC only forwards). Confirm local execution, and the proposed relay lease (stop opening positions after 15 min without link)?
+2. **AI agents on the FUND side trading on a user's PC** (new): require the user to grant each agent's service client explicitly ("allow agent X on my gateway"), or is the `gateway_trade` permission on the client enough?
+3. **Same broker account on two PCs** (new): accept primary/standby with manual takeover (§5.4)?
+4. **Permission removal policy**: OK that import never deletes, only marks `missing` permissions deprecated (§7.4)?
 
 ## 10. Decisions (2026-10-14)
 
@@ -837,4 +857,9 @@ Recorded from Thomas:
 8. **Broker login is local to the user**: FUND Local Gateway (Docker) on the user's PC runs the Smart Gateway(s) and connects **outbound** to FUND's `gateway-relay`; device credential provisioned by pairing after SSO login; broker credentials never leave the PC; `/ui` stays local; no cloud gateway (§5).
 9. **IP binding applies to user-facing calls only**; the local gateway uses its device credential.
 10. **Destructive admin actions require password re-confirmation** (step-up, §7.5).
-11. **Per-service credentials** are the recommended default, pending confirmation (Q1).
+11. Per-service credentials as the recommended default (confirmed in round 3).
+
+### Round 3 (2026-10-14)
+
+12. **Per-service credentials confirmed**: every service and agent has its own ServiceClient.
+13. **All trade/order history is always kept for audit** (suspend, strategy deletion, user deletion). `delete_strategy` must become a soft delete (gateway work item in v1.3d, §5.7).
