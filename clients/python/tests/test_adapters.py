@@ -1,0 +1,187 @@
+import json
+
+import pytest
+
+from sso_client.testing import FakeSSO, asgi_scope, wsgi_environ
+
+A, B = "203.0.113.7", "198.51.100.9"
+
+
+# --------------------------------------------------------------------------- Django
+@pytest.fixture(scope="module")
+def django_setup():
+    django = pytest.importorskip("django")
+    from django.conf import settings
+
+    if not settings.configured:
+        settings.configure(DEBUG=False, ALLOWED_HOSTS=["*"], ROOT_URLCONF=__name__, SECRET_KEY="x",
+                           MIDDLEWARE=[], INSTALLED_APPS=[])
+        django.setup()
+    return settings
+
+
+def test_django_adapter(django_setup):
+    from django.http import JsonResponse
+    from django.test import RequestFactory
+
+    from sso_client.adapters import django as adapter
+
+    fake = FakeSSO("ENFORCE")
+    adapter.set_client(fake.client(trusted_proxies="127.0.0.1"))
+    try:
+        tok = fake.issue("alice", perms=["application.app2"], ip=A)
+
+        @adapter.require_permission("application.app2")
+        def view(request):
+            return JsonResponse({"user": request.sso.user.username, "ip": request.client_ip})
+
+        mw = adapter.SSOMiddleware(view)
+        rf = RequestFactory()
+        r = mw(rf.get("/", REMOTE_ADDR="127.0.0.1", HTTP_X_FORWARDED_FOR=A, HTTP_AUTHORIZATION=f"Bearer {tok}"))
+        assert r.status_code == 200 and json.loads(r.content) == {"user": "alice", "ip": A}
+
+        r = view(rf.get("/", REMOTE_ADDR=B))  # no token
+        assert r.status_code == 401 and r["WWW-Authenticate"] == "Bearer"
+        other = fake.issue("bob", perms=[], ip=A)
+        assert view(rf.get("/", REMOTE_ADDR=A, HTTP_AUTHORIZATION=f"Bearer {other}")).status_code == 403
+        # spoofed XFF from an untrusted peer: B is used -> ENFORCE mismatch -> 401
+        r = view(rf.get("/", REMOTE_ADDR=B, HTTP_X_FORWARDED_FOR=A, HTTP_AUTHORIZATION=f"Bearer {tok}"))
+        assert r.status_code == 401 and json.loads(r.content)["detail"] == "token_inactive"
+        fake.down()
+        r = view(rf.get("/", REMOTE_ADDR=A, HTTP_AUTHORIZATION=f"Bearer {fake.issue(ip=A)}"))
+        assert r.status_code == 503 and r["Retry-After"] == "5"
+        fake.up()
+
+        # lazy request.sso via middleware only
+        seen = {}
+
+        def plain(request):
+            seen["user"] = request.sso.user.username
+            return JsonResponse({})
+
+        t2 = fake.issue("carol", ip=A)
+        adapter.SSOMiddleware(plain)(rf.get("/", REMOTE_ADDR=A, HTTP_AUTHORIZATION=f"Bearer {t2}"))
+        assert seen["user"] == "carol"
+    finally:
+        adapter.set_client(None)
+
+
+def test_django_get_client_from_settings(django_setup, monkeypatch):
+    from sso_client.adapters import django as adapter
+
+    adapter.set_client(None)
+    monkeypatch.setattr(django_setup, "SSO_CLIENT", {"BASE_URL": "https://sso.x", "CLIENT_ID": "a",
+                                                     "CLIENT_SECRET": "b", "TRUSTED_PROXIES": ["10.0.0.0/8"]},
+                        raising=False)
+    try:
+        c = adapter.get_client()
+        assert c.config.base_url == "https://sso.x" and str(c.config.trusted_proxies[0]) == "10.0.0.0/8"
+        assert adapter.get_client() is c
+        adapter.set_client(None)
+        monkeypatch.setattr(django_setup, "SSO_CLIENT", {"TRUSTED_PROXIES": "10.0.0.0/8"})
+        monkeypatch.setenv("SSO_BASE_URL", "https://sso.env")
+        monkeypatch.setenv("SSO_CLIENT_ID", "e")
+        monkeypatch.setenv("SSO_CLIENT_SECRET", "s")
+        assert adapter.get_client().config.base_url == "https://sso.env"
+        adapter.set_client(None)
+        monkeypatch.setattr(django_setup, "SSO_CLIENT", None)
+        assert adapter.get_client().config.client_id == "e"
+    finally:
+        adapter.set_client(None)
+
+
+# --------------------------------------------------------------------------- FastAPI
+def test_fastapi_adapter():
+    fastapi = pytest.importorskip("fastapi")
+    from fastapi import Depends
+    from fastapi.testclient import TestClient
+
+    from sso_client import CheckResult
+    from sso_client.adapters.fastapi import SSO
+
+    fake = FakeSSO("ENFORCE")
+    sso = SSO(fake.async_client(trusted_proxies="testclient,127.0.0.1".split(",")[1:]))
+    app = fastapi.FastAPI()
+    sso.install(app)
+
+    @app.get("/pages")
+    async def pages(u: CheckResult = Depends(sso.require_permission("application.app1"))):
+        return {"user": u.user.username, "ip": u.client_ip}
+
+    @app.get("/me")
+    async def me(u: CheckResult = Depends(sso.user), ip: str = Depends(sso.client_ip)):
+        return {"user": u.user.username, "ip": ip}
+
+    tok = fake.issue("alice", perms=["application.app1"], ip=A)
+    c = TestClient(app, client=("127.0.0.1", 5000))
+    r = c.get("/pages", headers={"Authorization": f"Bearer {tok}", "X-Forwarded-For": A})
+    assert r.status_code == 200 and r.json() == {"user": "alice", "ip": A}
+    assert c.get("/me", headers={"Authorization": f"Bearer {tok}", "X-Forwarded-For": A}).json()["ip"] == A
+    assert c.get("/pages").status_code == 401
+    bob = fake.issue("bob", ip=A)
+    r = c.get("/pages", headers={"Authorization": f"Bearer {bob}", "X-Forwarded-For": A})
+    assert r.status_code == 403 and r.json()["missing"] == ["application.app1"]
+    fake.down()
+    r = c.get("/pages", headers={"Authorization": f"Bearer {fake.issue(ip=A)}", "X-Forwarded-For": A})
+    assert r.status_code == 503 and r.headers["Retry-After"] == "5"
+    fake.up()
+    untrusted = TestClient(app, client=(B, 5000))
+    r = untrusted.get("/pages", headers={"Authorization": f"Bearer {tok}", "X-Forwarded-For": A})
+    assert r.status_code == 401  # spoof ignored -> B -> ENFORCE mismatch
+
+
+def test_fastapi_from_env(monkeypatch):
+    pytest.importorskip("fastapi")
+    from sso_client.adapters.fastapi import SSO
+
+    monkeypatch.setenv("SSO_BASE_URL", "https://sso.env")
+    monkeypatch.setenv("SSO_CLIENT_ID", "e")
+    monkeypatch.setenv("SSO_CLIENT_SECRET", "s")
+    assert SSO.from_env(timeout=3.0).client.config.timeout == 3.0
+
+
+# --------------------------------------------------------------------------- Flask
+def test_flask_adapter(monkeypatch):
+    flask = pytest.importorskip("flask")
+    from flask import g
+
+    from sso_client.adapters.flask import SSO
+
+    fake = FakeSSO("ENFORCE")
+    app = flask.Flask(__name__)
+    sso = SSO(app, client=fake.client(trusted_proxies="127.0.0.1"))
+
+    @app.get("/report")
+    @sso.require_permission("application.app2")
+    def report():
+        return {"user": g.sso.user.username, "ip": g.client_ip}
+
+    tok = fake.issue("alice", perms=["application.app2"], ip=A)
+    c = app.test_client()
+    r = c.get("/report", headers={"Authorization": f"Bearer {tok}", "X-Forwarded-For": A},
+              environ_base={"REMOTE_ADDR": "127.0.0.1"})
+    assert r.status_code == 200 and r.get_json() == {"user": "alice", "ip": A}
+    assert c.get("/report").status_code == 401
+    r = c.get("/report", headers={"Authorization": f"Bearer {fake.issue(ip=A)}"}, environ_base={"REMOTE_ADDR": A})
+    assert r.status_code == 403
+    fake.down()
+    r = c.get("/report", headers={"Authorization": f"Bearer {fake.issue(ip=A)}"}, environ_base={"REMOTE_ADDR": A})
+    assert r.status_code == 503  # (a cached active answer for tok would still be served)
+    fake.up()
+    with app.test_request_context("/", headers={"Authorization": f"Bearer {tok}"}, environ_base={"REMOTE_ADDR": A}):
+        assert sso.check(["application.app2"]).active  # without before_request having run
+
+    monkeypatch.setenv("SSO_BASE_URL", "https://sso.env")
+    monkeypatch.setenv("SSO_CLIENT_ID", "e")
+    monkeypatch.setenv("SSO_CLIENT_SECRET", "s")
+    lazy = SSO()
+    lazy.init_app(flask.Flask("x"))
+    assert lazy.client.config.client_id == "e"
+
+
+def test_helpers():
+    env = wsgi_environ("127.0.0.1", xff=A, token="t")
+    assert env["HTTP_X_FORWARDED_FOR"] == A and env["HTTP_AUTHORIZATION"] == "Bearer t"
+    from sso_client import get_client_ip
+    scope = asgi_scope("127.0.0.1", xff=A, token="t")
+    assert get_client_ip(scope["client"], scope["headers"], "127.0.0.1") == A

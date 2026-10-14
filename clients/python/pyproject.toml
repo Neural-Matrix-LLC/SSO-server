@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sso-client"
+version = "0.1.0"
+description = "Client-IP derivation and SSO permission query (introspect) for services of the SSO-server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]
+
+[project.optional-dependencies]
+django = ["Django>=4.2"]
+fastapi = ["fastapi>=0.110"]
+flask = ["Flask>=3.0"]
+test = ["pytest>=8", "anyio>=4", "fastapi>=0.110", "Flask>=3.0", "Django>=4.2"]
+
+[project.entry-points.pytest11]
+sso_client = "sso_client.testing"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sso_client"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
