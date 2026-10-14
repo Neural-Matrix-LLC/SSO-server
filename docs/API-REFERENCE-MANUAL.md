@@ -15,6 +15,7 @@ implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `applicati
 - [5. Token claims](#5-token-claims)
 - [6. Error codes](#6-error-codes)
 - [7. Planned v1.2 features](#7-planned-v12-features)
+- [8. Planned admin REST API (v1.3a, proposal)](#8-planned-admin-rest-api-v13a-proposal)
 
 ## 1. Basics
 
@@ -494,3 +495,26 @@ Rows marked **Planned** do not exist yet; do not code against them until they ar
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
 change/reset are future items in TODOS.md.
+
+## 8. Planned admin REST API (v1.3a, proposal)
+
+**Planned, proposal pending review.** Nothing below exists yet. Full design: [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
+Callers: the FUND Admin UI (browser, Bearer SSO access token, CORS from the FUND origin). Django admin stays as the
+break-glass tool.
+
+- Base path `/api/v1/admin/`. Auth: `Authorization: Bearer <access token>`; the user must be active and hold
+  `application.sso_admin` (checked in the DB on every call; IP binding applies). Errors use the §6 format; new codes
+  `admin_forbidden` (403), `self_action_forbidden` (409), `last_admin` (409), `conflict` (409).
+- Every change writes one `sso_adminauditlog` row (actor, actor IP, action, target, before/after) in the same transaction.
+
+| Method + path | Action |
+|---|---|
+| `GET /users` · `POST /users` | list (`q`, `active`, `group`, `page`), create |
+| `GET` / `PATCH` / `DELETE /users/{id}` | read, edit profile, delete |
+| `POST /users/{id}/suspend` · `/unsuspend` · `/logout-all` · `/set-password` | lifecycle; suspend revokes all tokens (v1.2a) |
+| `GET /users/{id}/permissions` · `POST` / `DELETE /users/{id}/permissions/{codename}` | app access |
+| `PUT /users/{id}/groups` | group membership |
+| `GET` / `POST /groups` · `GET` / `PATCH` / `DELETE /groups/{id}` · `POST` / `DELETE /groups/{id}/permissions/{codename}` | groups |
+| `GET` / `POST /permissions` · `PATCH` / `DELETE /permissions/{codename}` | `application.*` permissions |
+| `GET` / `POST /services` · `GET` / `PATCH` / `DELETE /services/{client_id}` · `POST /services/{client_id}/rotate-secret` | ServiceClients (secret returned once) |
+| `GET /audit` | audit log (`actor`, `target`, `action`, `since`) |

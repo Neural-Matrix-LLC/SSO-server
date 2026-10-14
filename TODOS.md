@@ -22,6 +22,19 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **v1.2b: Redis cache for revoked sessions** — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
 - [ ] **v1.4: encrypt `notify_secret` at rest** (webhook signing secret).
 
+## Ecosystem (proposed 2026-10-13, see [ECOSYSTEM-INTEGRATION.md](docs/ECOSYSTEM-INTEGRATION.md))
+
+- [ ] **v1.3a: SSO admin REST API** `/api/v1/admin/…` (users, groups, permissions, services, audit) + `sso_adminauditlog`.
+- [ ] **v1.3a: ecosystem permissions** and default groups (FUND users, FUND operators, Traders (live), SSO admins).
+- [ ] **v1.3a: `import_users`** from FUND `fund-auth` DB into `dcWebUsers` (dry-run, username/email conflict report).
+- [ ] **v1.3b (FUND): login migration** F1 dual-accept HS256 + SSO → F2 SPA on SSO → F3 cutover; agents on `sso-client`.
+- [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`**; llm-wiki local `/login` optional.
+- [ ] **v1.3c (FUND): Admin UI `/admin`** (users, permissions, services, audit).
+- [ ] **v1.3d (SGMCP): SSO auth middleware**, `owner_sub`, `gateway_trade` / `gateway_live`, auto-trade forwards user token + client IP.
+- [ ] **v1.3e (FUND): retire `fund-auth`** and `AUTH_SECRET_KEY`.
+- [ ] **v1.4: SGMCP handles `user.suspended`** (stop owner's strategies; pending Thomas's answer).
+- [ ] **Later:** SSO login for SGMCP `/ui`; `Local_login.md` broker access list keyed by SSO `sub`; admin step-up re-auth.
+
 ## Not planned (recorded ideas)
 
 - DPoP sender-constrained tokens (RFC 9449) — rejected 2026-10-13; IP binding is sufficient.

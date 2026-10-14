@@ -535,8 +535,17 @@ change passwords in myFinance.
 | current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
 | v1.2a (**implemented**, §10) | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
 | v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
-| v1.4 | Signed webhooks to registered services |
+| v1.3a (**new, proposed 2026-10-13**) | SSO admin REST API `/api/v1/admin/…` + `sso_adminauditlog`, ecosystem permissions (`application.fund`, `fund_admin`, `llmwiki`, `llmwiki_write`, `gateway`, `gateway_trade`, `gateway_live`, `sso_admin`), `import_users` dry-run for FUND users ([ecosystem design](ECOSYSTEM-INTEGRATION.md) §2, §7) |
+| v1.3b (FUND repo) | FUND frontend login migration to the SSO (F1 dual-accept → F3 cutover), FUND agents on `sso-client`, llm-wiki behind `/proxy/llmwiki/` (§3, §4, §6) |
+| v1.3c (FUND repo) | Admin UI `/admin` in the FUND frontend on the v1.3a API; Django admin stays break-glass (§7) |
+| v1.3d (SGMCP + FUND auto-trade) | Smart_Gateway_MCP verifies SSO tokens, `owner_sub` on strategies, trade/live permissions, static token becomes fallback (§5) |
+| v1.3e (FUND repo) | Retire `fund-auth` (F4) |
+| v1.4 | Signed webhooks to registered services; SGMCP reacts to `user.suspended` |
 | future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
+
+The v1.3 rows come from Thomas's ecosystem picture (FUND-Financial-Research as the core); they are a proposal
+pending his review, see [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §9. §5 (Django admin) stays as the
+break-glass tool once the FUND Admin UI exists.
 
 ## 9. Decisions (2026-10-13)
 

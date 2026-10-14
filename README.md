@@ -1,6 +1,6 @@
 # sso-server
 
-> **See also:** [v1.2 requirements design](docs/DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](docs/API-REFERENCE-MANUAL.md). Service-side Python library (planned): [sso-client design](docs/SSO-CLIENT-LIBRARY-DESIGN.md). Future items: [TODOS.md](TODOS.md).
+> **See also:** [FUND-Financial-Research ecosystem integration design](docs/ECOSYSTEM-INTEGRATION.md) (system context in [ARCHITECTURE.md §0](docs/ARCHITECTURE.md#0-system-context-fund-financial-research-ecosystem)), [v1.2 requirements design](docs/DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](docs/API-REFERENCE-MANUAL.md). Service-side Python library (planned): [sso-client design](docs/SSO-CLIENT-LIBRARY-DESIGN.md). Future items: [TODOS.md](TODOS.md).
 
 Single sign-on server for myFinance and related apps. It implements `docs/SSO-server.md` (v1.0 spec)
 as amended by `docs/DESIGN-ADDENDUM-v1.1.md`, and it follows the container requirements in

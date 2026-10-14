@@ -1,6 +1,6 @@
 # SSO server: technical design and architecture
 
-> **See also:** [v1.2 requirements design](DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](API-REFERENCE-MANUAL.md). Future items: [TODOS.md](../TODOS.md).
+> **See also:** [FUND ecosystem integration design](ECOSYSTEM-INTEGRATION.md), [v1.2 requirements design](DESIGN-v1.2-requirements.md) and the [API Reference Manual for client and service developers](API-REFERENCE-MANUAL.md). Future items: [TODOS.md](../TODOS.md).
 
 | | |
 |---|---|
@@ -16,6 +16,7 @@ Labels used in this document:
 
 ## Contents
 
+0. System context: FUND-Financial-Research ecosystem
 1. Purpose and scope
 2. Glossary
 3. Architecture (system context, components, software layers)
@@ -28,6 +29,104 @@ Labels used in this document:
 10. Configuration reference
 11. Security model, deployment view, consumer integration
 12. Open items, not implemented, and doc/code discrepancies
+
+---
+
+## 0. System context: FUND-Financial-Research ecosystem
+
+> **Design proposal (2026-10-13), not implemented.** Integration details, phasing and open questions:
+> [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md). Labels: **[Repo]** read from that repo, **[Assumption]** to be
+> confirmed, **[Proposal]** design choice.
+
+FUND-Financial-Research is the core product: a React SPA plus a group of Python agent services for financial
+research [Repo]. The SSO server replaces FUND's own login (`fund-auth`, HS256 JWT) and becomes the one
+authentication server for FUND, llm-wiki-svc and Smart_Gateway_MCP; myFinance is phasing out. The day-to-day
+admin page moves into the FUND frontend on top of a new SSO admin REST API; Django admin stays as break-glass.
+
+```mermaid
+flowchart LR
+  subgraph Internet["Untrusted: internet and user machines"]
+    BR["Browser: FUND SPA (React 18 + Vite, app/)"]
+    MCPC["MCP / LLM clients: Claude Desktop, Claude Code, agents"]
+  end
+
+  subgraph FUNDH["FUND host - compose network fund-network [Repo]"]
+    FNG["fund-frontend nginx :3000 to :80 - SPA + /proxy/svc/ reverse proxy"]
+    subgraph AGENTS["FUND backend agents (Python, FastAPI) + sso-client [Proposal]"]
+      ORC["orchestrator :8000 / management :8008"]
+      RES["analytic :8001, coding :8002, backtesting :8003, dataserver :8004, discovery :8005, research :8015"]
+      STO["storage :8006"]
+      AT["auto-trade :8009 - SGMCP MCP client"]
+    end
+    FAUTH["fund-auth :8011 Django - legacy login, retired after cutover"]
+    ADMUI["FUND /admin UI [Proposal]"]
+  end
+
+  subgraph GWH["Gateway host - outside FUND compose [Repo]"]
+    GW["Smart_Gateway_MCP :8080 - /mcp Streamable HTTP, /ui operator login"]
+    SGDB[("MySQL sgmcp - strategies, accounts, positions, orders")]
+    subgraph BROK["Broker connectors - credentials stay here"]
+      FUTU["FutuOpenD"]
+      IBKR["IBKR CP Gateway (+ IBKR MCP companion)"]
+      WB["Webull OpenAPI (+ Webull MCP companion)"]
+      SIM["Simulator broker=sim"]
+    end
+  end
+
+  subgraph LWH["llm-wiki host [Assumption: own VPS or same host]"]
+    LW["llm-wiki-svc :8000 - HTTP API, MCP tools, optional /login"]
+  end
+
+  subgraph SSOH["SSO host - compose project sso"]
+    SNG["nginx - TLS, rate limit"]
+    SSO["SSO server Django - auth API, introspect, JWKS, admin REST API [Proposal], Django admin break-glass"]
+    RDS["Redis - throttles, revoked sessions"]
+  end
+  DCW[("MySQL dcWebUsers - users, groups, application perms, tokens, service clients")]
+  BRKX["Broker venues: Futu, IBKR, Webull"]
+
+  BR -- "HTTPS login / refresh cookie / admin API" --> SNG
+  BR -- "HTTPS SPA + Bearer SSO token" --> FNG
+  FNG -- "XFF, Bearer" --> ORC & RES & STO & AT
+  FNG -.-> FAUTH
+  ADMUI --- BR
+  MCPC -- "native login" --> SNG
+  MCPC -- "MCP + Bearer SSO token" --> GW
+  MCPC -- "MCP + Bearer" --> LW
+  FNG -- "/proxy/llmwiki/ [Proposal]" --> LW
+  AT -- "MCP: ServiceClient + user token + client_ip" --> GW
+  ORC & RES & STO & AT -- "introspect token + ip" --> SNG
+  GW -- "introspect token + ip" --> SNG
+  LW -- "introspect / BFF login" --> SNG
+  SNG --> SSO --> DCW
+  SSO --> RDS
+  GW --> SGDB
+  GW --> FUTU & IBKR & WB & SIM
+  FUTU & IBKR & WB --> BRKX
+```
+
+**Trust boundaries**
+
+| Boundary | What crosses it | Control |
+|---|---|---|
+| Internet → FUND nginx / SSO nginx / SGMCP / llm-wiki | user tokens, logins | TLS; SSO tokens (RS256, 15 min); IP binding (v1.2b); only nginx-forwarded IPs trusted |
+| FUND nginx → FUND agents | user requests + `X-Forwarded-For` | agents trust XFF only from the nginx address (`TRUSTED_PROXY_IPS`); every agent checks the token via `sso-client` [Proposal]. Today most agent endpoints are unauthenticated [Repo] |
+| Services → SSO | introspect, BFF login, admin calls | ServiceClient Basic credentials; `client_ip` accepted only from an authenticated ServiceClient |
+| FUND → SGMCP | strategy/trading MCP calls | today one static `SGMCP_AUTH_TOKEN` [Repo]; target: ServiceClient + user token, trading permissions [Proposal] |
+| SGMCP → brokers | orders, account data | broker credentials and sessions live only on the gateway host (or the user's FUND Local Gateway, `Local_login.md`) [Repo] |
+| Admin | user / permission / service changes | FUND `/admin` → SSO admin REST API with `application.sso_admin`; Django admin = break-glass, superusers only |
+
+**Which component holds what**
+
+| Component | Holds | Never holds |
+|---|---|---|
+| SSO server + `dcWebUsers` | users, password hashes, groups, `application.*` permissions, refresh tokens, revocations, ServiceClients, RSA private key, admin audit log [Proposal] | broker credentials, research data |
+| FUND SPA | access token in memory; refresh token only as HttpOnly cookie on the SSO origin [Proposal] (today: HS256 JWT in `localStorage` [Repo]) | passwords after login, service secrets |
+| FUND agents | ServiceClient id/secret, research data (`./data`), `STORAGE_AGENT_SECRET` | user passwords, private keys |
+| auto-trade | ServiceClient for SGMCP + the user's token per request | broker credentials |
+| Smart_Gateway_MCP | broker sessions/credentials, `sgmcp` ledgers, strategy `owner_sub` [Proposal] | user passwords |
+| llm-wiki-svc | knowledge base, its ServiceClient, BFF session (optional) | user passwords |
+| Redis (SSO) | throttle counters, revoked-session cache (v1.2b) | durable data |
 
 ---
 
@@ -155,6 +254,11 @@ flowchart TB
   L4 --> ADM
   CHK -.-> L3
 ```
+
+Planned layers (not implemented): v1.2b adds the introspect/permission query and the `sso-client` library on the
+**service** side (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its
+handlers). v1.3a adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
+`sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
 
 ## 4. Component responsibilities
 
