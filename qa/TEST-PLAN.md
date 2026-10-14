@@ -427,7 +427,7 @@ Every process is stopped by its recorded PID.
 | V12A-REUSE-05 | suspended user replays a used token past grace | 403 `account_inactive`; no `RevokedSession` row | §10 | A |
 | V12A-REUSE-06 | garbage / bad-signature / truncated refresh tokens | 401, no side effects on the session | §10 | A |
 | V12A-REUSE-07 | 4 parallel HTTP refreshes of one token (1 gunicorn worker, SQLite) | exactly one 200, three 401, session kept | §10 concurrency | A |
-| V12A-REUSE-08 | real-thread concurrent refresh on MySQL 8.0 and 8.4 (`sso/tests/test_sessions_reuse.py:152` via `docker-compose.test.yml`) | one winner, session not revoked | §10 concurrency | **BLOCKED** (no Docker/MySQL server on the box) |
+| V12A-REUSE-08 | real-thread concurrent refresh on MySQL (`sso/tests/test_sessions_reuse.py:152` via `docker-compose.test.yml`) | one winner, session not revoked | §10 concurrency | A on MySQL 8.4 (2026-10-13: 5/5 pass); 8.0 not run |
 | V12A-ADM-01 | admin suspends self via the action | refused with "You cannot suspend yourself."; still active; admin session works | §10 | A |
 | V12A-ADM-01b | admin unticks *Active* on their OWN change form | should be refused like the action | §10 | A |
 | V12A-ADM-02 | delete page / POST for `application.app1` | 403; no delete link; permission still there | 3c, §5, §10 | A |

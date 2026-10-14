@@ -63,3 +63,45 @@ refresh reuse (REUSE-01..07) 7/7; admin guards via HTTP UI (ADM-01..07b, 14 item
 ## Artifacts (gitignored)
 `qa/run/v12a-py3.13/`, `qa/run/v12a-py3.11/` (pytest logs, junit, server logs, server cmdlines);
 `qa/run/v12a-py3.13-attempt1/`, `qa/run/v12a-py3.11-interrupted/` (superseded); developer-suite logs in `/workspace/tmp/`.
+
+## MySQL 8.4 run (2026-10-13, ~17:50-18:15 PT; approved by Thomas in chat; 8.4 only)
+- **Install:** Docker Engine from the official Docker apt repo (`download.docker.com/linux/debian trixie stable`,
+  key in `/etc/apt/keyrings/docker.asc`): docker-ce, docker-ce-cli, containerd.io, buildx and compose plugins.
+  **Docker 29.9.0, Compose v5.6.0.** The box has no systemd (PID 1 = tini), so `dockerd` was started directly with sudo
+  (log `/var/log/dockerd-qa.log`, pid `/run/dockerd-qa.pid`); it is left installed and running. No other system config changed.
+- **Code under test:** `feat/v1.2a` @ c959c1f, built from a detached worktree (`/workspace/sso-v12a-c959c1f`, since removed)
+  because the main tree had the Developer's uncommitted work at the time (since committed as 7e49116 / 2235188; neither
+  touches the code exercised here: `sso/views.py`, `revocation.py`, `tokens.py`, `test_sessions_reuse.py`,
+  `test_mysql_integration.py` are unchanged c959c1f..2235188). Throw-away `.env.test` with random passwords (shredded).
+- **MySQL server:** `8.4.11` (MySQL Community Server - GPL), from `SELECT version()` inside the tests container.
+  Test image: Python 3.13.16, Django 5.2.
+- **Harness note (box limit, not a repo defect):** the prescribed
+  `MYSQL_IMAGE=mysql:8.4 SSO_TEST_MYSQL_VOLUME=sso-test-mysql-8.4 docker compose -f docker-compose.test.yml -p sso-qa-v12a run --rm --build tests`
+  built and started both services (mysql healthy), but container-to-container traffic on the compose bridge network
+  does not work on this box (`/dev/tcp/mysql/3306` from a peer container times out; dockerd logs
+  "Failed to delete conntrack state ... invalid argument"): 65 passed, 233 errors `(2002, "Can't connect to server on 'mysql' (115)")`
+  (`qa/run/mysql84/full-suite.log`). Re-run with the SAME built image and the compose file's environment, joined to the
+  mysql container's network namespace (`docker run --network container:sso-qa-v12a-mysql-1`, `SSO_DBHOST=127.0.0.1`).
+- **Full developer suite on MySQL 8.4:** **296 passed, 2 failed, 0 skipped** (298 = 291 + the 7 previously skipped),
+  coverage 99% (`qa/run/mysql84/full-suite-sharedns.log`).
+- **The 7 previously skipped tests, run explicitly** (`qa/run/mysql84/previously-skipped-7.log`):
+
+| Test | Result |
+|---|---|
+| test_mysql_integration::test_server_version_supported_and_as_expected | PASS |
+| test_mysql_integration::test_init_script_accounts_use_caching_sha2_password[sso_app] | **FAIL (V12A-04)** |
+| test_mysql_integration::test_init_script_accounts_use_caching_sha2_password[sso_migrator] | **FAIL (V12A-04)** |
+| test_mysql_integration::test_client_logs_in_with_caching_sha2_password[sso_app] | PASS |
+| test_mysql_integration::test_client_logs_in_with_caching_sha2_password[sso_migrator] | PASS |
+| test_mysql_integration::test_tls_required_mode_works_against_server_auto_certs | PASS |
+| test_sessions_reuse::test_concurrent_legit_refreshes_do_not_revoke_the_session (**REUSE-08**) | PASS |
+
+- **REUSE-08 repeated 5×:** 5/5 passed (1.5-1.8 s each; `qa/run/mysql84/reuse08-repeat-{1..5}.log`). No flakiness seen.
+- **V12A-04 (Low, test-only defect):** `sso/tests/test_mysql_integration.py:48` compares `rows == [("caching_sha2_password",)]`
+  but mysqlclient's `fetchall()` returns a tuple: actual `(("caching_sha2_password",),)`. The accounts DO use
+  caching_sha2_password (the value matches; the login-with-caching_sha2 tests pass). Fix: `assert list(rows) == [...]`.
+  Repro: the compose run above on MySQL 8.4 (expected to fail the same way on 8.0; 8.0 not run per instructions).
+- **Teardown:** `docker compose -p sso-qa-v12a down -v` (volume `sso-test-mysql-8.4` and network `sso-qa-v12a_default`
+  removed); images `sso-qa-v12a-tests:latest` and `mysql:8.4` removed; build cache pruned (fresh install, all from this
+  run). Afterwards: 0 containers, 0 images, 0 volumes, only Docker's default networks. Docker stays installed.
+- **Blocked list update:** REUSE-08 and the MySQL integration tests are no longer blocked for 8.4; MySQL 8.0 not run (skipped as instructed).
