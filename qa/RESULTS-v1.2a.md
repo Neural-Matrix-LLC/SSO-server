@@ -105,3 +105,51 @@ refresh reuse (REUSE-01..07) 7/7; admin guards via HTTP UI (ADM-01..07b, 14 item
   removed); images `sso-qa-v12a-tests:latest` and `mysql:8.4` removed; build cache pruned (fresh install, all from this
   run). Afterwards: 0 containers, 0 images, 0 volumes, only Docker's default networks. Docker stays installed.
 - **Blocked list update:** REUSE-08 and the MySQL integration tests are no longer blocked for 8.4; MySQL 8.0 not run (skipped as instructed).
+
+## MySQL 8.4 run @ 2235188 (aborted, superseded by the run @ df06e10 below)
+- Attempt 1: the compose build failed (deb.debian.org returned 500 on apt InRelease, a transient outage on the mirror side).
+- Attempt 2: the prescribed `docker compose ... run --rm --build tests` command gave 65 passed / 235 errors, all `(2002) Can't connect to server on 'mysql' (115)`.
+  This is the known compose bridge limit on this box, not a product issue.
+- The shared-namespace rerun was stopped when df06e10 (the V12A-04 fix) landed. Per Philip's update, MySQL was rerun at df06e10 only.
+- Lesson for the harness: stale `SSO_TEST_*` variables exported in the shell override `--env-file` (`sudo -E`).
+  Take the credentials from the mysql container env, or unset those variables first.
+
+## Fix verification @ 7e49116 (code at HEAD df06e10, Py3.13.16, Django 5.2.18, 2026-10-13 ~18:20-18:35 PT)
+- **V12A-01 FIXED.**
+  - ADM-01b: unticking is_active on your own change form now re-renders with "You cannot suspend yourself.", and is_active stays True.
+  - New ADM-01c: another superuser can still suspend a superuser through the change form (302, is_active=False).
+  - ADM-01: the action guard still refuses self-suspend.
+- **V12A-02 FIXED.**
+  - The admin form (`HttpsURLFormField`, sso/admin.py) now rejects a schemeless notify_url: 200 with a form error, nothing stored.
+  - `register_service` already refused it (CMD-03), so both entry points are consistent and https-only, as the docs say.
+  - ADM-07 expectation changed from "recorded" to rejected.
+- **v1.2a + v1.1 regression on Py3.13** (`run_v12a_round.sh qa/.venv-py3.13.16 py3.13-df06e10`):
+  - functional: 313 passed / 0 failed / 2 skipped (Q-09 and one other known skip);
+  - throttle: 5/5;
+  - total: 318 passed / 0 failed / 2 skipped (was 316 / 1F with V12A-01; +1 for the new ADM-01c);
+  - all ports 8050-8059 were free after the run.
+- **Developer suite, independent check:** 293 passed / 7 skipped on Py3.13.16 + Dj5.2 (`--cov-fail-under=90` met), which matches Philip's figure.
+  The 7 skips are the MySQL-only tests.
+
+## Fix verification @ df06e10 (MySQL 8.4, 2026-10-13 ~18:36 PT)
+- Docker 29.9.0, Compose v5.6.0, MySQL **8.4.11** (`SELECT version()`).
+- Built the tests image with compose at df06e10. Ran it with `--network container:sso-qa-v12a-mysql-1` and `SSO_DBHOST=127.0.0.1`
+  (the bridge workaround).
+- The 7 formerly skipped tests: **7/7 PASSED**.
+  - 6 are in `test_mysql_integration.py`, including both `test_init_script_accounts_use_caching_sha2_password` cases.
+  - The 7th is REUSE-08, `test_concurrent_legit_refreshes_do_not_revoke_the_session`.
+- **V12A-04 FIXED.**
+- REUSE-08 repeats: **5/5 passed**, 2.3 to 2.6 s each.
+- Teardown:
+  - ran `down -v` (volume `sso-test-mysql-8.4` and network removed);
+  - removed the images `sso-qa-v12a-tests:latest` and `mysql:8.4`, and pruned the build cache (787.9 MB);
+  - `.env.test` was shredded;
+  - 0 containers / 0 images / 0 volumes remain;
+  - Docker 29.9.0 is still installed, and dockerd is still running.
+- Logs: `qa/run/mysql84-df06e10/`.
+
+## Final verdict (v1.2a @ df06e10)
+**PASS, ready to merge from a QA standpoint.**
+- V12A-01, V12A-02 and V12A-04 are fixed and verified. V12A-03 (Info) is unchanged and not blocking.
+- No new defects.
+- Open item: MySQL 8.0 was not run (out of scope by Thomas' decision).

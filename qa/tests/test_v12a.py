@@ -462,6 +462,18 @@ def test_V12A_ADM_01b_self_suspend_via_change_form(admin_url, mk_user, manage):
     active = manage.user_field(name, "is_active")
     assert active == "True", (f"V12A-01: a superuser suspended THEMSELF via the change form (status {r.status_code}); "
                               "the action guard does not cover the form")
+    assert r.status_code == 200 and "cannot suspend yourself" in r.text, r.status_code
+
+
+def test_V12A_ADM_01c_other_admin_can_suspend_a_superuser_via_change_form(admin, mk_user, manage):
+    """V12A-01 fix must not block a DIFFERENT admin from suspending someone via the change form."""
+    name, pk = mk_user("othersusp", staff=True, superuser=True)
+    page, data = _user_change_form(admin, pk)
+    data["is_staff"] = data["is_superuser"] = "on"
+    data.pop("is_active", None)
+    r = admin.post(f"/auth/user/{pk}/change/", data, page=page)
+    assert r.status_code == 302, r.text[:800]
+    assert manage.user_field(name, "is_active") == "False"
 
 
 def test_V12A_ADM_02_code_defined_app1_cannot_be_deleted(admin, manage):
@@ -579,7 +591,7 @@ def _svc_add(admin, data):
     ("http://svc.example.test/sso/events", False),
     ("javascript:alert(1)", False),
     ("ftp://svc.example.test/x", False),
-    ("svc.example.test/sso/events", None),      # missing scheme: recorded (Django 5 assume_scheme=https)
+    ("svc.example.test/sso/events", False),     # missing scheme: rejected since 7e49116 (V12A-02), same as register_service
 ])
 def test_V12A_ADM_07_service_client_admin_notify_url(admin, manage, url, ok):
     cid = "qa12-" + uuid.uuid4().hex[:8]
