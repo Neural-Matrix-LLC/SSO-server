@@ -45,7 +45,7 @@ def test_init_script_accounts_use_caching_sha2_password(account):
     if not os.environ.get("SSO_TEST_APP_PASSWORD"):
         pytest.skip("accounts come from docker/mysql-init (docker-compose.test.yml run only)")
     rows = _query("SELECT plugin FROM mysql.user WHERE user = %s", [account])
-    assert rows == [("caching_sha2_password",)]
+    assert list(rows) == [("caching_sha2_password",)]
 
 
 @pytest.mark.parametrize("account,env", [("sso_app", "SSO_TEST_APP_PASSWORD"),
