@@ -36,8 +36,9 @@ class SSO:
         app.register_error_handler(SSOError, self._error)
 
     def _set_ip(self):
-        g.client_ip = get_client_ip(request.environ.get("REMOTE_ADDR"), request.headers,
-                                    self.client.config.trusted_proxies)
+        cfg = self.client.config
+        g.client_ip = get_client_ip(request.environ.get("REMOTE_ADDR"), request.headers, cfg.trusted_proxies,
+                                    cfg.client_ip_header)
 
     @staticmethod
     def _error(exc: SSOError):

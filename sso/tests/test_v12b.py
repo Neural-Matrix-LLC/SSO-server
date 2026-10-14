@@ -75,6 +75,19 @@ def test_request_ip_trusted_and_deprecated_fallback(settings):
     assert request_ip(req) == A
 
 
+def test_request_ip_custom_header(settings):
+    rf = RequestFactory()
+    settings.SSO_TRUSTED_PROXIES_PARSED = TRUSTED
+    settings.SSO_CLIENT_IP_HEADER = "cf-connecting-ip"
+    assert request_ip(rf.get("/", REMOTE_ADDR="127.0.0.1", HTTP_CF_CONNECTING_IP=A,
+                             HTTP_X_FORWARDED_FOR="9.9.9.9")) == A
+    assert request_ip(rf.get("/", REMOTE_ADDR="127.0.0.1", HTTP_CF_CONNECTING_IP="bad",
+                             HTTP_X_FORWARDED_FOR=B)) == B  # no valid IP in the header: XFF logic
+    assert request_ip(rf.get("/", REMOTE_ADDR=B, HTTP_CF_CONNECTING_IP=A)) == B  # untrusted peer
+    settings.SSO_CLIENT_IP_HEADER = "X-Forwarded-For"
+    assert request_ip(rf.get("/", REMOTE_ADDR="127.0.0.1", HTTP_X_FORWARDED_FOR=A)) == A
+
+
 def test_deprecation_warning_w002(settings):
     from sso.checks import deprecated_num_proxies
 

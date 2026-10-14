@@ -21,6 +21,7 @@ Python 3.11+ (3.13 is the target). Runtime dependency: `httpx`.
 | `SSO_CLIENT_ID` | required | this service's ServiceClient |
 | `SSO_CLIENT_SECRET` / `SSO_CLIENT_SECRET_FILE` | required | secret or a file holding it (preferred in Docker) |
 | `SSO_TRUSTED_PROXIES` | empty (trust nobody) | IPs/CIDRs of *your* reverse proxies; never `0.0.0.0/0` |
+| `SSO_CLIENT_IP_HEADER` | empty | optional header your trusted proxy sets to the client IP (`cf-connecting-ip`, `x-real-ip`); read only when the peer is a trusted proxy and it holds a valid IP, else `X-Forwarded-For` logic. Needs `SSO_TRUSTED_PROXIES` |
 | `SSO_TIMEOUT` | `2.0` | seconds per attempt (connect 1 s) |
 | `SSO_RETRIES` | `2` | only connect errors, timeouts, 502/503/504 |
 | `SSO_CACHE_TTL` | `30` | seconds, capped at 30; `0` disables |
@@ -30,6 +31,8 @@ Python 3.11+ (3.13 is the target). Runtime dependency: `httpx`.
 - `get_client_ip(peer, headers, trusted)`: the socket peer; `X-Forwarded-For` is read only when the peer is a
   trusted proxy, walked right to left (first untrusted entry wins, malformed entry stops the walk). IPv6 is
   normalised, `::ffff:a.b.c.d` becomes `a.b.c.d`, ports / brackets / zone ids are stripped.
+  `get_client_ip(peer, headers, trusted, client_ip_header="cf-connecting-ip")` prefers that header (same walk)
+  when the peer is trusted and the header holds a valid IP; otherwise the `X-Forwarded-For` logic applies.
 - `SSOClient().check(token, client_ip, require=[...])` / `await AsyncSSOClient().check(...)` return a
   `CheckResult` (`active`, `user`, `permissions`, `ip_binding`, `ip_match`, `session_id`, `expires_at`).
   Raise `TokenInactive` (401), `PermissionDenied` (403), `NotAuthenticated` (401), `SSOUnavailable` (503).

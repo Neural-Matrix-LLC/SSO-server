@@ -10,7 +10,7 @@ import socket
 from collections.abc import Iterable, Mapping, Sequence
 
 Network = ipaddress.IPv4Network | ipaddress.IPv6Network
-__all__ = ["normalize_ip", "parse_trusted", "get_client_ip", "peer_from_socket"]
+__all__ = ["normalize_ip", "parse_trusted", "get_client_ip", "peer_from_socket", "walk"]
 
 
 def normalize_ip(value) -> str | None:
@@ -72,35 +72,58 @@ def _text(v) -> str:
     return v.decode("latin-1") if isinstance(v, bytes) else str(v)
 
 
-def _xff_values(headers) -> list[str]:
-    """Every X-Forwarded-For value, in order. ``headers``: a mapping (dict, Django ``request.headers``,
+def _header_values(headers, name: str) -> list[str]:
+    """Every value of header ``name``, in order. ``headers``: a mapping (dict, Django ``request.headers``,
     Starlette / Werkzeug headers with ``getlist``) or (name, value) pairs (ASGI raw headers)."""
     if not headers:
         return []
     getlist = getattr(headers, "getlist", None)
     if callable(getlist):
-        return [_text(v) for v in getlist("X-Forwarded-For")]
+        return [_text(v) for v in getlist(name)]
     pairs = headers.items() if isinstance(headers, Mapping) else headers
-    return [_text(v) for k, v in pairs if _text(k).lower() == "x-forwarded-for"]
+    wanted = name.lower()
+    return [_text(v) for k, v in pairs if _text(k).lower() == wanted]
 
 
-def get_client_ip(peer_addr, headers=None, trusted_proxies: Sequence[Network | str] | str = ()) -> str | None:
+def _xff_values(headers) -> list[str]:
+    return _header_values(headers, "X-Forwarded-For")
+
+
+def walk(peer_ip: str, values: Iterable[str], trusted: Sequence[Network]) -> tuple[str, bool]:
+    """Right-to-left walk of comma-separated header ``values`` from a trusted ``peer_ip`` (§4.5.2).
+    Returns (ip, whether any valid entry was used)."""
+    ip, used = peer_ip, False
+    entries = [e for value in values for e in value.split(",")]
+    for raw in reversed(entries):
+        entry = normalize_ip(raw)
+        if entry is None:
+            break  # malformed: keep the last good value
+        ip, used = entry, True
+        if not _trusted(entry, trusted):
+            break
+    return ip, used
+
+
+def get_client_ip(peer_addr, headers=None, trusted_proxies: Sequence[Network | str] | str = (),
+                  client_ip_header: str | None = None) -> str | None:
     """The client IP: the socket peer, or (only when the peer is a trusted proxy) the right-to-left walk of
-    ``X-Forwarded-For``: first untrusted entry; malformed entry -> last good one; all trusted -> leftmost."""
+    ``X-Forwarded-For``: first untrusted entry; malformed entry -> last good one; all trusted -> leftmost.
+
+    ``client_ip_header`` (e.g. ``cf-connecting-ip``, ``x-real-ip``; ``SSO_CLIENT_IP_HEADER``): a header set by
+    your trusted proxy. Read only when the peer is trusted, with the same walk; when it is absent or holds no
+    valid IP, the X-Forwarded-For logic applies. Never configure a header that clients can set directly
+    through a trusted hop."""
     trusted = parse_trusted(trusted_proxies) if isinstance(trusted_proxies, str) or any(
         isinstance(t, str) for t in trusted_proxies) else tuple(trusted_proxies)
     ip = normalize_ip(peer_addr)
     if ip is None or not trusted or not _trusted(ip, trusted):
         return ip
-    entries = [e for value in _xff_values(headers) for e in value.split(",")]
-    for raw in reversed(entries):
-        entry = normalize_ip(raw)
-        if entry is None:
-            break
-        ip = entry
-        if not _trusted(entry, trusted):
-            break
-    return ip
+    name = (client_ip_header or "").strip()
+    if name and name.lower() != "x-forwarded-for":
+        found, used = walk(ip, _header_values(headers, name), trusted)
+        if used:
+            return found
+    return walk(ip, _xff_values(headers), trusted)[0]
 
 
 def peer_from_socket(sock: socket.socket) -> str | None:

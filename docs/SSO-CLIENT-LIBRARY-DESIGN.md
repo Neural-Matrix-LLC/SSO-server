@@ -92,7 +92,11 @@ Pure function, no I/O, no framework imports.
 
 `normalize_ip(value) -> str | None`: strips port / brackets / zone id, maps `::ffff:a.b.c.d` → `a.b.c.d`,
 returns `str(ipaddress.ip_address(...))` (canonical IPv6). `parse_trusted("127.0.0.1, 172.18.0.0/16")` → networks.
-Only `X-Forwarded-For` is read (not `X-Real-IP`/`Forwarded`), matching the nginx config in §4.5.5.
+By default only `X-Forwarded-For` is read (not `X-Real-IP`/`Forwarded`), matching the nginx config in §4.5.5.
+**Custom header (0.1.0, follow-up 2026-10-14):** `get_client_ip(..., client_ip_header="cf-connecting-ip")`
+(`SSO_CLIENT_IP_HEADER`, needs `SSO_TRUSTED_PROXIES`) reads that header with the same right-to-left walk, only when
+the peer is trusted; if it is absent or holds no valid IP, step 3 (`X-Forwarded-For`) applies. The SSO-server
+has the same rule (`SSO_CLIENT_IP_HEADER`).
 
 `peer_from_socket(sock: socket.socket) -> str | None` wraps `sock.getpeername()` for raw TCP servers
 (`AF_INET`, `AF_INET6`; `AF_UNIX` → `None`).
@@ -189,6 +193,7 @@ design §6.3.
 | `SSO_CLIENT_ID` | yes | — | ServiceClient id |
 | `SSO_CLIENT_SECRET` / `SSO_CLIENT_SECRET_FILE` | yes | — | Secret, or path to a file (preferred in Docker) |
 | `SSO_TRUSTED_PROXIES` | no | empty (trust nobody) | Comma-separated IPs/CIDRs |
+| `SSO_CLIENT_IP_HEADER` | no | empty | Trusted-proxy client-IP header (e.g. `cf-connecting-ip`, `x-real-ip`), §3 |
 | `SSO_TIMEOUT` | no | `2.0` | Seconds per attempt |
 | `SSO_RETRIES` | no | `2` | |
 | `SSO_CACHE_TTL` | no | `30` | Seconds, 0 disables, capped at 30 |

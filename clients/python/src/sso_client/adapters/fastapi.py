@@ -22,9 +22,9 @@ from ..models import CheckResult
 from ..responses import error_response
 
 
-def request_client_ip(request: Request, trusted) -> str | None:
+def request_client_ip(request: Request, trusted, client_ip_header: str = "") -> str | None:
     peer = request.client.host if request.client else None
-    return get_client_ip(peer, request.headers, trusted)
+    return get_client_ip(peer, request.headers, trusted, client_ip_header)
 
 
 class SSO:
@@ -44,7 +44,8 @@ class SSO:
 
     def client_ip(self, request: Request) -> str | None:
         """Dependency: the trusted client IP."""
-        ip = request_client_ip(request, self.client.config.trusted_proxies)
+        cfg = self.client.config
+        ip = request_client_ip(request, cfg.trusted_proxies, cfg.client_ip_header)
         request.state.client_ip = ip
         return ip
 

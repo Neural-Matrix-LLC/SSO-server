@@ -185,3 +185,45 @@ def test_helpers():
     from sso_client import get_client_ip
     scope = asgi_scope("127.0.0.1", xff=A, token="t")
     assert get_client_ip(scope["client"], scope["headers"], "127.0.0.1") == A
+
+
+def test_adapters_honour_client_ip_header(django_setup):
+    from django.test import RequestFactory
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    import flask
+
+    from sso_client.adapters import django as dj
+    from sso_client.adapters.fastapi import SSO as FastSSO
+    from sso_client.adapters.flask import SSO as FlaskSSO
+
+    fake = FakeSSO()
+    kw = dict(trusted_proxies="127.0.0.1", client_ip_header="cf-connecting-ip")
+    dj.set_client(fake.client(**kw))
+    try:
+        rf = RequestFactory()
+        assert dj.request_client_ip(rf.get("/", REMOTE_ADDR="127.0.0.1", HTTP_CF_CONNECTING_IP=A)) == A
+        assert dj.request_client_ip(rf.get("/", REMOTE_ADDR=B, HTTP_CF_CONNECTING_IP=A)) == B
+    finally:
+        dj.set_client(None)
+
+    sso = FastSSO(fake.async_client(**kw))
+    app = FastAPI()
+
+    @app.get("/ip")
+    async def ip(v: str = Depends(sso.client_ip)):
+        return {"ip": v}
+
+    assert TestClient(app, client=("127.0.0.1", 1)).get("/ip", headers={"CF-Connecting-IP": A}).json() == {"ip": A}
+    assert TestClient(app, client=(B, 1)).get("/ip", headers={"CF-Connecting-IP": A}).json() == {"ip": B}
+
+    fapp = flask.Flask("hdr")
+    FlaskSSO(fapp, client=fake.client(**kw))
+
+    @fapp.get("/ip")
+    def fip():
+        return {"ip": flask.g.client_ip}
+
+    c = fapp.test_client()
+    assert c.get("/ip", headers={"CF-Connecting-IP": A}, environ_base={"REMOTE_ADDR": "127.0.0.1"}).get_json() == {"ip": A}
+    assert c.get("/ip", headers={"CF-Connecting-IP": A}, environ_base={"REMOTE_ADDR": B}).get_json() == {"ip": B}

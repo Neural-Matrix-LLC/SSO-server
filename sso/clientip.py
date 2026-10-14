@@ -72,20 +72,31 @@ def _trusted(ip: str, nets: Sequence[Network]) -> bool:
     return any(addr.version == n.version and addr in n for n in nets)
 
 
-def walk_forwarded(peer, xff_values: Iterable[str], trusted: Sequence[Network]) -> str | None:
-    """§4.5.2. ``xff_values``: every X-Forwarded-For header value (joined in order)."""
-    ip = normalize_ip(peer)
-    if ip is None or not trusted or not _trusted(ip, trusted):
-        return ip
-    entries = [e for value in xff_values for e in value.split(",")]
+def _walk(ip: str, values: Iterable[str], trusted: Sequence[Network]) -> tuple[str, bool]:
+    used = False
+    entries = [e for value in values for e in value.split(",")]
     for raw in reversed(entries):
         entry = normalize_ip(raw)
         if entry is None:
             break  # malformed: keep the last good value
-        ip = entry
+        ip, used = entry, True
         if not _trusted(entry, trusted):
             break
-    return ip
+    return ip, used
+
+
+def walk_forwarded(peer, xff_values: Iterable[str], trusted: Sequence[Network],
+                   header_values: Iterable[str] | None = None) -> str | None:
+    """§4.5.2. ``xff_values``: every X-Forwarded-For header value (joined in order). ``header_values``: the
+    values of a custom client-IP header (``SSO_CLIENT_IP_HEADER``), preferred when it holds a valid IP."""
+    ip = normalize_ip(peer)
+    if ip is None or not trusted or not _trusted(ip, trusted):
+        return ip
+    if header_values is not None:
+        found, used = _walk(ip, header_values, trusted)
+        if used:
+            return found
+    return _walk(ip, xff_values, trusted)[0]
 
 
 def request_ip(request) -> str | None:
@@ -97,7 +108,12 @@ def request_ip(request) -> str | None:
     trusted = getattr(settings, "SSO_TRUSTED_PROXIES_PARSED", ())
     if trusted:
         xff = meta.get("HTTP_X_FORWARDED_FOR")
-        return walk_forwarded(meta.get("REMOTE_ADDR"), [xff] if xff else [], trusted)
+        name = getattr(settings, "SSO_CLIENT_IP_HEADER", "")
+        custom = None
+        if name and name.lower() != "x-forwarded-for":
+            value = meta.get("HTTP_" + name.upper().replace("-", "_"))
+            custom = [value] if value else []
+        return walk_forwarded(meta.get("REMOTE_ADDR"), [xff] if xff else [], trusted, custom)
     # deprecated fallback: DRF hop count (SSO_NUM_PROXIES), then normalised
     from rest_framework.throttling import BaseThrottle
 

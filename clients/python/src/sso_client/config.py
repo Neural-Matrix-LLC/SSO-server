@@ -22,6 +22,7 @@ class SSOConfig:
     client_id: str
     client_secret: str = field(repr=False)
     trusted_proxies: tuple[Network, ...] = ()
+    client_ip_header: str = ""  # e.g. "cf-connecting-ip"; only from trusted proxies
     timeout: float = 2.0
     connect_timeout: float = 1.0
     retries: int = 2
@@ -41,6 +42,8 @@ class SSOConfig:
                 object.__setattr__(self, "trusted_proxies", parse_trusted(self.trusted_proxies))
             except ValueError as exc:
                 raise SSOConfigError(f"trusted_proxies: {exc}") from None
+        if self.client_ip_header and not self.trusted_proxies:
+            raise SSOConfigError("client_ip_header (SSO_CLIENT_IP_HEADER) needs trusted_proxies (SSO_TRUSTED_PROXIES)")
         if self.cache_ttl < 0 or self.timeout <= 0 or self.retries < 0:
             raise SSOConfigError("cache_ttl >= 0, timeout > 0, retries >= 0")
         object.__setattr__(self, "cache_ttl", min(float(self.cache_ttl), MAX_CACHE_TTL))  # agreed maximum
@@ -61,7 +64,8 @@ class SSOConfig:
         try:
             kw = dict(
                 base_url=e.get("SSO_BASE_URL", ""), client_id=e.get("SSO_CLIENT_ID", ""), client_secret=secret,
-                trusted_proxies=e.get("SSO_TRUSTED_PROXIES", ""), timeout=float(e.get("SSO_TIMEOUT", "2.0")),
+                trusted_proxies=e.get("SSO_TRUSTED_PROXIES", ""),
+                client_ip_header=e.get("SSO_CLIENT_IP_HEADER", "").strip(), timeout=float(e.get("SSO_TIMEOUT", "2.0")),
                 retries=int(e.get("SSO_RETRIES", "2")), cache_ttl=float(e.get("SSO_CACHE_TTL", "30")),
                 allow_http=_bool(e.get("SSO_ALLOW_HTTP", "false")))
         except ValueError as exc:

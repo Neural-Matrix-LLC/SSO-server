@@ -646,6 +646,9 @@ fallback, used only while `SSO_TRUSTED_PROXIES` is empty, with system-check warn
 `manage.py check` / at start, not on every request). The delegated `client_ip` of a ServiceClient is normalised
 the same way (so `1.2.3.4:5678` is now accepted as `1.2.3.4`; a value that does not normalise is still 400).
 The library carries the same algorithm; `sso/tests/test_clientip_parity.py` checks both give identical results.
+Follow-up (2026-10-14): optional `SSO_CLIENT_IP_HEADER` on both sides (e.g. `cf-connecting-ip`): read only from a
+trusted peer, same walk; absent or no valid IP → `X-Forwarded-For` logic. Without `SSO_TRUSTED_PROXIES` it is
+fatal on the server and `SSOConfigError` in the library.
 
 **Binding (§4.2).** `sso/ipbinding.py`. `SSO_IP_BINDING_MODE` (`NOIP` default; other values fatal at start).
 `SSO_IP_BINDING_KEY` defaults to `HMAC-SHA256(SSO_SECRET_KEY, "sso-ip-binding-v1")`. `cip` is written into the

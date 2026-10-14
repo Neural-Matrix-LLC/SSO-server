@@ -224,6 +224,11 @@ try:
     SSO_TRUSTED_PROXIES_PARSED = _parse_trusted(SSO_TRUSTED_PROXIES)
 except ValueError as _exc:
     raise ImproperlyConfigured(f"SSO_TRUSTED_PROXIES: {_exc}") from None
+# optional header written by a trusted proxy with the client IP (e.g. cf-connecting-ip, x-real-ip); read only
+# when the peer is in SSO_TRUSTED_PROXIES and it holds a valid IP, else X-Forwarded-For (design §4.5.2)
+SSO_CLIENT_IP_HEADER = env.str("SSO_CLIENT_IP_HEADER", default="").strip()
+if SSO_CLIENT_IP_HEADER and not SSO_TRUSTED_PROXIES_PARSED:
+    raise ImproperlyConfigured("SSO_CLIENT_IP_HEADER needs SSO_TRUSTED_PROXIES")
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],

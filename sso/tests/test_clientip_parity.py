@@ -37,3 +37,16 @@ def test_walk_same(peer, xff):
     nets = clientip.parse_trusted(TRUSTED)
     assert clientip.walk_forwarded(peer, xff, nets) == lib.get_client_ip(
         peer, [("X-Forwarded-For", v) for v in xff], nets)
+
+
+HEADER_CASES = [("127.0.0.1", ["203.0.113.7"], []), ("127.0.0.1", ["garbage"], ["203.0.113.7"]),
+                ("127.0.0.1", [], ["203.0.113.7"]), ("198.51.100.1", ["203.0.113.7"], []),
+                ("127.0.0.1", ["172.18.0.4, 203.0.113.7"], ["9.9.9.9"])]
+
+
+@pytest.mark.parametrize("peer,custom,xff", HEADER_CASES)
+def test_custom_header_same(peer, custom, xff):
+    nets = clientip.parse_trusted(TRUSTED)
+    headers = [("cf-connecting-ip", v) for v in custom] + [("X-Forwarded-For", v) for v in xff]
+    assert clientip.walk_forwarded(peer, xff, nets, custom) == lib.get_client_ip(peer, headers, nets,
+                                                                                 "cf-connecting-ip")

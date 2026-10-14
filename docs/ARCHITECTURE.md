@@ -1531,6 +1531,7 @@ From `ssoproject/settings.py` (env or `.env`; `SSO_ENV_FILE` chooses the file, d
 | `SSO_TEST_DBNAME` | `test_dcWebUsers` | Test DB name |
 | `SSO_CACHE_URL` | empty, fatal (debug: LocMem); compose `redis://redis:6379/0` | Shared throttle cache; LocMem/dummy fatal. Key prefix `sso` |
 | `SSO_TRUSTED_PROXIES` | empty | v1.2b: comma list of proxy IPs/CIDRs whose `X-Forwarded-For` is trusted (right-to-left walk). `/0` is fatal. When set, `SSO_NUM_PROXIES` is ignored |
+| `SSO_CLIENT_IP_HEADER` | empty | v1.2b: optional client-IP header set by a trusted proxy (`cf-connecting-ip`, `x-real-ip`); preferred over XFF when the peer is trusted and it holds a valid IP. Needs `SSO_TRUSTED_PROXIES` (fatal otherwise) |
 | `SSO_NUM_PROXIES` | `0` (compose `1`) | **Deprecated** (v1.2b, warning `sso.W002`): trusted proxy hops for `X-Forwarded-For`, used only while `SSO_TRUSTED_PROXIES` is empty |
 | `SSO_IP_BINDING_MODE` | `NOIP` | v1.2b: `NOIP`, `WARNING` or `ENFORCE` (other values fatal) |
 | `SSO_IP_BINDING_KEY` | derived from `SSO_SECRET_KEY` | v1.2b: HMAC key for `cip`; changing it (or the secret key) makes every bound token mismatch |

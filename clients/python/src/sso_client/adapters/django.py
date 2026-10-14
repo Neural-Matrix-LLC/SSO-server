@@ -46,11 +46,11 @@ def set_client(client: SSOClient | None) -> None:
     _client = client
 
 
-def request_client_ip(request, trusted=None) -> str | None:
-    if trusted is None:
-        trusted = get_client().config.trusted_proxies
-    return get_client_ip(request.META.get("REMOTE_ADDR"), {"X-Forwarded-For": request.META["HTTP_X_FORWARDED_FOR"]}
-                         if "HTTP_X_FORWARDED_FOR" in request.META else {}, trusted)
+def request_client_ip(request, trusted=None, client_ip_header=None) -> str | None:
+    cfg = get_client().config
+    trusted = cfg.trusted_proxies if trusted is None else trusted
+    header = cfg.client_ip_header if client_ip_header is None else client_ip_header
+    return get_client_ip(request.META.get("REMOTE_ADDR"), request.headers, trusted, header)
 
 
 def check_request(request, require=()):
