@@ -38,5 +38,10 @@ class SSOUnavailable(SSOError):
 
 
 class SSOProtocolError(SSOError):
-    """Unexpected answer (bad JSON, 401 invalid_client = wrong service credentials, 4xx)."""
+    """Unexpected answer (bad JSON, 401 invalid_client = wrong service credentials, 4xx).
+    ``status_code``: the SSO's HTTP status when there was one (401 = this service's credentials are wrong)."""
     status = 503
+
+    def __init__(self, message: str = "", status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code

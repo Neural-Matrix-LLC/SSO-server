@@ -60,7 +60,7 @@ class _Base:
         if resp.status_code == 429 or resp.status_code >= 500:
             raise SSOUnavailable(f"SSO answered {resp.status_code}")
         if resp.status_code != 200:
-            raise SSOProtocolError(f"SSO answered {resp.status_code}")  # e.g. 401 invalid_client: bad credentials
+            raise SSOProtocolError(f"SSO answered {resp.status_code}", resp.status_code)  # 401: bad credentials
         try:
             body = resp.json()
         except (json.JSONDecodeError, ValueError):

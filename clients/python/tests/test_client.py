@@ -134,8 +134,9 @@ def test_fail_closed_and_retries():
         with pytest.raises(SSOUnavailable):
             c.check(tok, A)
     fake.status = 401
-    with pytest.raises(SSOProtocolError):
+    with pytest.raises(SSOProtocolError) as e:
         c.check(tok, A)
+    assert e.value.status_code == 401
     fake.up()
     assert c.check(tok, A).active
 
