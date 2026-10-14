@@ -518,6 +518,8 @@ break-glass tool.
 | `GET` / `POST /permissions` · `PATCH` / `DELETE /permissions/{codename}` | `application.*` permissions |
 | `GET` / `POST /services` · `GET` / `PATCH` / `DELETE /services/{client_id}` · `POST /services/{client_id}/rotate-secret` | ServiceClients (secret returned once) |
 | `GET /apps` · `PUT /apps/{app_codename}/permissions?dry_run=` | applications; idempotent bulk upsert of an app's `config.py` permissions; returns `created`/`updated`/`unchanged`/`missing`; never deletes |
+| `POST /reauth` | step-up: `{password}` → `reauth_token` (5 min); destructive endpoints need `X-SSO-Reauth`, else `401 reauth_required` |
+| `GET /devices?owner=` · `DELETE /devices/{client_id}` | FUND Local Gateway device credentials |
 | `GET /audit` | audit log (`actor`, `target`, `action`, `since`) |
 
 Also planned in v1.3a (not under `/admin`):
@@ -525,6 +527,7 @@ Also planned in v1.3a (not under `/admin`):
 | Method + path | Auth | Action |
 |---|---|---|
 | `POST /api/v1/auth/service-token` | Basic ServiceClient, `grant_type=client_credentials` | 5-min RS256 service token: `sub="svc:<client_id>"`, `typ="service"`, `perms`, no `cip` (IP binding not applied) |
+| `POST /api/v1/devices` | relay service token on behalf of the user | create a device ServiceClient (`kind=device`, owner, Ed25519 public key) after pairing; device tokens via `service-token` with `private_key_jwt`, `typ=device`, no IP binding |
 | `GET /api/v1/service/users/inactive?since=` | service token | user ids suspended or deleted since a cursor, for the suspend sweep |
 
 On behalf of a user, a service sends `Authorization: Bearer <service token>`, `X-SSO-User-Token` and `X-SSO-Client-IP`

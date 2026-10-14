@@ -535,12 +535,12 @@ change passwords in myFinance.
 | current (v1.1) | REST API, login/refresh/logout/introspect/JWKS, `application.*` perms, admin (stock), llm-wiki-svc integration |
 | v1.2a (**implemented**, §10) | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
 | v1.2b | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
-| v1.3a (**new**, updated 2026-10-14) | SSO admin REST API + audit log, bulk permission import `PUT /api/v1/admin/apps/{app}/permissions` from each app's `config.py`, service tokens (`POST /api/v1/auth/service-token`, client credentials, no IP binding) with on-behalf-of rules, `GET /api/v1/service/users/inactive` feed. No user import: FUND users are already in `dcWebUsers` ([ecosystem design](ECOSYSTEM-INTEGRATION.md) §2, §4.1, §5.3, §7) |
-| v1.3b (FUND repo) | `AUTH_PROVIDER=legacy\|both\|sso` in FUND root `.env`; agents on `sso-client`; every endpoint needs a token in `both`/`sso`; llm-wiki behind configurable `/proxy/llmwiki/` |
-| v1.3c (FUND repo) | Admin UI `/admin` (users, permissions, services, application permission import, interim suspend cleanup); Django admin stays break-glass |
-| v1.3d (SGMCP + FUND auto-trade) | Service tokens, on-behalf-of, `owner_sub`, trade/live permissions; suspend stops and deletes the owner's strategies (interim call + 60 s sweep) |
+| v1.3a (**new**, updated 2026-10-14 round 2) | SSO admin REST API + audit log + step-up reauth (`POST /api/v1/admin/reauth`, `X-SSO-Reauth`), bulk permission import from each app's `sso_permissions.py`, service tokens (client credentials, no IP binding) + on-behalf-of, **device clients** for the FUND Local Gateway (`POST /api/v1/devices`, `private_key_jwt`, revoked on suspend), inactive-users feed ([ecosystem design](ECOSYSTEM-INTEGRATION.md) §2, §4.1, §5, §7) |
+| v1.3b (FUND repo) | `AUTH_PROVIDER=legacy\|both\|sso`; agents on `sso-client` with per-service credentials (recommended); llm-wiki behind configurable `/proxy/llmwiki/` |
+| v1.3c (FUND repo) | Admin UI `/admin` (users, permissions, services, devices, permission import, step-up, interim suspend calls); Django admin stays break-glass |
+| v1.3d (FUND + SGMCP) | Local broker gateway: FUND `gateway-relay`, pairing, outbound WSS from the FUND Local Gateway on the user's PC, multi-PC routing; suspend stops and deletes strategies (positions untouched) and revokes devices |
 | v1.3e (FUND repo) | `AUTH_PROVIDER=sso`, retire `fund-auth` |
-| v1.4 | Signed webhooks to registered services; `user.suspended` replaces the interim suspend call |
+| v1.4 | Signed webhooks to registered services; `user.suspended` replaces the interim suspend calls |
 | future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
 
 The v1.3 rows come from Thomas's ecosystem picture (FUND-Financial-Research as the core); they are a proposal

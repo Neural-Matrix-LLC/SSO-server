@@ -22,7 +22,7 @@ Labels used in this document:
 2. Permission model for the ecosystem
 3. (a) FUND frontend: login migration to the SSO
 4. (b) FUND backend services: verifying tokens with `sso-client`
-5. (c) Smart_Gateway_MCP: users, agents and services
+5. (c) Smart_Gateway_MCP: local broker gateway on the user's PC
 6. (d) llm-wiki-svc behind FUND
 7. (e) Admin UI in FUND and the SSO admin REST API (new phase)
 8. (f) End-to-end flows
@@ -75,7 +75,7 @@ DRF token only; the JWT stays valid until `exp`.
 - Data: own MySQL database `sgmcp` (`strategies`, `accounts`, `positions`, `orders`). **No user/owner column**:
   instances are keyed by `process_id`, grouped by `workflow_id::strategy_name`.
 - `docker/` builds the **FUND Local Gateway** (FutuOpenD, CP Gateway, Webull SDK) bound to 127.0.0.1;
-  `Local_login.md` (proposal, not built) moves SGMCP to the cloud with broker logins on the user's machine and a
+  `Local_login.md` (proposal, not built; superseded for this design by §5) moves SGMCP to the cloud with broker logins on the user's machine and a
   per-**FUND user ID** broker access list. Broker secrets never leave the gateway host.
 
 ### 1.3 llm-wiki-svc [Repo]
@@ -95,13 +95,13 @@ host port 8011, the same as `fund-auth`.
 ## 2. Permission model: each application declares its own permissions [Decision 2026-10-14]
 
 One SSO token for all services (decision 5). Access is checked by asking the SSO (introspect / permission query,
-v1.2b). Permissions are **not** a fixed list in the SSO: **each application ships a `config.py`** declaring its own
+v1.2b). Permissions are **not** a fixed list in the SSO: **each application ships a separate `sso_permissions.py`** (not inside its existing `config.py`) declaring its own
 permissions, and an admin imports them into the SSO from the FUND Admin UI (§7.4).
 
-### 2.1 `config.py` schema [Proposal]
+### 2.1 `sso_permissions.py` schema [Decision 2026-10-14 round 2: separate file]
 
 ```python
-# <app repo>/config.py  (or sso_permissions.py if config.py is already taken)
+# <app repo>/sso_permissions.py  (separate from the app's config.py)
 APP_CODENAME = "gateway"            # [a-z][a-z0-9_]{1,40}; becomes application.<APP_CODENAME>
 APP_NAME = "Smart Gateway MCP"
 APP_DESCRIPTION = "Broker connectivity and strategy execution"
@@ -195,11 +195,11 @@ services.
 
 | FUND today [Repo] | SSO target |
 |---|---|
-| `is_staff` → `role:"admin"` | `application.fund_admin` (example permission from FUND's `config.py`) |
+| `is_staff` → `role:"admin"` | `application.fund_admin` (example permission from FUND's `sso_permissions.py`) |
 | any active user → `role:"user"` | `application.fund` |
 | JWT `sub` = username | SSO `sub` = user id; the `username` claim carries the name, so FUND data keyed by username keeps working |
 
-One-off step at cutover: import FUND's `config.py` permissions (§7.4), then grant `application.fund` (and
+One-off step at cutover: import FUND's `sso_permissions.py` permissions (§7.4), then grant `application.fund` (and
 `fund_admin` to today's `is_staff` users) through groups. Caveat [Repo]: FUND's custom model declares `email`
 unique; the stock model the SSO uses does not, so FUND's DB constraint (if migrated) stays and SSO admin create
 must not insert duplicate emails.
@@ -235,8 +235,8 @@ flowchart LR
 ## 4. (b) FUND backend services verifying tokens via `sso-client`
 
 Each FUND agent (FastAPI) adds the `sso-client` FastAPI dependency (library design §FastAPI). Settings per agent:
-`SSO_URL`, ServiceClient id/secret (one ServiceClient **per agent** or one shared `fund-backend` client,
-open question Q1), `TRUSTED_PROXY_IPS` = the `fund-frontend` nginx container address / `fund-network` subnet.
+`SSO_URL`, ServiceClient id/secret (**recommended default: one ServiceClient per service/agent**, pending
+Thomas's confirmation, Q1), `TRUSTED_PROXY_IPS` = the `fund-frontend` nginx container address / `fund-network` subnet.
 
 | Agent | Required permission(s) [Proposal] |
 |---|---|
@@ -274,11 +274,11 @@ sequenceDiagram
   end
 ```
 
-### 4.1 Service-to-service and acting on behalf of a user [Decision 2026-10-14, interpretation]
+### 4.1 Service-to-service and acting on behalf of a user [Decision 2026-10-14, confirmed]
 
-> Thomas's answer here was cut off; this is our interpretation, to be confirmed: **SSO user login is for external
-> clients (mostly real people) and IP binding applies to them. Internal processes (AI agents, MCP clients, other
-> services) authenticate as registered service clients with their own credentials; IP binding does not apply.**
+> **Confirmed by Thomas:** SSO user login is for external clients (mostly real people) and IP binding applies to
+> them. Internal processes (AI agents, MCP clients, other services, and the FUND Local Gateway's device credential,
+> §5.2) authenticate as registered service clients with their own credentials; IP binding does not apply.
 
 **Service tokens [Proposal, v1.3a]**: a registered ServiceClient calls `POST /api/v1/auth/service-token`
 (OAuth2 `grant_type=client_credentials`, HTTP Basic `client_id:secret`) and gets a short RS256 access token
@@ -301,7 +301,7 @@ as today's `client_ip` from a ServiceClient). The effective principal is the **u
 in logs. Services must not forward a user token they did not receive in the current request.
 
 **Long-running work** (a strategy running for days, a scheduled job) does not keep the user token: the service runs
-it under its own service identity and records the `owner_sub` of the user who started it. Suspend handling (§5.3)
+it under its own service identity and records the `owner_sub` of the user who started it. Suspend handling (§5.6)
 uses that owner. OAuth token exchange / delegated tokens (RFC 8693) are not planned (TODOS).
 
 ```mermaid
@@ -329,115 +329,206 @@ trusted hop and `fund-frontend` nginx the second.
 
 ---
 
-## 5. (c) Smart_Gateway_MCP
+## 5. (c) Smart_Gateway_MCP: local broker gateway on the user's PC [Decision 2026-10-14 round 2]
 
-### 5.1 Three kinds of caller
+**Broker login is local to the user.** The user logs in to FUND; FUND points them to the **FUND Local Gateway**, a
+Docker install on their own PC; that starts the local Smart Gateway(s) (SGMCP with IBKR / Webull / Futu / simulator
+connectors), which **connect back outbound** to a new FUND backend service, the **gateway relay**. There is no cloud
+gateway: this replaces the earlier "SGMCP on the FUND host or in the cloud" assumption (and differs from
+`Local_login.md`, which kept SGMCP in the cloud with a forwarder-only container; see Q3).
 
-```mermaid
-flowchart TB
-  SPA["FUND SPA (person)"] -- "Bearer user token" --> AT["auto-trade agent"]
-  AT -- "MCP: service token + user token + browser IP (on behalf of)" --> GW["SGMCP /mcp"]
-  MCPC["MCP / AI agents, Claude Code, scripts"] -- "MCP: service token of a registered service client" --> GW
-  SCHED["auto-trade monitor loop, FUND scheduler"] -- "MCP: service token" --> GW
-  GW -- "verify service token (JWKS); introspect user token + browser IP" --> SSO["SSO server"]
-  GW --> BRK["Broker sessions: Futu, IBKR, Webull, sim (credentials stay here)"]
-```
+### 5.1 Components
 
-| Caller | Credential at SGMCP | Permissions checked | IP binding |
-|---|---|---|---|
-| Person via FUND (auto-trade relays) | auto-trade service token + user token + browser IP | user holds `gateway` (+`gateway_trade`, +`gateway_live` for live); auto-trade may delegate | yes, browser IP |
-| MCP / AI agent | its own service client's service token | the service client's granted permissions; trading tools only if an admin granted `gateway_trade` to that client; `owner_sub` = `svc:<client_id>` | no |
-| Monitor / scheduled jobs | service token | read tools only (allow-list) unless granted | no |
-| Operator `/ui` broker login | unchanged local token for now (open question Q2) | | |
-
-- The static `SGMCP_AUTH_TOKEN` stays as a break-glass / dev fallback, off in production after cutover.
-- **Broker credentials stay in the gateway** (or the FUND Local Gateway per `Local_login.md`). The SSO only says
-  *who* may trade.
-- **Ownership** (new in SGMCP): `strategies` gets `owner_sub` (SSO user id, or `svc:<client_id>`). Lists filter by
-  owner unless the caller holds `fund_admin`; stop/delete only by owner or `fund_admin`. This is also the key for
-  `Local_login.md`'s per-user broker access list.
-- **Trading needs stronger permission**: submit/stop/delete need `gateway_trade`; `environment="live"` needs
-  `gateway_live` **and** `SGMCP_ALLOW_LIVE=1`. Trading tools never use the 30 s cache.
-- Deployment location (same host as FUND or cloud per `Local_login.md`) and domain are **TBD / configurable**:
-  ongoing development. Everything above depends only on `SSO_URL`, the ServiceClient credentials and the trusted
-  proxy list, all set in `.env`.
-
-### 5.2 Failure events
-
-**SSO down while a user submits**:
+| Component | Where | Role |
+|---|---|---|
+| FUND Local Gateway (Docker compose, extends SGMCP `docker/`) [Proposal] | user's PC | `local-agent` (pairing, outbound link, frame routing) + SGMCP + FutuOpenD / IBKR CP Gateway / Webull SDK / simulator. Ports bound to `127.0.0.1` only; **no inbound port** |
+| SGMCP `/ui` | user's PC, `127.0.0.1` | broker logins, Futu unlock; **stays local**, its local token, never exposed to FUND |
+| Broker credentials | user's PC only | passwords, 2FA, Webull App Key/Secret, Futu trade password **never leave the PC** (not in FUND, not in the SSO) |
+| `gateway-relay` (new FUND service, e.g. `:8020`, behind FUND nginx `wss://<fund>/relay/`) [Proposal] | FUND host | terminates device links, tracks online devices and their broker accounts, routes MCP calls from auto-trade / AI agents to the right device, relays notifications back |
+| auto-trade | FUND host | unchanged MCP client, now pointed at the relay (`/relay/mcp/{device_id}`) instead of `host.docker.internal:8080` |
+| SSO server | SSO host | issues and revokes the **device credential** (a ServiceClient of kind `device` bound to the FUND user) |
 
 ```mermaid
-sequenceDiagram
-  autonumber
-  participant AT as auto-trade
-  participant GW as SGMCP
-  participant SSO as SSO server
-  participant BR as Broker
-  AT->>GW: submit_strategy (user token)
-  GW->>SSO: introspect
-  SSO--xGW: timeout / 5xx
-  GW-->>AT: error sso_unavailable (fail closed, nothing submitted)
-  AT-->>AT: show "login service unavailable, retry"
-  Note over GW,BR: Running strategies are NOT stopped: they run under the gateway's own authority. Read tools may use a cached active answer up to 30 s, then fail closed
-```
-
-**Broker down mid-strategy** (existing SGMCP behaviour [Repo]: reconnect window `SGMCP_RECONNECT_MAX_SECS`, `WAITING_GATEWAY`):
-
-```mermaid
-sequenceDiagram
-  autonumber
-  participant GW as SGMCP runner
-  participant BR as Broker gateway
-  participant AT as auto-trade
-  participant SPA as FUND SPA
-  GW->>BR: place order
-  BR--xGW: connection lost
-  GW->>GW: status WAITING_GATEWAY, no new orders, reconnect with backoff
-  GW-->>AT: notification status_changed / broker_alert
-  AT-->>SPA: panel shows broker offline
-  alt reconnect within SGMCP_RECONNECT_MAX_SECS
-    GW->>BR: reconcile open orders (dealt_qty deltas), resume
-  else window exceeded
-    GW->>GW: strategy halted, ERROR(broker)
-    GW-->>AT: strategy_stopped
+flowchart LR
+  subgraph PC["User PC - FUND Local Gateway (Docker), no inbound port"]
+    LA["local-agent"]
+    LSG["SGMCP local - strategies, ledgers, /ui on 127.0.0.1"]
+    FUTU["FutuOpenD"]
+    IBKR["IBKR CP Gateway"]
+    WB["Webull SDK"]
+    SIM["Simulator"]
+    LA <--> LSG
+    LSG --> FUTU & IBKR & WB & SIM
   end
-  Note over GW: SSO is not involved, no token is needed for the runner
+  subgraph FUNDH["FUND host"]
+    NG["FUND nginx"]
+    RL["gateway-relay"]
+    AT["auto-trade"]
+  end
+  SSO["SSO server"]
+  BRX["Broker venues"]
+  LA -- "outbound WSS, device token" --> NG --> RL
+  AT -- "MCP, service token + user token + browser IP" --> RL
+  RL -- "introspect device and user tokens" --> SSO
+  LA -- "client credentials (device key) for device token" --> SSO
+  FUTU & IBKR & WB --> BRX
 ```
 
-**User token expires mid-order**:
+### 5.2 Pairing: provisioning the device credential after SSO login [Proposal]
+
+1. The user, logged in to FUND (SSO user token, IP-bound), opens **Brokers → Connect this PC**. The SPA calls
+   `POST /relay/devices/pairing-code` → one-time code (8 chars, 10 min, single use) + install command
+   (`fundgw pair <code>` or a download link).
+2. On the PC, `local-agent` generates an **Ed25519 key pair; the private key never leaves the PC** (Docker volume,
+   file mode 0600). It sends `{code, device_name, public_key}` to `POST /relay/devices/pair` (no other credential).
+3. The relay checks the code, then, using its service token **on behalf of the user** who created the code, calls the
+   SSO `POST /api/v1/devices` → the SSO creates a ServiceClient `kind=device`, `owner=<user sub>`,
+   `client_id=dev_…`, public key registered, permissions = the `gateway` app's device scope. Shown in FUND `/admin`
+   and under the user's own "My devices".
+4. From then on, `local-agent` gets a **5-min device token** from `POST /api/v1/auth/service-token` with
+   `client_assertion` signed by its private key (`private_key_jwt`); claims `typ="device"`, `sub="dev:<id>"`,
+   `owner=<user sub>`, **no `cip`: IP binding is not applied** (it is for user-facing calls only).
 
 ```mermaid
 sequenceDiagram
   autonumber
+  actor U as User
   participant SPA as FUND SPA
-  participant AT as auto-trade
-  participant GW as SGMCP
+  participant RL as gateway-relay
   participant SSO as SSO server
-  SPA->>AT: submit (user token valid, 20 s left)
-  AT->>GW: submit_strategy (service token + user token + IP)
-  GW->>SSO: introspect user token: active, allowed gateway_trade
-  GW->>GW: record owner_sub, accept PENDING, runner places orders
-  Note over SPA,SSO: user token expires, the order and strategy continue under the gateway's authority
-  SPA->>AT: get status (expired token)
-  AT-->>SPA: 401, SPA refreshes, retries, OK
+  participant LA as local-agent (PC)
+  U->>SPA: Brokers, Connect this PC
+  SPA->>RL: POST /relay/devices/pairing-code (user token, IP bound)
+  RL->>SSO: introspect user token, require application.gateway
+  RL-->>SPA: code K7Q2-M9XD (10 min) + install command
+  U->>LA: fundgw pair K7Q2-M9XD
+  LA->>LA: generate Ed25519 key pair (private key stays on PC)
+  LA->>RL: POST /relay/devices/pair {code, device_name, public_key}
+  RL->>SSO: POST /api/v1/devices owner=user (relay service token, on behalf of user)
+  SSO-->>RL: client_id dev_8f3a
+  RL-->>LA: client_id dev_8f3a, relay URL
+  LA->>SSO: POST /auth/service-token (private_key_jwt)
+  SSO-->>LA: device token (5 min, typ device, owner user, no cip)
+  LA->>RL: open WSS, Bearer device token
+  RL->>SSO: introspect device token (active, owner active)
+  LA->>RL: hello {broker accounts from local SGMCP}
+  RL-->>SPA: device online, accounts listed
 ```
 
-### 5.3 Suspend stops and deletes the user's strategies [Decision 2026-10-14]
+### 5.3 The link and who may call what
 
-When a user is suspended, **all their running strategies / auto-trade jobs are stopped and deleted** (SGMCP
-`stop_strategy` then `delete_strategy`, which cancels open orders and purges the instance [Repo: purge-on-delete]).
-[Proposal] Positions left open at the broker are reported to the operator, not market-closed automatically (open
-question Q4).
+- One **outbound WSS** per device (`wss://<fund>/relay/link`; HTTPS long-poll fallback for networks that block
+  WebSockets). Frames carry MCP JSON-RPC requests/responses and notifications, plus `hello`, `heartbeat` (20 s),
+  `suspend`, `revoke`. The relay never sees broker credentials.
+- The local-agent renews its device token every ~4 min over the open link (`reauth` frame); the relay closes the
+  link if a renewal is missing or introspect says `active:false`.
 
-Mechanism by phase:
+| Caller | Path | Credential | IP binding |
+|---|---|---|---|
+| Person via FUND | SPA → auto-trade → relay → device | auto-trade service token + user token + browser IP; relay checks the user owns the device and holds `gateway` (+`gateway_trade`, +`gateway_live` for live) | yes, browser IP |
+| AI agent / MCP client on the FUND side | agent → relay → device | its own service token; relay requires `gateway_trade` on the client and, per Q4, possibly an explicit grant by the device owner | no |
+| Local MCP client on the PC (e.g. Claude Desktop) | direct to local SGMCP `127.0.0.1` | local SGMCP token (unchanged) | n/a |
+| Local `/ui` broker login | `127.0.0.1` only | local `/ui` token (unchanged) | n/a |
+| local-agent → relay | outbound WSS | device credential (device token) | **no** |
+
+Rules: trading tools need `gateway_trade`; `environment="live"` needs `gateway_live` **and** local
+`SGMCP_ALLOW_LIVE=1`; strategies record `owner_sub`. The static `SGMCP_AUTH_TOKEN` only protects the local SGMCP
+endpoint on the PC.
+
+### 5.4 Multiple PCs
+
+Each PC is its own device (own key, own `dev_…` client). The relay keeps `device → broker accounts`. A strategy is
+routed to the device that holds its target broker account; the SPA shows a device picker when several hold it.
+[Proposal] If the same broker account is online on two PCs, the first connected is **primary** and the other
+**standby** (read-only); the standby takes over only after the primary is offline > 2 min and the user confirms
+(automatic failover could double-trade; Q5).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant A as PC-A (IBKR U123)
+  participant B as PC-B (IBKR U123, Futu F9)
+  participant RL as gateway-relay
+  participant AT as auto-trade
+  A->>RL: hello accounts IBKR U123
+  RL->>RL: U123 primary = PC-A
+  B->>RL: hello accounts IBKR U123, Futu F9
+  RL->>RL: U123 standby = PC-B, F9 primary = PC-B
+  AT->>RL: submit_strategy broker IBKR account U123
+  RL->>A: route to primary PC-A
+  AT->>RL: submit_strategy broker Futu account F9
+  RL->>B: route to PC-B
+```
+
+### 5.5 Failure events
+
+**PC offline and reconnect**: strategies run in the local SGMCP, so they keep running while the PC is on and only the
+link is down; they stop when the PC is off (SGMCP auto-resume + reconcile on restart [Repo]).
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant LA as local-agent
+  participant LSG as local SGMCP
+  participant RL as gateway-relay
+  participant AT as auto-trade
+  participant SPA as FUND SPA
+  LA--xRL: link lost (network down or PC off)
+  RL->>RL: 3 missed heartbeats (60 s), device offline
+  RL-->>AT: device_offline
+  AT-->>SPA: panel shows PC offline, submit disabled
+  Note over LSG: PC on: strategies keep running locally, notifications buffered (bounded). PC off: strategies stop, resume on boot
+  loop backoff 1 s to 60 s with jitter
+    LA->>RL: reconnect
+  end
+  LA->>LA: get fresh device token
+  LA->>RL: open WSS, hello {accounts, last_seq}
+  RL->>RL: introspect device token, owner active
+  LA->>RL: replay buffered notifications after last_seq
+  RL-->>AT: device_online + status, fills
+  AT-->>SPA: panel live again
+```
+
+**Token expiry**: the user's 15-min token only matters for user calls (SPA refreshes on 401). The device token
+expires every 5 min and is renewed over the open link; if the SSO is unreachable at renewal, the link stays up until the
+token's `exp` + 60 s grace, then the relay closes it and the local-agent retries.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant LA as local-agent
+  participant SSO as SSO server
+  participant RL as gateway-relay
+  LA->>SSO: renew device token (private_key_jwt)
+  alt SSO ok
+    SSO-->>LA: new device token
+    LA->>RL: reauth frame
+    RL->>SSO: introspect: active
+  else SSO unreachable
+    SSO--xLA: timeout
+    LA->>LA: retry every 15 s
+    RL->>RL: at exp plus 60 s grace, close link
+    Note over LA,RL: user calls fail with 503 device_unavailable, local strategies keep running
+  end
+```
+
+**Broker down** (existing SGMCP behaviour [Repo], now on the PC): `WAITING_GATEWAY`, reconnect within
+`SGMCP_RECONNECT_MAX_SECS`, reconcile, else halt; `broker_alert` travels over the link to auto-trade and the SPA.
+
+**SSO down while a user submits**: auto-trade / relay fail closed (`sso_unavailable`, nothing submitted); running
+strategies are untouched.
+
+### 5.6 Suspend stops and deletes the user's strategies; device credentials revoked [Decision 2026-10-14]
+
+On suspend, **all the user's running strategies / auto-trade jobs are stopped and deleted** (cancel open orders,
+purge instances). **No action on open broker positions**: the user maintains them through their other broker access.
+Order-history retention after delete is open (Q2). The SSO also **revokes every device credential owned by the user**,
+so the PC cannot reconnect.
 
 | Phase | Trigger | Backstop |
 |---|---|---|
-| **Interim (v1.3c/d, before webhooks)** | The FUND Admin UI, after `POST /api/v1/admin/users/{id}/suspend` returns 200, calls auto-trade `POST /internal/users/{sub}/suspend-cleanup` (service token, `fund_admin`), which stops and deletes that owner's strategies in SGMCP and its own jobs | SGMCP (and auto-trade) run a **sweep every 60 s**: `GET /api/v1/service/users/inactive?since=<cursor>` (service token, new SSO endpoint) and clean up any owner returned. Catches suspends made in Django admin, shell or `QuerySet.update()` |
-| **v1.4** | SSO sends signed webhook `user.suspended {sub}` to SGMCP and auto-trade, which clean up immediately | the same 60 s sweep stays as a backstop (webhooks are at-least-once but can be delayed) |
-
-Cleanup is idempotent (stopping an already-stopped strategy is a no-op), logged with the suspend event id, and
-retried on broker errors; a strategy whose cancel fails stays `STOPPING` and alerts the operator.
+| Interim (before webhooks) | FUND `/admin`, after the suspend call returns 200, calls `gateway-relay` `POST /internal/users/{sub}/suspend` and auto-trade `POST /internal/users/{sub}/suspend-cleanup` (service tokens) | relay and auto-trade sweep `GET /api/v1/service/users/inactive?since=` every 60 s (catches Django-admin / shell suspends) |
+| v1.4 | signed webhook `user.suspended` to relay and auto-trade | same 60 s sweep |
 
 ```mermaid
 sequenceDiagram
@@ -445,31 +536,37 @@ sequenceDiagram
   actor A as FUND admin
   participant UI as FUND /admin
   participant SSO as SSO server
+  participant RL as gateway-relay
   participant AT as auto-trade
-  participant GW as SGMCP
+  participant LA as local-agent (PC)
+  participant LSG as local SGMCP
   participant BR as Broker
-  A->>UI: suspend user 42
+  A->>UI: suspend user 42 (with step-up, §7.5)
   UI->>SSO: POST /admin/users/42/suspend
-  SSO->>SSO: is_active false, revoke all tokens and sessions, audit row
+  SSO->>SSO: is_active false, revoke user tokens, sessions and all device clients of 42, audit
   SSO-->>UI: 200
-  alt interim (before v1.4)
+  alt interim
+    UI->>RL: POST /internal/users/42/suspend
     UI->>AT: POST /internal/users/42/suspend-cleanup
   else v1.4
+    SSO-->>RL: webhook user.suspended 42
     SSO-->>AT: webhook user.suspended 42
-    SSO-->>GW: webhook user.suspended 42
   end
-  AT->>GW: list_strategies owner 42, then stop + delete each
-  GW->>BR: cancel open orders
-  BR-->>GW: cancelled
-  GW->>GW: purge instances of owner 42, log
-  GW-->>AT: strategy_stopped events
-  AT->>AT: delete auto-trade jobs of owner 42
-  loop every 60 s (backstop)
-    GW->>SSO: GET /service/users/inactive since cursor (service token)
-    SSO-->>GW: [42, ...]
-    GW->>GW: clean up any remaining owner strategies
-  end
+  RL->>LA: suspend frame
+  LA->>LSG: stop and delete all strategies
+  LSG->>BR: cancel open orders (positions untouched)
+  LSG-->>LA: done
+  LA-->>RL: suspend_ack
+  RL->>RL: close link, mark devices revoked
+  AT->>AT: delete jobs of 42
+  LA->>SSO: later reconnect attempt
+  SSO-->>LA: 401 invalid_client (device revoked)
 ```
+
+If the PC is **offline** at suspend time, the relay cannot reach it; the device can never reconnect (credential
+revoked), but strategies already running on a PC that is on and disconnected keep running locally. [Proposal] The
+local SGMCP holds a **relay lease**: if the link has been down longer than `FUNDGW_LEASE_SECS` (e.g. 15 min), it stops
+opening new positions until the link is back (Q3).
 
 ---
 
@@ -520,7 +617,7 @@ reachable only from the ops network/VPN).
 | User permissions | effective permissions (direct + via groups), toggle app permissions, group membership | `GET/PUT …/permissions`, `PUT …/groups` |
 | Groups | create, members, permissions | `/groups…` |
 | Services | registered ServiceClients: client_id, app permission, notify_url, active; **Register service** (secret shown once), rotate secret, deactivate | `/services…` |
-| Applications | registered apps from their `config.py`: **Import / update permissions** (upload `config.py` or fetch the app's `/.well-known/sso-permissions.json`), preview diff, apply | `PUT /apps/{app_codename}/permissions` |
+| Applications | registered apps from their `sso_permissions.py`: **Import / update permissions** (upload `sso_permissions.py` or fetch the app's `/.well-known/sso-permissions.json`), preview diff, apply | `PUT /apps/{app_codename}/permissions` |
 | App permissions | list `application.*`, grant counts, delete stale ones | `/permissions…` |
 | Audit log | who did what, when, from which IP; filter by actor/target | `GET /audit` |
 
@@ -539,6 +636,8 @@ The Admin menu item shows only when `/me` perms include `application.sso_admin`.
 | `GET/POST /permissions` · `PATCH/DELETE /permissions/{codename}` | `application.*` permissions via `ensure_permission()` |
 | `GET/POST /services` · `GET/PATCH/DELETE /services/{client_id}` · `POST /services/{client_id}/rotate-secret` | ServiceClient registry |
 | `GET /apps` · `PUT /apps/{app_codename}/permissions?dry_run=` | applications; bulk upsert of an app's permissions (§7.4) |
+| `POST /reauth` | step-up password re-confirmation (§7.5) |
+| `GET /devices?owner=` · `DELETE /devices/{client_id}` | FUND Local Gateway device credentials (§5.2) |
 | `GET /audit?actor=&target=&action=&since=` | audit log |
 
 **Auth and safety**
@@ -549,13 +648,45 @@ The Admin menu item shows only when `/me` perms include `application.sso_admin`.
 - Checked against the DB on every call (no cache, no reliance on the token's embedded perms); IP binding applies.
 - Same guards as v1.2a admin: no self-suspend, no self-delete, no removing your own `sso_admin`, last
   `sso_admin` cannot be removed, code-defined permissions not deletable, codename immutable.
-- Destructive calls need `If-Match`/version or a confirm field; [Proposal] re-auth (password) within 5 min for
-  delete user, rotate secret, grant `sso_admin` (Q3).
+- Destructive calls need a **recent password re-confirmation (step-up, §7.5)** [Decision 2026-10-14 round 2].
 - Own throttle scope `admin` (e.g. 120/min per user).
+
+### 7.5 Step-up: password re-confirmation for destructive actions [Decision 2026-10-14 round 2]
+
+`POST /api/v1/admin/reauth` with Bearer user token and `{"password": "..."}` → `{"reauth_token": "...",
+"expires_in": 300}`. The reauth token is an opaque random value stored server-side (hash) and bound to the user,
+the session `sid` and the client IP; valid 5 min, usable for several actions in that window, revoked on logout.
+Destructive endpoints require header `X-SSO-Reauth: <reauth_token>`; missing/expired → `401 reauth_required`,
+wrong password → `401 invalid_credentials` (throttled like login: 5/min per user, lockout logged). Every reauth
+attempt and every step-up action is audited.
+
+Step-up required for: delete user, suspend user, set password, delete group, grant/revoke `application.sso_admin`,
+delete permission (incl. `revoke_all`), delete / deactivate service client or device, rotate client secret.
+Not required: list/read, create user, grant/revoke ordinary app permissions, unsuspend, import permissions
+(dry-run and apply). Django admin (break-glass) keeps Django's own login; no step-up there.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor A as Admin
+  participant UI as FUND /admin
+  participant SSO as SSO admin API
+  A->>UI: Delete user 42
+  UI->>SSO: DELETE /admin/users/42 (Bearer T)
+  SSO-->>UI: 401 reauth_required
+  UI->>A: confirm your password
+  A->>UI: password
+  UI->>SSO: POST /admin/reauth {password}
+  SSO->>SSO: check password, throttle, audit
+  SSO-->>UI: reauth_token (5 min, bound to sid and IP)
+  UI->>SSO: DELETE /admin/users/42, X-SSO-Reauth
+  SSO->>SSO: verify reauth token, sso_admin, not self, audit
+  SSO-->>UI: 204
+```
 
 ### 7.4 Importing an application's permissions [Decision 2026-10-14]
 
-Flow: admin opens **Applications → Import** in FUND `/admin`, uploads the app's `config.py` (or enters the app URL to
+Flow: admin opens **Applications → Import** in FUND `/admin`, uploads the app's `sso_permissions.py` (or enters the app URL to
 fetch `/.well-known/sso-permissions.json`). The SPA parses it (Python literals only, never executed), calls the
 bulk upsert with `dry_run=true`, shows the diff, and on confirm calls it again without `dry_run`.
 
@@ -612,7 +743,8 @@ sequenceDiagram
   participant RS as research agent
   participant LW as llm-wiki-svc
   participant AT as auto-trade
-  participant GW as SGMCP
+  participant RL as gateway-relay
+  participant GW as local SGMCP (user PC)
   participant SIM as Simulator broker
   U->>SPA: login
   SPA->>SSO: POST /auth/login
@@ -627,11 +759,13 @@ sequenceDiagram
   SPA->>NG: POST /proxy/auto-trade/run broker=sim Bearer T
   NG->>AT: + XFF
   AT->>SSO: introspect T, ip, require gateway + gateway_trade
-  AT->>GW: submit_strategy (service token + T + client_ip)
-  GW->>SSO: introspect T, ip, require gateway_trade (no cache)
+  AT->>RL: submit_strategy (service token + T + client_ip)
+  RL->>SSO: introspect T, ip, require gateway_trade (no cache)
+  RL->>GW: route over the device link (outbound WSS from PC)
   GW->>GW: owner_sub = user, PENDING
   GW->>SIM: orders
-  GW-->>AT: fill notifications
+  GW-->>RL: fill notifications
+  RL-->>AT: fill notifications
   AT-->>SPA: live panel
 ```
 
@@ -644,8 +778,9 @@ flowchart LR
   S["Admin suspend in FUND /admin"] --> S1["SSO: is_active false, revoke all tokens and sessions"]
   S1 --> S2["Next introspect from any service: active false (cache max 30 s; trading calls uncached)"]
   S1 --> S3["v1.4 webhook user.suspended to registered services"]
-  S1 --> S5["Interim: FUND /admin calls auto-trade suspend-cleanup, plus 60 s sweep"]
-  S3 --> S4["SGMCP and auto-trade stop and delete owner strategies, llm-wiki drops BFF session"]
+  S1 --> S5["Interim: FUND /admin calls relay and auto-trade cleanup, plus 60 s sweep"]
+  S1 --> S6["Device credentials of the user revoked"]
+  S3 --> S4["Relay tells local gateways to stop and delete strategies, positions untouched; auto-trade deletes jobs; llm-wiki drops BFF session"]
   S5 --> S4
   R2 --> X["Services learn by rejection: 401, SPA goes to login"]
   S2 --> X
@@ -664,35 +799,42 @@ Logout of one FUND tab logs out that browser session (refresh cookie gone); othe
 |---|---|---|---|
 | v1.2a | SSO | **Done** (pushed `107ae38`) | |
 | v1.2b | SSO, llm-wiki | IP binding modes (user tokens only), introspect/permission query, `SSO_TRUSTED_PROXIES`, `sso-client` library, llm-wiki migrates | v1.2a |
-| v1.3a | SSO | **SSO admin REST API + audit log** (§7), **bulk permission import** `PUT /admin/apps/{app}/permissions` (§7.4), **service tokens** `POST /auth/service-token` + on-behalf-of rules (§4.1), `GET /service/users/inactive` feed (§5.3). No user import (FUND users already in `dcWebUsers`) | v1.2b |
-| v1.3b | FUND | `config.py` permissions; `AUTH_PROVIDER=legacy\|both\|sso` switch (§3.4); agents on `sso-client`, all endpoints need a token in `both`/`sso`; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.2b, v1.3a |
-| v1.3c | FUND | **Admin UI** `/admin` incl. Applications import and interim suspend-cleanup call (§7, §5.3) | v1.3a, v1.3b |
-| v1.3d | SGMCP, FUND auto-trade | Gateway integration (§5): service tokens, on-behalf-of, `owner_sub`, trade/live permissions, suspend-cleanup endpoint + 60 s sweep; static token becomes fallback | v1.3a, v1.3b |
+| v1.3a | SSO | SSO admin REST API + audit log + **step-up reauth** (§7.5), bulk permission import (§7.4), service tokens + on-behalf-of (§4.1), **device clients** (`POST /api/v1/devices`, `private_key_jwt`, revoke on suspend, §5.2), `GET /service/users/inactive` feed (§5.6). No user import | v1.2b |
+| v1.3b | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4); agents on `sso-client` with per-service credentials (recommended); llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.2b, v1.3a |
+| v1.3c | FUND | Admin UI `/admin` incl. step-up, Applications import, devices, interim suspend calls (§7, §5.6) | v1.3a, v1.3b |
+| v1.3d | FUND + SGMCP | **Local gateway**: new `gateway-relay` service, pairing, outbound WSS link, multi-PC routing; FUND Local Gateway package (`local-agent` + SGMCP + broker daemons) on the user's PC; auto-trade points at the relay; `owner_sub`, trade/live permissions, suspend frame + 60 s sweep (§5) | v1.3a, v1.3b |
 | v1.3e | FUND | `AUTH_PROVIDER=sso`, retire `fund-auth` | v1.3b stable |
-| v1.4 | SSO, SGMCP, auto-trade, llm-wiki | Signed webhooks; `user.suspended` replaces the interim call (sweep stays as backstop) | v1.3d |
-| later | | TODOS.md: sign-up, password change/reset, delegated tokens (RFC 8693), SSO login for SGMCP `/ui`, `Local_login.md` access list keyed by SSO `sub`; deployment hosts/domains (TBD) | |
+| v1.4 | SSO, relay, auto-trade, llm-wiki | Signed webhooks; `user.suspended` replaces the interim calls (sweep stays) | v1.3d |
+| later | | TODOS.md: sign-up, password change/reset, delegated tokens (RFC 8693), llm-wiki host/domain (TBD) | |
 
 ### 9.2 Open questions for Thomas
 
-Answered 2026-10-14 and removed: FUND user DB, permission names, domains/locations, unauthenticated endpoints,
-IP binding for agents, suspend behaviour, gateway/llm-wiki placement, the cut-off "4)". See §10.
+Answered and removed (2026-10-14, rounds 1 and 2): FUND user DB, permission names and file, domains/locations,
+unauthenticated endpoints, IP binding for agents, suspend behaviour and open positions, service-to-service model,
+SGMCP `/ui` (stays local), admin step-up, the cut-off "4)". See §10.
 
-1. **ServiceClients for FUND**: one per FUND agent (finer audit, more secrets) or one shared `fund-backend` client?
-2. **SGMCP `/ui` broker login**: keep its local token, or move to SSO login with `gateway_live`?
-3. **Admin API step-up**: require password re-entry for destructive admin actions (delete user, rotate secret, grant `sso_admin`)?
-4. **Suspend and open positions** (new): after strategies are stopped and deleted, should open broker positions be left as they are (proposal), or market-closed? Should deleted instances keep their order history for audit (today `delete_strategy` purges)?
-5. **Service-to-service interpretation** (new): please confirm §4.1 (service tokens via client credentials, no IP binding; on-behalf-of = service token + user token + browser IP), since your sentence was cut off.
-6. **Permission removal policy** (new): OK that import never deletes, only marks `missing` permissions deprecated (§7.4)?
-7. **Config file name** (new): `config.py` already exists in some apps (e.g. FUND `utils/config.py`, SGMCP `smart_gateway_mcp/config.py`); use a top-level `sso_permissions.py` instead, or a `SSO_PERMISSIONS` block inside the existing `config.py`?
+1. **Service credentials**: recommended default is **one ServiceClient per service/agent** (finer audit and revocation); please confirm (vs one shared `fund-backend` client).
+2. **Order history after delete**: when a suspended user's strategies are deleted, keep their orders/fills for audit (soft delete / archive table), or purge as `delete_strategy` does today?
+3. **Where strategies run** (new): this design runs strategies in the local SGMCP on the PC (they stop when the PC is off), which differs from `Local_login.md` (SGMCP in the cloud, PC only forwards). Confirm local execution, and the proposed relay lease (stop opening positions after 15 min without link)?
+4. **AI agents on the FUND side trading on a user's PC** (new): require the user to grant each agent's service client explicitly ("allow agent X on my gateway"), or is the `gateway_trade` permission on the client enough?
+5. **Same broker account on two PCs** (new): accept primary/standby with manual takeover (§5.4)?
+6. **Permission removal policy**: OK that import never deletes, only marks `missing` permissions deprecated (§7.4)?
 
 ## 10. Decisions (2026-10-14)
 
 Recorded from Thomas:
 
 1. **FUND users are already in `dcWebUsers`.** `fund-auth` shares it. FUND migrates authentication to the SSO like the other new services; **no user import**.
-2. **Each application ships a `config.py` declaring its own permissions**; the admin imports them into the SSO from FUND `/admin` (bulk upsert, idempotent, §2, §7.4). The permission names in this document are examples only.
+2. **Each application ships its own permissions file** (round 2: a separate `sso_permissions.py`, not inside `config.py`); the admin imports them into the SSO from FUND `/admin` (bulk upsert, idempotent, §2, §7.4). The permission names in this document are examples only.
 3. **After cutover every FUND endpoint requires a token**, controlled by `AUTH_PROVIDER` in FUND's root `.env` (`legacy` / `both` / `sso`) (§3.4).
-4. **SSO user login is for external clients (mostly people) and IP binding applies to them; internal processes (AI agents, MCP, services) authenticate as registered service clients with their own credentials, without IP binding.** Thomas's sentence was cut off; §4.1 is our interpretation (Q5).
-5. **Suspend stops and deletes the user's running strategies / auto-trade jobs**: interim call from FUND `/admin` + 60 s sweep, then v1.4 webhook (§5.3).
-6. **Gateway and llm-wiki deployment locations and domains are TBD / configurable** (ongoing development).
+4. **SSO user login is for external clients (mostly people) and IP binding applies to them; internal processes (AI agents, MCP, services) authenticate as registered service clients with their own credentials, without IP binding.** Confirmed in round 2 (§4.1).
+5. **Suspend stops and deletes the user's running strategies / auto-trade jobs**: interim call from FUND `/admin` + 60 s sweep, then v1.4 webhook (§5.6). Round 2: **no action on open broker positions**.
+6. **llm-wiki deployment location and domains are TBD / configurable** (ongoing development). The gateway location is now decided (round 2, below).
 7. The cut-off "4)" in the earlier message is ignored.
+
+### Round 2 (2026-10-14)
+
+8. **Broker login is local to the user**: FUND Local Gateway (Docker) on the user's PC runs the Smart Gateway(s) and connects **outbound** to FUND's `gateway-relay`; device credential provisioned by pairing after SSO login; broker credentials never leave the PC; `/ui` stays local; no cloud gateway (§5).
+9. **IP binding applies to user-facing calls only**; the local gateway uses its device credential.
+10. **Destructive admin actions require password re-confirmation** (step-up, §7.5).
+11. **Per-service credentials** are the recommended default, pending confirmation (Q1).

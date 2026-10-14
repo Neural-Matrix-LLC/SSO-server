@@ -22,20 +22,22 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **v1.2b: Redis cache for revoked sessions** — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
 - [ ] **v1.4: encrypt `notify_secret` at rest** (webhook signing secret).
 
-## Ecosystem (decisions 2026-10-14, see [ECOSYSTEM-INTEGRATION.md](docs/ECOSYSTEM-INTEGRATION.md))
+## Ecosystem (decisions 2026-10-14 rounds 1-2, see [ECOSYSTEM-INTEGRATION.md](docs/ECOSYSTEM-INTEGRATION.md))
 
-- [ ] **v1.3a: SSO admin REST API** `/api/v1/admin/…` (users, groups, permissions, services, apps, audit) + `sso_adminauditlog`.
-- [ ] **v1.3a: bulk permission import** `PUT /api/v1/admin/apps/{app}/permissions` (idempotent, dry-run, never deletes; missing → deprecated).
-- [ ] **v1.3a: service tokens** `POST /api/v1/auth/service-token` (client credentials, `typ=service`, no IP binding) + on-behalf-of (`X-SSO-User-Token`, `X-SSO-Client-IP`).
-- [ ] **v1.3a: inactive-users feed** `GET /api/v1/service/users/inactive?since=` for the suspend sweep.
-- [ ] **v1.3b (FUND): `config.py` permissions + `AUTH_PROVIDER=legacy|both|sso`** in root `.env`; all endpoints need a token in `both`/`sso`; agents on `sso-client`.
-- [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`** (configurable upstream); llm-wiki local `/login` optional.
-- [ ] **v1.3c (FUND): Admin UI `/admin`** incl. Applications → Import and interim suspend-cleanup call.
-- [ ] **v1.3d (SGMCP + auto-trade):** service-token auth, `owner_sub`, `gateway_trade` / `gateway_live`, suspend-cleanup endpoint + 60 s sweep (stop and delete owner's strategies).
-- [ ] **v1.3e (FUND): `AUTH_PROVIDER=sso`, retire `fund-auth`** and `AUTH_SECRET_KEY`.
-- [ ] **v1.4: `user.suspended` webhook** replaces the interim suspend call in SGMCP and auto-trade.
-- [ ] **TBD:** gateway and llm-wiki deployment hosts and domains (ongoing development; all configurable).
-- [ ] **Later:** delegated tokens (RFC 8693) for long-running on-behalf-of work; SSO login for SGMCP `/ui`; `Local_login.md` access list keyed by SSO `sub`; admin step-up re-auth.
+- [ ] **v1.3a: SSO admin REST API** `/api/v1/admin/…` (users, groups, permissions, services, devices, apps, audit) + `sso_adminauditlog`.
+- [ ] **v1.3a: step-up reauth** `POST /api/v1/admin/reauth` → `X-SSO-Reauth` (5 min, bound to sid + IP) for destructive actions.
+- [ ] **v1.3a: bulk permission import** `PUT /api/v1/admin/apps/{app}/permissions` from `sso_permissions.py` (idempotent, dry-run, never deletes).
+- [ ] **v1.3a: service tokens** `POST /api/v1/auth/service-token` (client credentials; no IP binding) + on-behalf-of headers.
+- [ ] **v1.3a: device clients** `POST /api/v1/devices` (ServiceClient `kind=device`, owner, Ed25519 `private_key_jwt`); revoked on suspend.
+- [ ] **v1.3a: inactive-users feed** `GET /api/v1/service/users/inactive?since=`.
+- [ ] **v1.3b (FUND): `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso`**; agents on `sso-client`, one ServiceClient per service (recommended).
+- [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`** (configurable upstream).
+- [ ] **v1.3c (FUND): Admin UI `/admin`** incl. step-up, devices, permission import, interim suspend calls.
+- [ ] **v1.3d (FUND + SGMCP): local broker gateway** - `gateway-relay`, pairing code, outbound WSS (long-poll fallback), heartbeat/replay, multi-PC primary/standby, suspend frame, relay lease.
+- [ ] **v1.3e (FUND): `AUTH_PROVIDER=sso`, retire `fund-auth`**.
+- [ ] **v1.4: `user.suspended` webhook** to relay and auto-trade.
+- [ ] **TBD:** llm-wiki deployment host and domain.
+- [ ] **Later:** delegated tokens (RFC 8693); order-history archive on strategy delete (pending Q2).
 
 ## Not planned (recorded ideas)
 
