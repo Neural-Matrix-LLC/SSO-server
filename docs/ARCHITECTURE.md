@@ -1443,6 +1443,11 @@ Known limits: local verifiers cannot see logout, revocation or deactivation befo
 window is not treated as theft; password changes and suspensions written by myFinance do not revoke tokens until
 a token is used or `revoke_inactive_users` runs.
 
+**Operations (DevOps): schedule `python manage.py revoke_inactive_users` to run hourly** (cron, systemd timer or a
+scheduled one-off container on the same image and settings as the SSO). It bounds the window for suspensions
+written outside `save()` (myFinance, `QuerySet.update()`) to about one hour even when no token is used. It is
+idempotent; `--dry-run` lists what it would revoke.
+
 ### 11.2 Deployment view
 
 ```mermaid

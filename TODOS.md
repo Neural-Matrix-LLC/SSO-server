@@ -16,6 +16,12 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **Webhook admin tooling** — redeliver failed events, rotate `notify_secret`.
 - [ ] **Decommission myFinance** — after it is phased out, move `dcWebUsers` ownership fully to the SSO, drop shared-DB compatibility constraints (Django version pinning, stock User model).
 
+## Scheduled follow-ups
+
+- [ ] **v1.2b: prune `sso_revokedsession`** — the `revoke_inactive_users` sweep deletes rows older than the refresh-token lifetime + 1 day (their sessions can no longer refresh).
+- [ ] **v1.2b: Redis cache for revoked sessions** — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
+- [ ] **v1.4: encrypt `notify_secret` at rest** (webhook signing secret).
+
 ## Not planned (recorded ideas)
 
 - DPoP sender-constrained tokens (RFC 9449) — rejected 2026-10-13; IP binding is sufficient.
