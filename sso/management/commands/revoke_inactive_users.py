@@ -3,7 +3,8 @@
     python manage.py revoke_inactive_users [--dry-run]
 
 For suspensions that bypassed the model signal (``QuerySet.update()``, myFinance writing ``auth_user``).
-Safe to run repeatedly (e.g. from cron); users whose tokens are already all revoked are skipped.
+Safe to run repeatedly (schedule it hourly); users whose tokens are already all revoked are skipped.
+v1.2b: also prunes ``sso_revokedsession`` rows older than the refresh-token lifetime + 1 day.
 """
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
@@ -11,7 +12,7 @@ from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
-from sso.revocation import revoke_user_tokens
+from sso.revocation import prune_revoked_sessions, revoke_user_tokens
 
 
 class Command(BaseCommand):
@@ -35,3 +36,5 @@ class Command(BaseCommand):
                 revoke_user_tokens(user)
         verb = "would revoke" if dry_run else "revoked"
         self.stdout.write(f"{verb} tokens of {count} inactive user(s)")
+        pruned = prune_revoked_sessions(dry_run=dry_run)
+        self.stdout.write(f"{'would prune' if dry_run else 'pruned'} {pruned} expired revoked-session row(s)")

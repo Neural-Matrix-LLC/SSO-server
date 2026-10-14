@@ -214,6 +214,16 @@ CACHES["default"].setdefault("KEY_PREFIX", "sso")  # namespaced throttle keys (d
 # directly reachable server cannot be tricked out of its per-IP throttle (QA defect 4). docker-compose.yml
 # sets 1, which is correct only because nginx overwrites X-Forwarded-For and web is not published.
 SSO_NUM_PROXIES = env.int("SSO_NUM_PROXIES", default=0)
+# v1.2b (design §4.5.2): trusted reverse proxies as IPs / CIDRs. X-Forwarded-For is read only when the socket
+# peer is one of them, walked right to left (same algorithm as sso_client.get_client_ip). When set, it replaces
+# SSO_NUM_PROXIES (deprecated fallback, warning sso.W002, used only while this is empty).
+SSO_TRUSTED_PROXIES = env.list("SSO_TRUSTED_PROXIES", default=[])
+try:
+    from sso.clientip import parse_trusted as _parse_trusted
+
+    SSO_TRUSTED_PROXIES_PARSED = _parse_trusted(SSO_TRUSTED_PROXIES)
+except ValueError as _exc:
+    raise ImproperlyConfigured(f"SSO_TRUSTED_PROXIES: {_exc}") from None
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PARSER_CLASSES": ["rest_framework.parsers.JSONParser"],
@@ -224,6 +234,8 @@ REST_FRAMEWORK = {
         "login": env.str("SSO_THROTTLE_LOGIN", default="10/min"),
         "login_user": env.str("SSO_THROTTLE_LOGIN_USER", default="5/min"),
         "refresh": env.str("SSO_THROTTLE_REFRESH", default="60/min"),
+        # v1.2b: per ServiceClient for /introspect (design §4.4)
+        "introspect": env.str("SSO_THROTTLE_INTROSPECT", default="6000/min"),
     },
     "NUM_PROXIES": SSO_NUM_PROXIES,
     "EXCEPTION_HANDLER": "sso.errors.error_handler",
@@ -237,6 +249,19 @@ SSO_REFRESH_TTL = timedelta(days=env.int("SSO_REFRESH_TTL_DAYS", default=7))
 SSO_REFRESH_REUSE_GRACE_SECONDS = env.int("SSO_REFRESH_REUSE_GRACE_SECONDS", default=10)
 if SSO_REFRESH_REUSE_GRACE_SECONDS < 0:
     raise ImproperlyConfigured("SSO_REFRESH_REUSE_GRACE_SECONDS must be >= 0")
+# v1.2b client-IP token binding (design §4.2): NOIP (default) | WARNING | ENFORCE
+SSO_IP_BINDING_MODE = env.str("SSO_IP_BINDING_MODE", default="NOIP").strip().upper()
+if SSO_IP_BINDING_MODE not in ("NOIP", "WARNING", "ENFORCE"):
+    raise ImproperlyConfigured("SSO_IP_BINDING_MODE must be NOIP, WARNING or ENFORCE")
+# HMAC key for the cip claim; default derived from SSO_SECRET_KEY with a fixed label (changing either one makes
+# every bound token mismatch: rotate only together with a logout of all users or in NOIP/WARNING).
+import hmac as _hmac  # noqa: E402
+
+_ip_key = env.str("SSO_IP_BINDING_KEY", default="")
+SSO_IP_BINDING_KEY = (_ip_key.encode("utf-8") if _ip_key else
+                      _hmac.new(SECRET_KEY.encode("utf-8"), b"sso-ip-binding-v1", "sha256").digest())
+# revoked-session lookups (v1.2b): cached in the shared cache (Redis); "not revoked" answers only this long
+SSO_REVOKED_SESSION_CACHE_SECONDS = env.int("SSO_REVOKED_SESSION_CACHE_SECONDS", default=10)
 SSO_CODE_TTL = timedelta(seconds=env.int("SSO_CODE_TTL_SEC", default=60))  # phase 5 (unused)
 
 SIMPLE_JWT = {

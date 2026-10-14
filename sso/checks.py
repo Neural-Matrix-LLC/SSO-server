@@ -34,6 +34,15 @@ def not_root_in_production(app_configs, **kwargs):
     return []
 
 
+@register()
+def deprecated_num_proxies(app_configs, **kwargs):
+    """sso.W002 (v1.2b): SSO_NUM_PROXIES is the deprecated fallback for SSO_TRUSTED_PROXIES (design §4.5.2)."""
+    if getattr(settings, "SSO_NUM_PROXIES", 0) and not getattr(settings, "SSO_TRUSTED_PROXIES_PARSED", ()):
+        return [Warning("SSO_NUM_PROXIES is deprecated; use SSO_TRUSTED_PROXIES (IPs/CIDRs of your proxies).",
+                        hint="e.g. SSO_TRUSTED_PROXIES=172.18.0.0/16 (the compose network of nginx)", id="sso.W002")]
+    return []
+
+
 def deprecated_key_messages() -> list[str]:
     from .keys import DEPRECATED_KEY_VARS
 

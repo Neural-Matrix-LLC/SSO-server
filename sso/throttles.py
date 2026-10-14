@@ -54,6 +54,18 @@ class LoginUserThrottle(_LoggingThrottle):
         return self.cache_format % {"scope": self.scope, "ident": username[:254]}
 
 
+class IntrospectThrottle(SimpleRateThrottle):
+    """Per authenticated ServiceClient for /introspect (scope ``introspect``, default 6000/min, design §4.4)."""
+
+    scope = "introspect"
+
+    def get_cache_key(self, request, view):
+        client_id = getattr(request.user, "client_id", None)
+        if not client_id:
+            return None  # unauthenticated: the view answers 401 invalid_client
+        return self.cache_format % {"scope": self.scope, "ident": client_id}
+
+
 class RefreshThrottle(_LoggingThrottle):
     """60/min per client IP for /refresh and /logout (scope ``refresh``)."""
 

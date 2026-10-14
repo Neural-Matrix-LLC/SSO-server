@@ -39,6 +39,17 @@ class RefreshInputSerializer(serializers.Serializer):
 
 class IntrospectSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=8192)
+    # v1.2b (design §4.4): client IP observed by the service; unparseable = no IP (a mismatch when bound)
+    ip = serializers.CharField(max_length=128, required=False, allow_blank=True, allow_null=True)
+    # optional: "application.app2" or a list; the response adds "allowed" (all of them held)
+    require = serializers.JSONField(required=False)
+
+    def validate_require(self, value):
+        items = [value] if isinstance(value, str) else value
+        if not isinstance(items, list) or not items or len(items) > 50 or not all(
+                isinstance(i, str) and 0 < len(i) <= 255 for i in items):
+            raise serializers.ValidationError("require must be a permission name or a list of them.")
+        return items
 
 
 def _dummy_hash(password: str) -> None:

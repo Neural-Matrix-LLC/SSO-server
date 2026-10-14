@@ -4,19 +4,20 @@ from __future__ import annotations
 import json
 import logging
 
-from rest_framework.throttling import BaseThrottle
 
 logger = logging.getLogger("sso.auth")
 
 
-def client_ip(request) -> str:
-    """Client IP honouring REST_FRAMEWORK['NUM_PROXIES'] (nginx sets X-Forwarded-For).
+def client_ip(request) -> str | None:
+    """Trusted client IP (design §4.5): the socket peer, X-Forwarded-For only from SSO_TRUSTED_PROXIES
+    (deprecated fallback: SSO_NUM_PROXIES), normalised (sso/clientip.py).
 
     For a ServiceClient calling server-side with ``client_ip`` (sso/delegation.py), that end-user IP.
     """
+    from .clientip import request_ip
     from .delegation import delegated_client_ip
 
-    return delegated_client_ip(request) or BaseThrottle().get_ident(request)
+    return delegated_client_ip(request) or request_ip(request)
 
 
 def log_login(request, username: str, result: str, *, client: str | None = None, user_id: int | None = None) -> None:

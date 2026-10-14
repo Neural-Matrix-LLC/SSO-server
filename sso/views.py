@@ -18,8 +18,10 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from application.permissions import user_app_perms
 
 from .authentication import ServiceClientBasicAuthentication, ServicePrincipal, SSOAccessTokenAuthentication
+from .ipbinding import CIP_CLAIM, binding_enabled, cip_for, ip_matches, log_mismatch, mode as ip_mode
+from .clientip import normalize_ip
 from .errors import AccountInactive, InvalidClient, InvalidCredentials, InvalidRequest, OriginNotAllowed, TokenInvalid
-from .logs import log_login, log_token_event
+from .logs import client_ip, log_login, log_token_event
 from .revocation import is_session_revoked, revoke_session, revoke_user_tokens
 from .serializers import (
     IntrospectSerializer,
@@ -28,7 +30,7 @@ from .serializers import (
     UserSerializer,
     check_credentials,
 )
-from .throttles import LoginIPThrottle, LoginUserThrottle, RefreshThrottle
+from .throttles import IntrospectThrottle, LoginIPThrottle, LoginUserThrottle, RefreshThrottle
 from .tokens import (
     SID_CLAIM,
     SSOAccessToken,
@@ -67,8 +69,8 @@ def clear_refresh_cookie(response: Response) -> None:
     )
 
 
-def token_response(user: User, *, browser: bool, sid: str | None = None) -> Response:
-    refresh, access = issue_token_pair(user, sid=sid)
+def token_response(user: User, *, browser: bool, sid: str | None = None, cip: str | None = None) -> Response:
+    refresh, access = issue_token_pair(user, sid=sid, cip=cip)
     body = {
         "access_token": str(access),
         "token_type": "Bearer",
@@ -194,7 +196,8 @@ class LoginView(_ServiceClientChallenge, APIView):
             raise AccountInactive()
         user_logged_in.send(sender=user.__class__, request=request._request, user=user)  # updates last_login
         log_login(request, identifier, "success", client=client, user_id=user.pk)
-        return token_response(user, browser=(client == "browser"))
+        cip = cip_for(client_ip(request)) if binding_enabled() else None  # design §4.2: user logins only
+        return token_response(user, browser=(client == "browser"), cip=cip)
 
 
 class RefreshView(_ServiceClientChallenge, APIView):
@@ -212,6 +215,19 @@ class RefreshView(_ServiceClientChallenge, APIView):
         except TokenInvalid:
             handle_refresh_reuse(request, raw)
             raise
+        token_cip = token.get(CIP_CLAIM)
+        ip = client_ip(request)
+        if ip_matches(token_cip, ip) is False:  # design §4.2 item 4: no rebind
+            log_mismatch("refresh", user_id=user.pk, ip=ip)
+            if ip_mode() == "ENFORCE":
+                if token.get(SID_CLAIM):
+                    revoke_session(user, token[SID_CLAIM], "ip_mismatch")
+                else:  # pragma: no cover - every v1.2b token has a sid
+                    token.blacklist()
+                log_token_event(request, "refresh", "ip_mismatch", user_id=user.pk)
+                raise TokenInvalid()
+        # keep the session's binding; a token from NOIP times is bound now to the caller's IP
+        new_cip = (token_cip or cip_for(ip)) if binding_enabled() else None
         try:
             with transaction.atomic():
                 _, created = token.blacklist()
@@ -221,7 +237,7 @@ class RefreshView(_ServiceClientChallenge, APIView):
             handle_refresh_reuse(request, raw)
             raise
         log_token_event(request, "refresh", "success", user_id=user.pk)
-        return token_response(user, browser=cookie_mode, sid=token.get(SID_CLAIM))
+        return token_response(user, browser=cookie_mode, sid=token.get(SID_CLAIM), cip=new_cip)
 
 
 class LogoutView(_ServiceClientChallenge, APIView):
@@ -276,7 +292,11 @@ class MeView(APIView):
 
 
 class IntrospectView(APIView):
+    """Token check and permission query (design §4.4). Only for authenticated ServiceClients; ``ip`` is the
+    end user's IP as the service saw it; IP binding (§4.2) applies to user tokens only."""
+
     authentication_classes = [ServiceClientBasicAuthentication]
+    throttle_classes = [IntrospectThrottle]
 
     def post(self, request):
         if not isinstance(request.user, ServicePrincipal):
@@ -296,24 +316,37 @@ class IntrospectView(APIView):
             return inactive
         if user is None or is_revoked(user, token.get("iat")) or is_session_revoked(token.get(SID_CLAIM)):
             return inactive
-        return Response(
-            {
-                "active": True,
-                "sub": str(user.pk),
-                "username": user.get_username(),
-                "email": user.email or "",
-                "is_staff": bool(user.is_staff),
-                "groups": user_groups(user),
-                "perms": user_app_perms(user),  # fresh from the DB (design A2)
-                "token_type": "access",
-                "iat": token.get("iat"),
-                "exp": token.get("exp"),
-                "iss": settings.SSO_ISSUER,
-                "aud": settings.SSO_AUDIENCE,
-                "client_id": request.user.client_id,
-            },
-            headers={"Cache-Control": "no-store"},
-        )
+        raw_ip = ser.validated_data.get("ip")
+        ip = normalize_ip(raw_ip) if raw_ip else None
+        match = ip_matches(token.get(CIP_CLAIM), ip)
+        if match is False:
+            log_mismatch("introspect", user_id=user.pk, ip=ip, client_id=request.user.client_id)
+            if ip_mode() == "ENFORCE":
+                if token.get(SID_CLAIM):
+                    revoke_session(user, token[SID_CLAIM], "ip_mismatch")
+                return inactive
+        perms = user_app_perms(user)  # fresh from the DB (design A2)
+        body = {
+            "active": True,
+            "sub": str(user.pk),
+            "username": user.get_username(),
+            "email": user.email or "",
+            "is_staff": bool(user.is_staff),
+            "groups": user_groups(user),
+            "perms": perms,
+            "sid": token.get(SID_CLAIM),
+            "ip_binding": ip_mode(),
+            "ip_match": match,
+            "token_type": "access",
+            "iat": token.get("iat"),
+            "exp": token.get("exp"),
+            "iss": settings.SSO_ISSUER,
+            "aud": settings.SSO_AUDIENCE,
+            "client_id": request.user.client_id,
+        }
+        if "require" in ser.validated_data:
+            body["allowed"] = set(ser.validated_data["require"]) <= set(perms)
+        return Response(body, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------- discovery / health

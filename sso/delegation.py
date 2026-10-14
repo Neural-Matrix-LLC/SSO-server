@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import ipaddress
 import logging
 
+from .clientip import normalize_ip
 from .errors import InvalidClient, InvalidRequest
 from .models import ServiceClient
 
@@ -67,11 +67,8 @@ def delegated_client_ip(request) -> str | None:
         data = getattr(request, "data", None)
         raw = data.get("client_ip") if isinstance(data, dict) else None
         if raw is not None:
-            try:
-                if not isinstance(raw, str):
-                    raise ValueError(raw)
-                result = str(ipaddress.ip_address(raw.strip()))
-            except ValueError:
+            result = normalize_ip(raw) if isinstance(raw, str) else None
+            if result is None:
                 logger.warning('{"event": "service_client_auth", "result": "bad_client_ip", '
                                f'"client_id": "{client.client_id}"}}')
                 raise InvalidRequest("client_ip must be an IP address.") from None

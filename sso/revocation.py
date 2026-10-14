@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 
 import jwt
+from django.conf import settings
+from django.core.cache import cache
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
@@ -47,8 +50,52 @@ def token_sid(raw: str) -> str | None:
         return None
 
 
+def _session_key(sid: str) -> str:
+    return "revoked_sid:" + sid[:64]
+
+
+def _revoked_ttl() -> int:
+    return int(settings.SSO_REFRESH_TTL.total_seconds()) + 86400
+
+
 def is_session_revoked(sid: str | None) -> bool:
-    return bool(sid) and RevokedSession.objects.filter(sid=sid).exists()
+    """Shared cache first (Redis in production, v1.2b): "revoked" is cached for the refresh lifetime + 1 day
+    (the row's own retention), "not revoked" only ``SSO_REVOKED_SESSION_CACHE_SECONDS``. ``revoke_session``
+    writes the cache at once. A cache error falls back to the database."""
+    if not sid:
+        return False
+    key = _session_key(sid)
+    try:
+        hit = cache.get(key)
+    except Exception:  # noqa: BLE001 - cache down: the DB is the authority
+        hit = None
+    if hit is not None:
+        return hit == 1
+    revoked = RevokedSession.objects.filter(sid=sid).exists()
+    ttl = _revoked_ttl() if revoked else settings.SSO_REVOKED_SESSION_CACHE_SECONDS
+    if ttl > 0:
+        try:
+            cache.set(key, 1 if revoked else 0, ttl)
+        except Exception:  # noqa: BLE001
+            pass
+    return revoked
+
+
+def _cache_revoked(sid: str) -> None:
+    try:
+        cache.set(_session_key(sid), 1, _revoked_ttl())
+    except Exception:  # noqa: BLE001 - DB row is written; the negative entry expires within seconds
+        logger.warning(json.dumps({"event": "revoked_session_cache_error"}))
+
+
+def prune_revoked_sessions(*, dry_run: bool = False) -> int:
+    """Delete ``RevokedSession`` rows older than the refresh lifetime + 1 day: every refresh token of such a
+    session has expired, and its access tokens long before. Returns the number of rows (to be) deleted."""
+    cutoff = timezone.now() - settings.SSO_REFRESH_TTL - timedelta(days=1)
+    old = RevokedSession.objects.filter(revoked_at__lt=cutoff)
+    if dry_run:
+        return old.count()
+    return old.delete()[0]
 
 
 def revoke_session(user, sid: str, reason: str) -> int:
@@ -64,6 +111,7 @@ def revoke_session(user, sid: str, reason: str) -> int:
             pass  # already revoked
         family = [t for t in _live_outstanding(user) if token_sid(t.token) == sid]
         BlacklistedToken.objects.bulk_create([BlacklistedToken(token=t) for t in family], ignore_conflicts=True)
+    _cache_revoked(sid)
     logger.warning(json.dumps({"event": "session_revoked", "reason": reason, "user_id": user.pk,
                                "tokens_blacklisted": len(family)}, sort_keys=True))
     return len(family)

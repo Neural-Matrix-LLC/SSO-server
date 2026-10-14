@@ -89,12 +89,15 @@ class SSORefreshToken(_SSOBackendMixin, RefreshToken):
     # Refresh tokens carry only the standard claims plus ``sid``; profile claims go on the access token.
 
     @classmethod
-    def for_session(cls, user: User, sid: str) -> "SSORefreshToken":
-        """Like simplejwt's ``for_user`` (blacklist app: records an OutstandingToken) but with ``sid`` set
-        BEFORE the token string is stored, so a session's refresh tokens can be found by their claim."""
+    def for_session(cls, user: User, sid: str, cip: str | None = None) -> "SSORefreshToken":
+        """Like simplejwt's ``for_user`` (blacklist app: records an OutstandingToken) but with ``sid`` (and the
+        v1.2b ``cip`` binding) set BEFORE the token string is stored, so a session's refresh tokens can be found
+        by their claim. The access token copies both claims."""
         token = cls()
         token[api_settings.USER_ID_CLAIM] = str(getattr(user, api_settings.USER_ID_FIELD))
         token[SID_CLAIM] = sid
+        if cip:
+            token["cip"] = cip
         OutstandingToken.objects.create(
             user=user, jti=token[api_settings.JTI_CLAIM], token=str(token), created_at=token.current_time,
             expires_at=datetime_from_epoch(token["exp"]))
@@ -159,14 +162,16 @@ def _wait_past_revocation(user: User) -> None:
         time.sleep(delay + 0.001)
 
 
-def issue_token_pair(user: User, sid: str | None = None) -> tuple[SSORefreshToken, SSOAccessToken]:
+def issue_token_pair(user: User, sid: str | None = None, cip: str | None = None
+                     ) -> tuple[SSORefreshToken, SSOAccessToken]:
     """Create a refresh token (recorded as outstanding) and an access token with profile claims.
 
     ``sid``: the session id; a login passes None (new session), a refresh passes the old token's ``sid``.
-    Both tokens carry it (the access token inherits it from the refresh token).
+    ``cip``: IP binding (design §4.2), None in NOIP mode. Both tokens carry them (the access token inherits
+    them from the refresh token).
     """
     _wait_past_revocation(user)
-    refresh = SSORefreshToken.for_session(user, sid or new_sid())
+    refresh = SSORefreshToken.for_session(user, sid or new_sid(), cip)
     access = refresh.access_token
     access["username"] = user.get_username()
     access["email"] = user.email or ""
