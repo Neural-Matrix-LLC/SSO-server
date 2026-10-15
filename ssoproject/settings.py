@@ -254,10 +254,18 @@ REST_FRAMEWORK = {
         "refresh": env.str("SSO_THROTTLE_REFRESH", default="60/min"),
         # v1.2b: per ServiceClient for /introspect (design §4.4)
         "introspect": env.str("SSO_THROTTLE_INTROSPECT", default="6000/min"),
+        # v1.3a (DESIGN-v1.3a-admin-api.md §10)
+        "admin": env.str("SSO_THROTTLE_ADMIN", default="120/min"),
+        "admin_reauth": env.str("SSO_THROTTLE_ADMIN_REAUTH", default="5/min"),
+        "service_token": env.str("SSO_THROTTLE_SERVICE_TOKEN", default="60/min"),
     },
     "NUM_PROXIES": SSO_NUM_PROXIES,
     "EXCEPTION_HANDLER": "sso.errors.error_handler",
 }
+
+# v1.3a: step-up window and service token lifetime (DESIGN-v1.3a-admin-api.md §11)
+SSO_ADMIN_REAUTH_SECONDS = env.int("SSO_ADMIN_REAUTH_SECONDS", default=300)
+SSO_SERVICE_TOKEN_TTL_SECONDS = env.int("SSO_SERVICE_TOKEN_TTL_SECONDS", default=300)
 
 SSO_ACCESS_TTL = timedelta(minutes=env.int("SSO_ACCESS_TTL_MIN", default=15))
 SSO_REFRESH_TTL = timedelta(days=env.int("SSO_REFRESH_TTL_DAYS", default=7))

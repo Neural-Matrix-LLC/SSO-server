@@ -22,7 +22,8 @@ class ApplicationAccess(models.Model):
     class Meta:
         managed = True
         default_permissions = ()
-        permissions = [("app1", "Can use app1 (llm-wiki-svc)")]
+        permissions = [("app1", "Can use app1 (llm-wiki-svc)"),
+                       ("sso_admin", "SSO administrator (admin REST API, v1.3a)")]
         verbose_name = "application access"
         db_table = "sso_application_access"  # SSO-owned tables share the sso_ prefix in dcWebUsers
 
@@ -40,6 +41,12 @@ class ApplicationPermissionRecord(models.Model):
     name = models.CharField(max_length=255)
     permission_id = models.BigIntegerField(null=True, blank=True)
     created = models.DateTimeField(auto_now_add=True)
+    # v1.3a permission import (design §5). Nullable/blank so a v1.2b image (rollback) can still INSERT.
+    description = models.CharField(max_length=1000, blank=True, default="")
+    app_codename = models.CharField(max_length=63, null=True, blank=True, db_index=True,
+                                    help_text="Application that declared it (sso_permissions.py import).")
+    deprecated_at = models.DateTimeField(null=True, blank=True,
+                                         help_text="Set when an import no longer lists it. Never deleted by import.")
 
     class Meta:
         default_permissions = ()
@@ -58,3 +65,22 @@ class ApplicationPermission(Permission):
         proxy = True
         default_permissions = ()
         verbose_name = "application permission"
+
+
+class Application(models.Model):
+    """An application whose ``sso_permissions.py`` was imported (v1.3a design §5)."""
+
+    app_codename = models.CharField(max_length=63, unique=True)
+    name = models.CharField(max_length=200)
+    description = models.CharField(max_length=1000, blank=True, default="")
+    version = models.PositiveIntegerField(default=0)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        default_permissions = ()
+        db_table = "sso_application"
+        ordering = ["app_codename"]
+
+    def __str__(self) -> str:
+        return self.app_codename

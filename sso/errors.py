@@ -63,6 +63,50 @@ class OriginNotAllowed(SSOError):
     default_detail = "Request origin is not allowed."
 
 
+class ReauthRequired(SSOError):
+    error_code = "reauth_required"
+    status_code = status.HTTP_401_UNAUTHORIZED
+    default_detail = "This action needs a recent password confirmation: POST /api/v1/admin/reauth, then send X-SSO-Reauth."
+
+
+class AdminForbidden(SSOError):
+    error_code = "admin_forbidden"
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "SSO administrator permission (application.sso_admin) required."
+
+
+class NotFound(SSOError):
+    error_code = "not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    default_detail = "Not found."
+
+
+class Conflict(SSOError):
+    error_code = "conflict"
+    status_code = status.HTTP_409_CONFLICT
+    default_detail = "Conflict."
+
+
+class SelfActionForbidden(Conflict):
+    error_code = "self_action_forbidden"
+    default_detail = "You cannot do this to your own account."
+
+
+class LastAdmin(Conflict):
+    error_code = "last_admin"
+    default_detail = "This would leave no active SSO administrator."
+
+
+class VersionConflict(Conflict):
+    error_code = "version_conflict"
+    default_detail = "The stored permissions version is newer; use force=true to import anyway."
+
+
+class UnsupportedGrantType(SSOError):
+    error_code = "unsupported_grant_type"
+    default_detail = "Only grant_type=client_credentials is supported."
+
+
 GENERIC = {
     400: ("invalid_request", "Missing or malformed fields."),
     401: ("token_invalid", "Authentication credentials were missing or invalid."),

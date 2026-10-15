@@ -29,6 +29,13 @@ class ServiceClient(models.Model):
     notify_url = models.URLField(
         max_length=500, null=True, blank=True, validators=[URLValidator(schemes=["https"])],
         help_text="HTTPS webhook endpoint (v1.4; stored only, nothing is sent yet).")
+    # v1.3a per-service credentials (design §6): the client's own application.* grants (service tokens), and
+    # the time of the last secret rotation (service tokens issued before it are inactive).
+    permissions = models.ManyToManyField(
+        "auth.Permission", blank=True, related_name="sso_service_clients",
+        db_table="sso_serviceclient_permissions",
+        help_text="application.* permissions of this service client (perms of its service tokens).")
+    secret_rotated_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["client_id"]
@@ -101,3 +108,45 @@ class RevokedSession(models.Model):
 
     def __str__(self) -> str:
         return f"session {self.sid} of {self.user_id} revoked ({self.reason})"
+
+
+class AdminReauth(models.Model):
+    """Step-up re-authentication (v1.3a design §3.3). Only the SHA-256 of the token is stored."""
+
+    token_hash = models.CharField(max_length=64, unique=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sso_admin_reauths")
+    sid = models.CharField(max_length=64, blank=True, default="")
+    ip = models.CharField(max_length=64, blank=True, default="")
+    created = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+
+    @staticmethod
+    def hash_token(raw: str) -> str:
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def __str__(self) -> str:
+        return f"reauth of {self.user_id} until {self.expires_at.isoformat()}"
+
+
+class AdminAuditLog(models.Model):
+    """Audit trail of admin changes (v1.3a design §8). No foreign keys: rows outlive deleted users/services."""
+
+    ts = models.DateTimeField(default=timezone.now, db_index=True)
+    actor_type = models.CharField(max_length=16)  # user | service | system
+    actor_id = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    actor_ip = models.CharField(max_length=64, blank=True, default="")
+    action = models.CharField(max_length=64, db_index=True)
+    target_type = models.CharField(max_length=32, blank=True, default="")
+    target_id = models.CharField(max_length=191, blank=True, default="")
+    before = models.JSONField(null=True, blank=True)
+    after = models.JSONField(null=True, blank=True)
+    request_id = models.CharField(max_length=64, blank=True, default="")
+    result = models.CharField(max_length=16, default="ok")  # ok | denied | error
+    stepup = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-ts", "-id"]
+        indexes = [models.Index(fields=["target_type", "target_id"], name="sso_audit_target_idx")]
+
+    def __str__(self) -> str:
+        return f"{self.ts.isoformat()} {self.actor_type}:{self.actor_id} {self.action} {self.target_type}:{self.target_id}"
