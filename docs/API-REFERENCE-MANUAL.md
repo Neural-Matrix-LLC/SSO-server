@@ -527,8 +527,8 @@ change/reset are future items in TODOS.md.
 ### 8.1 Basics
 
 - Base path `/api/v1/admin`. JSON in and out; errors `{"error","detail"}` (§6 plus §8.6).
-- **Auth:** `Authorization: Bearer <user access token>` of an **active** user who holds `application.sso_admin`
-  (direct or via a group) or is a superuser, checked in the DB on every call. IP binding applies like `/me`.
+- **Auth:** `Authorization: Bearer <user access token>` of an **active staff** (`is_staff`) user who holds
+  `application.sso_admin` (direct or via a group) or is a superuser, checked in the DB on every call. IP binding applies like `/me`.
   Service tokens are rejected (`401 token_invalid`). Exception: an application's own ServiceClient (HTTP Basic) may
   call `PUT /apps/{its app_codename}/permissions`.
 - **Step-up** 🔒: send `X-SSO-Reauth: <reauth_token>` from `POST /reauth`; missing/expired → `401 reauth_required`.

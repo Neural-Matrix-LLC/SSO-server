@@ -262,6 +262,10 @@ class LogoutView(_ServiceClientChallenge, APIView):
                 return response
             raise
         token.blacklist()
+        if token.get(SID_CLAIM):  # v1.3a: a plain logout also ends the session's step-up (reauth) tokens
+            from .revocation import drop_reauth
+
+            drop_reauth(user, token[SID_CLAIM])
         log_token_event(request, "logout", "success", user_id=user.pk)
         response = Response(status=status.HTTP_204_NO_CONTENT)
         if cookie_mode:

@@ -1,6 +1,6 @@
 """SSO admin REST API ``/api/v1/admin/…`` (DESIGN-v1.3a-admin-api.md §3-§4).
 
-Caller: an active user holding ``application.sso_admin`` (direct or via a group) or a superuser, with a Bearer
+Caller: an active **staff** (``is_staff``) user holding ``application.sso_admin`` (direct or via a group) or a superuser, with a Bearer
 user access token, checked in the DB on every call (token ``perms`` are not trusted). IP binding applies.
 Exception: an application's own ServiceClient (Basic) may import its own permissions.
 
@@ -73,7 +73,8 @@ def admins_qs():
     q = Q(is_superuser=True)
     if perm is not None:
         q |= Q(user_permissions=perm) | Q(groups__permissions=perm)
-    return User.objects.filter(is_active=True).filter(q).distinct()
+    # active + is_staff + (sso_admin or superuser): Thomas 2026-10-15, so Django admin and the API agree on staff
+    return User.objects.filter(is_active=True, is_staff=True).filter(q).distinct()
 
 
 def is_sso_admin(user) -> bool:

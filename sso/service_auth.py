@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import timezone as dt_timezone
 
-from django.contrib.auth.models import User
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import authentication, exceptions
@@ -14,7 +13,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 
 from .authentication import ServiceClientBasicAuthentication, ServicePrincipal
 from .errors import InvalidClient, InvalidRequest, UnsupportedGrantType
-from .models import AdminAuditLog, ServiceClient, UserTokenRevocation
+from .models import ServiceClient, UserTokenRevocation, UserTombstone
 from .tokens import SSOServiceToken, issue_service_token, secret_generation, service_token_ttl_seconds
 
 FEED_LIMIT = 500
@@ -104,18 +103,8 @@ class InactiveUsersView(APIView):
                     .select_related("user").order_by("revoked_at")[:FEED_LIMIT]):
             events.append({"id": rev.user_id, "username": rev.user.username, "event": "suspended",
                            "at": rev.revoked_at})
-        for row in (AdminAuditLog.objects.filter(action="user.delete", result="ok", ts__gt=since)
-                    .order_by("ts")[:FEED_LIMIT]):
-            try:
-                uid = int(row.target_id)
-            except ValueError:
-                continue
-            events.append({"id": uid, "username": (row.before or {}).get("username", ""), "event": "deleted",
-                           "at": row.ts})
-        # a user suspended then deleted shows both events; deleted users have no revocation row any more
-        still = set(User.objects.filter(pk__in=[e["id"] for e in events if e["event"] == "deleted"])
-                    .values_list("pk", flat=True))
-        events = [e for e in events if not (e["event"] == "deleted" and e["id"] in still)]
+        for tomb in UserTombstone.objects.filter(deleted_at__gt=since).order_by("deleted_at")[:FEED_LIMIT]:
+            events.append({"id": tomb.user_id, "username": tomb.username, "event": "deleted", "at": tomb.deleted_at})
         events.sort(key=lambda e: e["at"])
         events = events[:FEED_LIMIT]
         next_since = _iso(events[-1]["at"]) if events else _iso(since)

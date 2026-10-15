@@ -150,3 +150,15 @@ class AdminAuditLog(models.Model):
 
     def __str__(self) -> str:
         return f"{self.ts.isoformat()} {self.actor_type}:{self.actor_id} {self.action} {self.target_type}:{self.target_id}"
+
+
+class UserTombstone(models.Model):
+    """v1.3a: written by a ``post_delete`` signal for EVERY user deletion (admin API, Django admin, shell), so the
+    inactive-users feed reports deletions made outside the API. No FK (the user row is gone)."""
+
+    user_id = models.BigIntegerField(db_index=True)
+    username = models.CharField(max_length=150)
+    deleted_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    def __str__(self) -> str:
+        return f"user {self.user_id} ({self.username}) deleted {self.deleted_at.isoformat()}"

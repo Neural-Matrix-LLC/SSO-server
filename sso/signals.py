@@ -17,7 +17,7 @@ import logging
 
 from django.contrib.auth.hashers import check_password
 from django.contrib.auth.models import User
-from django.db.models.signals import post_save, pre_save
+from django.db.models.signals import post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 admin_logger = logging.getLogger("sso.admin")
@@ -66,3 +66,12 @@ def revoke_on_is_active_change(sender, instance: User, created=False, raw=False,
     event = "user.reactivated" if now_active else "user.suspended"
     admin_logger.info(json.dumps({"event": event, "user_id": instance.pk, "tokens_revoked": True},
                                  sort_keys=True))
+
+
+@receiver(post_delete, sender=User, dispatch_uid="sso_user_tombstone")
+def write_tombstone(sender, instance: User, **kwargs):
+    """v1.3a: every deletion leaves a tombstone for the inactive-users feed (and v1.3c ``user.deleted``)."""
+    from .models import UserTombstone
+
+    UserTombstone.objects.create(user_id=instance.pk, username=instance.get_username())
+    admin_logger.info(json.dumps({"event": "user.deleted", "user_id": instance.pk}, sort_keys=True))

@@ -121,3 +121,12 @@ def test_inactive_feed(api, at, reauth, make_user):  # noqa: F811
     assert r.status_code == 200 and r.json()["users"] == []
     assert api.get("/api/v1/service/users/inactive", **basic("sgmcp", "sec")).status_code == 400
     assert api.get("/api/v1/service/users/inactive", {"since": since}).status_code == 401
+
+
+def test_inactive_feed_includes_users_deleted_outside_the_api(api, make_user):
+    client()
+    since = timezone.now().isoformat()
+    u = make_user(username="gone", email="g@x.org", groups=())
+    u.delete()  # e.g. Django admin or shell
+    r = api.get("/api/v1/service/users/inactive", {"since": since}, **basic("sgmcp", "sec")).json()
+    assert [(x["username"], x["event"]) for x in r["users"]] == [("gone", "deleted")]

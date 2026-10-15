@@ -99,8 +99,8 @@ flowchart TB
   user revocation epoch, revoked `sid`).
 - **IP binding applies** (user token): `ENFORCE` + different IP → `401 token_invalid` and the session is revoked;
   `WARNING` logs.
-- The user is reloaded from the DB on every call and must be **active** and be an **SSO admin**:
-  holds `application.sso_admin` (directly or via a group) **or** `is_superuser`. The token's embedded `perms` are
+- The user is reloaded from the DB on every call and must be **active**, **`is_staff`** (decision 2026-10-15) and
+  hold `application.sso_admin` (directly or via a group) **or** be `is_superuser`. The token's embedded `perms` are
   never trusted. Otherwise `403 admin_forbidden`.
 - `application.sso_admin` is a code-defined permission (recreated after every migrate, never deletable).
 - A **ServiceClient** (Basic) is accepted on exactly one endpoint: `PUT /api/v1/admin/apps/{app}/permissions`, and
@@ -140,8 +140,9 @@ sequenceDiagram
 
 - Token: 32 random bytes (urlsafe); only its SHA-256 is stored (`sso_adminreauth`). Bound to user, the access
   token's `sid` and the client IP. Valid `SSO_ADMIN_REAUTH_SECONDS` (default 300), reusable inside the window.
-- Dead when: expired, other user, other `sid` (new login), other IP, the session or user was revoked (logout-all,
-  suspend, password change, refresh reuse) because the Bearer token itself then fails.
+- Dead when: expired, other user, other `sid` (new login), other IP, or the session/user was revoked: logout
+  (plain logout of that session deletes its reauth rows), logout-all, suspend, password change, refresh reuse,
+  IP-binding revocation.
 - Wrong password → `401 invalid_credentials` (audited `result=denied`); 6th attempt per minute → `429`.
 - Missing / invalid / expired header on a step-up endpoint → `401 reauth_required`.
 - Expired rows are deleted by `manage.py revoke_inactive_users` (the hourly sweep).
@@ -299,8 +300,9 @@ sequenceDiagram
 
 ## 7. Inactive-users feed
 
-`GET /api/v1/service/users/inactive?since=2026-10-15T00:00:00Z` lists users suspended or deleted (from the audit
-table and `UserTokenRevocation` of inactive users) after `since`, oldest first, max 500, with `next_since` as the
+`GET /api/v1/service/users/inactive?since=2026-10-15T00:00:00Z` lists users suspended (`UserTokenRevocation` of
+inactive users) or deleted (`sso_usertombstone`, written by a `post_delete` signal, so deletions in Django admin
+or the shell are included) after `since`, oldest first, max 500, with `next_since` as the
 cursor. Used by SGMCP (v1.4) and FUND (v1.5) as the 60 s suspend sweep until webhooks (v1.3c).
 
 ## 8. Audit logging

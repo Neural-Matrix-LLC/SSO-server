@@ -508,8 +508,8 @@ Full reference: [docs/API-REFERENCE-MANUAL.md §8](docs/API-REFERENCE-MANUAL.md#
 
 1. `python manage.py migrate` (adds `sso.0003_v13a`, `application.0002_v13a`, and the code-defined
    `application.sso_admin` permission).
-2. Grant `application.sso_admin` to your admin account (Django admin → Users → permissions, or a group). Superusers
-   are admins without the grant.
+2. Grant `application.sso_admin` to your admin account (Django admin → Users → permissions, or a group). Admins must also be
+   **staff** (`is_staff`); staff superusers are admins without the grant.
 3. Log in natively, then call `/api/v1/admin/...` with the Bearer token. Destructive calls need
    `POST /api/v1/admin/reauth {"password"}` first and `X-SSO-Reauth: <token>` (5 min).
 4. Services: `POST /api/v1/auth/service-token` with Basic `client_id:secret` and `{"grant_type":"client_credentials"}`.

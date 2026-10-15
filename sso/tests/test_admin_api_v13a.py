@@ -22,7 +22,7 @@ def perm(code):
 
 @pytest.fixture
 def admin_user(make_user):
-    u = make_user(username="admin", email="admin@example.org", groups=())
+    u = make_user(username="admin", email="admin@example.org", groups=(), is_staff=True)
     u.user_permissions.add(perm("sso_admin"))
     return u
 
@@ -79,13 +79,13 @@ def test_token_perms_not_trusted_db_checked(api, admin_user, at):
 
 
 def test_superuser_is_admin(api, make_user):
-    make_user(username="root", email="r@x.org", groups=(), is_superuser=True)
+    make_user(username="root", email="r@x.org", groups=(), is_superuser=True, is_staff=True)
     t = login(api, username="root").json()["access_token"]
     assert api.get(f"{A}/users", **H(t)).status_code == 200
 
 
 def test_admin_via_group(api, make_user):
-    u = make_user(username="ga", email="ga@x.org", groups=("admins",))
+    u = make_user(username="ga", email="ga@x.org", groups=("admins",), is_staff=True)
     Group.objects.get(name="admins").permissions.add(perm("sso_admin"))
     t = login(api, username="ga").json()["access_token"]
     assert api.get(f"{A}/users", **H(t)).status_code == 200
@@ -193,7 +193,7 @@ def test_self_guards(api, admin_user, at, reauth):
 
 
 def test_removing_own_admin_via_group_rolls_back(api, make_user):
-    u = make_user(username="ga", email="ga@x.org", groups=("admins",))
+    u = make_user(username="ga", email="ga@x.org", groups=("admins",), is_staff=True)
     Group.objects.get(name="admins").permissions.add(perm("sso_admin"))
     t = login(api, username="ga").json()["access_token"]
     rt = api.post(f"{A}/reauth", {"password": PASSWORD}, format="json", **H(t)).json()["reauth_token"]
@@ -204,7 +204,7 @@ def test_removing_own_admin_via_group_rolls_back(api, make_user):
 
 
 def test_last_admin_guard_service_import_cannot_break(api, admin_user, at, reauth, make_user):
-    other = make_user(username="o", email="o@x.org", groups=())
+    other = make_user(username="o", email="o@x.org", groups=(), is_staff=True)
     other.user_permissions.add(perm("sso_admin"))
     # other admin can be suspended (admin remains)
     assert api.post(f"{A}/users/{other.pk}/suspend", {}, format="json", **H(at, reauth)).status_code == 200
@@ -350,3 +350,31 @@ def test_service_token_not_accepted_on_admin(api, at):
 def test_ensure_permission_unaffected(db):
     p, created = ensure_permission("zz_x", "x")
     assert created and p.codename == "zz_x"
+
+
+def test_is_staff_required(api, make_user):
+    """Thomas 2026-10-15: active + is_staff + (sso_admin or superuser)."""
+    u = make_user(username="ns", email="ns@x.org", groups=(), is_staff=False)
+    u.user_permissions.add(perm("sso_admin"))
+    make_user(username="su", email="su@x.org", groups=(), is_superuser=True, is_staff=False)
+    for name in ("ns", "su"):
+        t = login(api, username=name).json()["access_token"]
+        assert api.get(f"{A}/users", **H(t)).json()["error"] == "admin_forbidden"
+    User.objects.filter(username="ns").update(is_staff=True)
+    t = login(api, username="ns").json()["access_token"]
+    assert api.get(f"{A}/users", **H(t)).status_code == 200
+
+
+def test_plain_logout_kills_reauth(api, admin_user, make_user):
+    r = login(api, username="admin").json()
+    t, refresh = r["access_token"], r["refresh_token"]
+    rt = api.post(f"{A}/reauth", {"password": PASSWORD}, format="json", **H(t)).json()["reauth_token"]
+    assert api.post("/api/v1/auth/logout", {"refresh_token": refresh}, format="json").status_code == 204
+    assert not AdminReauth.objects.exists()
+    v = make_user(username="v", email="v@x.org", groups=())
+    assert api.delete(f"{A}/users/{v.pk}", **H(t, rt)).json()["error"] == "reauth_required"
+
+
+def test_logout_all_kills_reauth(api, at, reauth, admin_user):
+    assert api.post("/api/v1/auth/logout-all", **H(at)).status_code == 204
+    assert not AdminReauth.objects.exists()
