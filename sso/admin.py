@@ -21,7 +21,7 @@ from django.utils.html import format_html
 from application.admin import audit_log
 from application.permissions import PREFIX, app_permissions, users_with_access
 
-from .models import RevokedSession, ServiceClient, UserTokenRevocation
+from .models import AdminAuditLog, RevokedSession, ServiceClient, UserTokenRevocation
 
 
 # --------------------------------------------------------------------------- ServiceClient
@@ -91,12 +91,37 @@ class ServiceClientAdmin(admin.ModelAdmin):
         if not change or form.cleaned_data.get("regenerate_secret"):
             secret = ServiceClient.generate_secret()
             obj.set_secret(secret)
+            if change:  # v1.3a: service tokens issued before the rotation become inactive
+                from django.utils import timezone
+
+                obj.secret_rotated_at = timezone.now()
             messages.warning(
                 request,
                 f"Client secret for '{obj.client_id}': {secret} -- copy it now, it will not be shown again.",
             )
             audit_log(request, "service_client.secret_issued", client_id=obj.client_id)
         super().save_model(request, obj, form, change)
+
+
+@admin.register(AdminAuditLog)
+class AdminAuditLogAdmin(admin.ModelAdmin):
+    """v1.3a audit trail: read-only."""
+
+    list_display = ["ts", "actor_type", "actor_id", "action", "target_type", "target_id", "result", "stepup"]
+    list_filter = ["action", "result", "actor_type"]
+    search_fields = ["actor_id", "target_id", "request_id"]
+
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in AdminAuditLog._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(UserTokenRevocation)

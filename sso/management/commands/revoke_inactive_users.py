@@ -38,3 +38,7 @@ class Command(BaseCommand):
         self.stdout.write(f"{verb} tokens of {count} inactive user(s)")
         pruned = prune_revoked_sessions(dry_run=dry_run)
         self.stdout.write(f"{'would prune' if dry_run else 'pruned'} {pruned} expired revoked-session row(s)")
+        if not dry_run:  # v1.3a: expired step-up tokens
+            from sso.stepup import prune_expired
+
+            self.stdout.write(f"pruned {prune_expired()} expired admin reauth row(s)")

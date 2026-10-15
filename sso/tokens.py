@@ -189,3 +189,46 @@ def access_ttl_seconds() -> int:
 def refresh_ttl_seconds() -> int:
     return int(settings.SSO_REFRESH_TTL.total_seconds())
 
+
+
+# --------------------------------------------------------------------------- v1.3a service tokens
+SERVICE_TOKEN_TYPE = "service"
+
+
+class SSOServiceToken(_SSOBackendMixin, AccessToken):
+    """Client-credentials token of a ServiceClient (DESIGN-v1.3a §6): ``token_type="service"``, so it is never
+    accepted where a user access token is expected (``SSOAccessToken`` checks ``token_type="access"``)."""
+
+    token_type = SERVICE_TOKEN_TYPE
+
+    @property
+    def lifetime(self):  # type: ignore[override]
+        from datetime import timedelta
+
+        return timedelta(seconds=settings.SSO_SERVICE_TOKEN_TTL_SECONDS)
+
+
+def service_client_perms(client) -> list[str]:
+    """Sorted ``application.*`` permissions granted to a ServiceClient."""
+    return sorted("application." + c for c in client.permissions.filter(
+        content_type__app_label="application").values_list("codename", flat=True))
+
+
+def issue_service_token(client) -> SSOServiceToken:
+    token = SSOServiceToken()
+    token["sub"] = f"svc:{client.client_id}"
+    token["typ"] = SERVICE_TOKEN_TYPE
+    token["client_id"] = client.client_id
+    token["app"] = client.app_codename or None
+    token["perms"] = service_client_perms(client)
+    token["rot"] = secret_generation(client)  # secret generation: a rotation makes older tokens inactive
+    return token
+
+
+def secret_generation(client) -> int:
+    rotated = getattr(client, "secret_rotated_at", None)
+    return int(rotated.timestamp() * 1_000_000) if rotated else 0
+
+
+def service_token_ttl_seconds() -> int:
+    return int(settings.SSO_SERVICE_TOKEN_TTL_SECONDS)

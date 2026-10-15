@@ -306,6 +306,9 @@ class IntrospectView(APIView):
         ser = IntrospectSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         inactive = Response({"active": False}, headers={"Cache-Control": "no-store"})
+        service = _introspect_service_token(ser.validated_data["token"], request.user.client_id)
+        if service is not None:
+            return service
         try:
             token = SSOAccessToken(ser.validated_data["token"])
             # a validly signed token with a malformed claim (exp as a string, non-numeric sub) is
@@ -349,6 +352,32 @@ class IntrospectView(APIView):
         if "require" in ser.validated_data:
             body["allowed"] = set(ser.validated_data["require"]) <= set(perms)
         return Response(body, headers={"Cache-Control": "no-store"})
+
+
+def _introspect_service_token(raw: str, caller: str):
+    """v1.3a: a service token (``token_type=service``) is introspected without IP binding (DESIGN-v1.3a §6).
+    Returns None when ``raw`` is not a service token at all (then the user-token path runs)."""
+    import jwt as _jwt
+
+    try:
+        claims = _jwt.decode(raw, options={"verify_signature": False})
+    except _jwt.PyJWTError:
+        return None
+    if not isinstance(claims, dict) or claims.get("token_type") != "service":
+        return None
+    from .service_auth import load_service_token
+
+    loaded = load_service_token(raw)
+    if loaded is None:
+        return Response({"active": False}, headers={"Cache-Control": "no-store"})
+    token, client = loaded
+    from .tokens import service_client_perms
+
+    return Response({
+        "active": True, "token_type": "service", "sub": token.get("sub"), "subject_client_id": client.client_id,
+        "app": client.app_codename, "perms": service_client_perms(client), "ip_binding": "NOIP",
+        "ip_match": None, "iat": token.get("iat"), "exp": token.get("exp"), "iss": settings.SSO_ISSUER,
+        "aud": settings.SSO_AUDIENCE, "client_id": caller}, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------- discovery / health
