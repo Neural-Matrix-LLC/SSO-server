@@ -245,11 +245,11 @@ def test_mysql_settings_host_port_and_tls_options(tmp_path):
     import json
     r = _db_options({})
     assert r.returncode == 0, r.stderr
-    assert json.loads(r.stdout) == {"host": "db.internal", "port": "3307", "options": {"charset": "utf8mb4"}}
+    assert json.loads(r.stdout) == {"host": "db.internal", "port": "3307", "options": {"charset": "utf8mb4", "connect_timeout": 3, "read_timeout": 15, "write_timeout": 15}}
     ca = tmp_path / "ca.pem"
     ca.write_text("dummy")
     r = _db_options({"SSO_DB_SSL_CA": str(ca)})
-    assert json.loads(r.stdout)["options"] == {"charset": "utf8mb4", "ssl": {"ca": str(ca)}, "ssl_mode": "VERIFY_CA"}
+    assert json.loads(r.stdout)["options"] == {"charset": "utf8mb4", "connect_timeout": 3, "read_timeout": 15, "write_timeout": 15, "ssl": {"ca": str(ca)}, "ssl_mode": "VERIFY_CA"}
     r = _db_options({"SSO_DB_SSL_MODE": "required"})
     assert json.loads(r.stdout)["options"]["ssl_mode"] == "REQUIRED"
 

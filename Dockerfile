@@ -49,7 +49,7 @@ COPY --chown=root:root manage.py ./
 COPY --chown=root:root ssoproject ./ssoproject
 COPY --chown=root:root sso ./sso
 COPY --chown=root:root application ./application
-COPY --chown=root:root docker/healthcheck.py ./docker/healthcheck.py
+COPY --chown=root:root docker/healthcheck.py docker/dbcheck.py ./docker/
 # Admin static files are collected at build time and served by WhiteNoise (R4). A throw-away DEBUG
 # config is used only for this step (ephemeral key in memory, nothing written but staticfiles/).
 RUN SSO_ENV_FILE= SSO_DEBUG=True SSO_DB_ENGINE=sqlite SSO_SQLITE_PATH=/tmp/build.sqlite3 \
@@ -69,4 +69,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=20s \
 # SSO_FORWARDED_ALLOW_IPS (comma list of IPs/CIDRs; image default 127.0.0.1, compose sets the nginx network).
 # --no-control-socket (gunicorn >= 25.1): the gunicornc control socket defaults to $HOME/.gunicorn/gunicorn.ctl,
 # and HOME is /nonexistent on a read-only root fs ("[ERROR] Control server error"). Nothing uses gunicornc here.
-CMD ["sh", "-c", "exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --no-control-socket --access-logfile - --error-logfile - --forwarded-allow-ips \"${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]
+CMD ["sh", "-c", "python /app/docker/dbcheck.py; exec gunicorn ssoproject.wsgi:application --bind 0.0.0.0:8000 --workers ${GUNICORN_WORKERS:-3} --timeout 30 --worker-tmp-dir /dev/shm --no-control-socket --access-logfile - --error-logfile - --forwarded-allow-ips \"${SSO_FORWARDED_ALLOW_IPS:-127.0.0.1}\""]

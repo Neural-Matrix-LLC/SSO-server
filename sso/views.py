@@ -6,7 +6,7 @@ import logging
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.auth.signals import user_logged_in
-from django.db import DatabaseError, connection, transaction
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -374,11 +374,8 @@ class DiscoveryView(APIView):
 
 class HealthView(APIView):
     def get(self, request):
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-        except DatabaseError:
-            logger.error("healthz: database check failed")
+        from sso.dbcheck import check_database
+
+        if not check_database("healthz"):
             return Response({"error": "unhealthy", "detail": "database"}, status=503)
         return Response({"status": "ok"}, headers={"Cache-Control": "no-store"})

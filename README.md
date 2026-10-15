@@ -141,6 +141,30 @@ certificate. For a throw-away local MySQL instead, see "Local dev with self-sign
 
 ---
 
+### Troubleshooting: `WORKER TIMEOUT` / `Worker was sent SIGKILL! Perhaps out of memory?`
+
+This is almost never memory. It means a request (usually the container healthcheck's `GET /healthz`)
+waited on MySQL longer than gunicorn's 30 s timeout. Since v1.2b the DB connect timeout is 3 s
+(`SSO_DB_CONNECT_TIMEOUT`, plus `SSO_DB_READ_TIMEOUT` / `SSO_DB_WRITE_TIMEOUT`, default 15 s; Redis:
+`SSO_CACHE_CONNECT_TIMEOUT` / `SSO_CACHE_SOCKET_TIMEOUT`, 3 s), so you get `/healthz` 503 and a clear line instead:
+
+    ERROR sso.db startup: database unreachable at host.docker.internal:3306 db=dcWebUsers (OperationalError: ...)
+
+Check, from inside the container network:
+
+```bash
+docker compose logs web | grep sso.db                       # host, port, db and the driver error
+docker compose run --rm --no-deps web python -c "import socket; socket.create_connection(('host.docker.internal', 3306), 3); print('tcp ok')"
+docker compose run --rm --no-deps web python /app/docker/dbcheck.py   # full Django login to MySQL
+```
+
+- `timed out` / error 110: packets are dropped. On the WSL host set `bind-address = 0.0.0.0` (or the
+  docker bridge IP) in `/etc/mysql/mysql.conf.d/mysqld.cnf` and restart MySQL; check `sudo ss -ltnp | grep 3306`
+  shows `0.0.0.0:3306`, not `127.0.0.1:3306`; check `ufw`/iptables (`sudo ufw allow from 172.16.0.0/12 to any port 3306`).
+- `Connection refused` / 111: MySQL not listening on that address or port.
+- `Access denied` / 1045 or `Host ... is not allowed` / 1130: the account must be `'user'@'%'` (or the docker
+  subnet, e.g. `'user'@'172.%'`), not `'user'@'localhost'`.
+
 ## 1. Layout
 
 | Path | Purpose |

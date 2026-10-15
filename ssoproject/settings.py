@@ -138,7 +138,15 @@ if SSO_DB_ENGINE == "sqlite":
 elif SSO_DB_ENGINE == "mysql":
     # Optional DB TLS (deployment plan §6.0 / R28). mysqlclient emulates ssl_mode on MariaDB Connector/C:
     # REQUIRED -> TLS enforced, VERIFY_CA / VERIFY_IDENTITY -> server certificate verified against the CA.
-    _db_options: dict = {"charset": "utf8mb4"}
+    # Network timeouts (seconds). Without them libmariadb waits for the OS TCP timeout (~2 min) when the
+    # DB host drops packets (firewall, wrong bind-address, WSL host-gateway), so a request such as the
+    # /healthz probe outlives gunicorn's --timeout and the worker is SIGKILLed ("WORKER TIMEOUT").
+    _db_options: dict = {
+        "charset": "utf8mb4",
+        "connect_timeout": env.int("SSO_DB_CONNECT_TIMEOUT", default=3),
+        "read_timeout": env.int("SSO_DB_READ_TIMEOUT", default=15),
+        "write_timeout": env.int("SSO_DB_WRITE_TIMEOUT", default=15),
+    }
     SSO_DB_SSL_CA = env.str("SSO_DB_SSL_CA", default="")
     SSO_DB_SSL_MODE = env.str("SSO_DB_SSL_MODE", default="").upper() or ("VERIFY_CA" if SSO_DB_SSL_CA else "")
     _SSL_MODES = {"DISABLED", "PREFERRED", "REQUIRED", "VERIFY_CA", "VERIFY_IDENTITY"}
@@ -207,6 +215,11 @@ if not DEBUG and CACHES["default"]["BACKEND"] in _PER_PROCESS_CACHES:
         f"SSO_CACHE_URL uses the {_PER_PROCESS_CACHES[CACHES['default']['BACKEND']]} backend, which is not "
         "shared between gunicorn workers, so login throttling would not work. Use redis://... or filecache://..."
     )
+if "redis" in CACHES["default"]["BACKEND"].lower():
+    # fail fast instead of hanging a worker when Redis is unreachable
+    _redis_opts = CACHES["default"].setdefault("OPTIONS", {})
+    _redis_opts.setdefault("socket_connect_timeout", env.float("SSO_CACHE_CONNECT_TIMEOUT", default=3.0))
+    _redis_opts.setdefault("socket_timeout", env.float("SSO_CACHE_SOCKET_TIMEOUT", default=3.0))
 CACHES["default"].setdefault("KEY_PREFIX", "sso")  # namespaced throttle keys (deployment plan R12)
 
 # --------------------------------------------------------------------------- DRF / SimpleJWT
@@ -346,5 +359,7 @@ LOGGING = {
     "loggers": {
         "django.request": {"level": "ERROR"},
         "sso.config": {"handlers": ["stderr"], "level": "WARNING", "propagate": False},
+        # DB connectivity failures (healthz, start-up check): ERROR on stdout, i.e. `docker compose logs web`
+        "sso.db": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }

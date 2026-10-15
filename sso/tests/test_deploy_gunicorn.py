@@ -19,7 +19,11 @@ def _cmd_args() -> list[str]:
     line = next(line for line in (REPO / "Dockerfile").read_text().splitlines() if line.startswith("CMD "))
     argv = json.loads(line[4:])
     assert argv[:2] == ["sh", "-c"]
-    args = shlex.split(argv[2])
+    script = argv[2]
+    # start-up DB check first (WORKER TIMEOUT report 2026-10-15): logs, never blocks gunicorn
+    prefix = "python /app/docker/dbcheck.py; "
+    assert script.startswith(prefix)
+    args = shlex.split(script[len(prefix):])
     assert args[:2] == ["exec", "gunicorn"]
     return args[2:]
 
