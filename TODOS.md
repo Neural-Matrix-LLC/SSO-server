@@ -1,6 +1,6 @@
 # TODOS — future-phase and not-planned items
 
-Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](docs/DESIGN-v1.2-requirements.md)
+Agreed scope for v1.2a / v1.2b / v1.3c is in [docs/DESIGN-v1.2-requirements.md](docs/DESIGN-v1.2-requirements.md)
 (decisions of 2026-10-13). Everything below is **out of that scope**. Known as-built gaps are listed in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §12.
 
@@ -10,7 +10,7 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [ ] **Password change** — `POST /api/v1/account/password/change` (Bearer + old/new; revokes all tokens, returns a fresh pair).
 - [ ] **Password reset** — `password/reset` + `reset/confirm` (same 204 for unknown addresses; revokes all tokens).
 - [ ] **Hosted login page + authorization-code flow with PKCE** (uses `ServiceClient.redirect_uris`; adds `authorization_endpoint` to discovery).
-- [ ] **Client push notifications (SSE or WebSocket)** — only if clients need proactive "token expired/revoked" messages; today clients learn by rejection (401). Services already get signed webhooks (v1.4).
+- [ ] **Client push notifications (SSE or WebSocket)** — only if clients need proactive "token expired/revoked" messages; today clients learn by rejection (401). Services already get signed webhooks (v1.3c).
 - [ ] **Cross-tab refresh coordination in the browser helper** (BroadcastChannel / Web Locks) so the losing tab is not logged out.
 - [ ] **Hosted self-service account page** (profile, active sessions list, "log out this session").
 - [ ] **Webhook admin tooling** — redeliver failed events, rotate `notify_secret`.
@@ -22,24 +22,24 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 - [x] **v1.2b: Redis cache for revoked sessions** (done on `feat/v1.2b`, shared Django cache) — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
 - [ ] **sso-client 0.2: deferred library features** — local JWKS pre-check (`[jwt]`), circuit breaker, `cached` fail mode, `Retry-After` on 429, generic WSGI/ASGI middleware classes.
 - [ ] **v1.2b follow-up: llm-wiki-svc on `sso-client`** (branch `feat/sso-client`), incl. `client_ip` on logout.
-- [ ] **v1.4: encrypt `notify_secret` at rest** (webhook signing secret).
+- [ ] **v1.3c: encrypt `notify_secret` at rest** (webhook signing secret).
 
-## Ecosystem (decisions 2026-10-14 rounds 1-2, see [ECOSYSTEM-INTEGRATION.md](docs/ECOSYSTEM-INTEGRATION.md))
+## Phase plan (component order decided 2026-10-15, see [ECOSYSTEM-INTEGRATION.md §9.1](docs/ECOSYSTEM-INTEGRATION.md))
 
-- [ ] **v1.3a: SSO admin REST API** `/api/v1/admin/…` (users, groups, permissions, services, devices, apps, audit) + `sso_adminauditlog`.
-- [ ] **v1.3a: step-up reauth** `POST /api/v1/admin/reauth` → `X-SSO-Reauth` (5 min, bound to sid + IP) for destructive actions.
-- [ ] **v1.3a: bulk permission import** `PUT /api/v1/admin/apps/{app}/permissions` from `sso_permissions.py` (idempotent, dry-run, never deletes).
-- [ ] **v1.3a: service tokens** `POST /api/v1/auth/service-token` (client credentials; no IP binding) + on-behalf-of headers.
-- [ ] **v1.3a: device clients** `POST /api/v1/devices` (ServiceClient `kind=device`, owner, Ed25519 `private_key_jwt`); revoked on suspend.
-- [ ] **v1.3a: inactive-users feed** `GET /api/v1/service/users/inactive?since=`.
-- [ ] **v1.3b (FUND): `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso`**; agents on `sso-client`, one ServiceClient per service (confirmed round 3).
-- [ ] **v1.3b (FUND): llm-wiki-svc behind `/proxy/llmwiki/`** (configurable upstream).
-- [ ] **v1.3c (FUND): Admin UI `/admin`** incl. step-up, devices, permission import, interim suspend calls.
-- [ ] **v1.3d (FUND + SGMCP): cloud strategies + local broker pass-through** - SGMCP in FUND cloud; `gateway-relay`, pairing code, device credentials, outbound WSS (long-poll fallback), heartbeats + offline alerts, `WAITING_GATEWAY`/halt on PC offline, `UNKNOWN` in-flight orders + reconcile, one live connection per broker account (cold standby), disconnect on suspend.
-- [ ] **v1.3d (FUND UI / local-agent): stay-on warnings** - warn at submit that the PC must stay on, prevent-sleep guidance, per-PC heartbeat status.
-- [ ] **v1.3d (SGMCP): `delete_strategy` soft delete** (`DELETED`, `deleted_at/by/reason`); never purge orders/fills; final position snapshot; optional archive tables; no `DELETE` grant on history tables.
-- [ ] **v1.3e (FUND): `AUTH_PROVIDER=sso`, retire `fund-auth`**.
-- [ ] **v1.4: `user.suspended` webhook** to relay and auto-trade.
+### 1. SSO-server completion
+- [ ] **v1.3a** ([design](docs/DESIGN-v1.3a-admin-api.md)): admin REST API `/api/v1/admin/…` + `sso_adminauditlog`; step-up reauth (`POST /api/v1/admin/reauth` → `X-SSO-Reauth`); permission import `PUT /api/v1/admin/apps/{app}/permissions` (idempotent, dry-run, never deletes, marks missing deprecated) + `scripts/sso_permissions_to_json.py`; per-service credentials (ServiceClient perms, rotate-secret, `POST /api/v1/auth/service-token`, no IP binding); inactive-users feed `GET /api/v1/service/users/inactive`.
+- [ ] **v1.3b**: device clients `POST /api/v1/devices` (`kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend); on-behalf-of headers; `sso-client` 0.2 (service tokens, on-behalf-of).
+- [ ] **v1.3c**: signed webhooks (`user.suspended` etc.), encrypt `notify_secret` at rest, webhook receiver in `sso-client`. → SSO server complete.
+
+### 2. SGMCP migration
+- [ ] **v1.4 (SGMCP + local broker gateway)**: `sso_permissions.py`; API/MCP on `sso-client`; `gateway-relay`, pairing, device credentials, outbound WSS (long-poll fallback), heartbeats + offline alerts, `WAITING_GATEWAY`/halt, `UNKNOWN` in-flight orders + reconcile, one live connection per broker account (cold standby), suspend → stop/delete strategies (positions untouched) + disconnect; `delete_strategy` soft delete, never purge orders/fills, no `DELETE` grant on history tables.
+
+### 3. FUND migration (last)
+- [ ] **v1.5a**: `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso` (start `both`); agents on `sso-client`, one ServiceClient per service; llm-wiki behind `/proxy/llmwiki/`.
+- [ ] **v1.5b**: Admin UI `/admin` on the v1.3a API; cloud-strategy UI (submit, broker pick, stay-on warnings, per-PC heartbeat status).
+- [ ] **v1.5c**: `AUTH_PROVIDER=sso`, retire `fund-auth`.
+
+### Other
 - [ ] **TBD:** llm-wiki deployment host and domain.
 - [ ] **Later:** delegated tokens (RFC 8693).
 
@@ -53,4 +53,4 @@ Agreed scope for v1.2a / v1.2b / v1.4 is in [docs/DESIGN-v1.2-requirements.md](d
 
 ## Client libraries
 
-- `sso-client` (Python) is planned for v1.2b ([design](docs/SSO-CLIENT-LIBRARY-DESIGN.md)). Future: webhook receiver (v1.4), clients for other languages (JS/Go) if non-Python services appear, publishing to a private package index.
+- `sso-client` (Python) is planned for v1.2b ([design](docs/SSO-CLIENT-LIBRARY-DESIGN.md)). Future: webhook receiver (v1.3c), clients for other languages (JS/Go) if non-Python services appear, publishing to a private package index.

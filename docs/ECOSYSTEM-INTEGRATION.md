@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| Status | **Design proposal, docs only.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10). Nothing here is implemented |
+| Status | **Design.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10); phase order changed 2026-10-15 (§9.1: SSO complete → SGMCP → FUND). v1.3a is designed in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md) |
 | Scope | How the SSO server, FUND-Financial-Research (frontend + backend services), Smart_Gateway_MCP (SGMCP) and llm-wiki-svc fit together |
 | Sources read | `Neural-Matrix-LLC/FUND-financial-Research` `main` @ `dfffe5e` (2026-09-02), `Neural-Matrix-LLC/Smart_Gateway_MCP` `main` @ `39b3acd` (2026-10-08), `llm-wiki-svc` `feat/sso-login`, this repo `feat/v1.2a` @ `107ae38` |
 
@@ -566,7 +566,7 @@ no PC can reconnect.
 | Phase | Trigger | Backstop |
 |---|---|---|
 | Interim (before webhooks) | FUND `/admin`, after the suspend call returns 200, calls auto-trade `POST /internal/users/{sub}/suspend-cleanup` and `gateway-relay` `POST /internal/users/{sub}/disconnect` (service tokens) | auto-trade, SGMCP and relay sweep `GET /api/v1/service/users/inactive?since=` every 60 s |
-| v1.4 | signed webhook `user.suspended` | same 60 s sweep |
+| v1.3c | signed webhook `user.suspended` | same 60 s sweep |
 
 ```mermaid
 sequenceDiagram
@@ -585,7 +585,7 @@ sequenceDiagram
   SSO-->>UI: 200
   alt interim
     UI->>AT: POST /internal/users/42/suspend-cleanup
-  else v1.4
+  else v1.3c
     SSO-->>AT: webhook user.suspended 42
   end
   AT->>SG: stop then delete every strategy of owner 42
@@ -610,7 +610,7 @@ All orders, fills/trades and their strategy context are kept for audit **no matt
 deletion, user deletion. Because strategies run in the cloud, the **cloud `sgmcp` database is the system of record**;
 the PC holds no ledger.
 
-- **Gateway work item (v1.3d)** [Repo: today `delete_strategy` purges the instance's rows, "purge-on-delete"]: change
+- **Gateway work item (v1.4)** [Repo: today `delete_strategy` purges the instance's rows, "purge-on-delete"]: change
   `delete_strategy` to a **soft delete**: `strategies.status = DELETED`, `deleted_at`, `deleted_by` (sub or
   `svc:<client_id>`), `delete_reason` (`user`, `suspend`, `admin`). Orders (with `realized_pl`, `dealt_qty`) and the
   strategy row stay; `positions`/`accounts` get a final snapshot before the live rows are cleared. Deleted instances
@@ -651,9 +651,14 @@ sequenceDiagram
 
 ---
 
-## 7. (e) Admin UI in FUND and SSO admin REST API (new phase v1.3a/v1.3c)
+## 7. (e) Admin UI in FUND and SSO admin REST API (new phase v1.3a/v1.5b)
 
 ### 7.1 Decision
+
+> **2026-10-15:** FUND migrates last, so until v1.5b the admin REST API is called directly (operators with
+> `curl`/scripts; an app's own ServiceClient for its permission import) and Django admin stays available. The API
+> as built is specified in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md), which supersedes §7.3–7.5 where
+> they differ.
 
 The day-to-day admin page lives in the **FUND frontend** (`/admin`, TanStack route) and calls a **new SSO admin REST
 API**. **Django admin** on the SSO (`SSO_ADMIN_PATH`) stays as the **break-glass ops tool** (superusers only, ideally
@@ -770,13 +775,13 @@ sequenceDiagram
   participant SPA as FUND SPA /admin
   participant SSO as SSO admin API
   participant DB as dcWebUsers
-  participant SV as Services (v1.4 webhooks)
+  participant SV as Services (v1.3c webhooks)
   A->>SPA: Suspend user 42
   SPA->>SSO: POST /api/v1/admin/users/42/suspend Bearer T
   SSO->>SSO: verify T, IP, application.sso_admin (DB), not self
   SSO->>DB: is_active=false, revoke tokens, audit row (one transaction)
   SSO-->>SPA: 200 user (active=false)
-  SSO-->>SV: user.suspended (v1.4)
+  SSO-->>SV: user.suspended (v1.3c)
 ```
 
 ---
@@ -826,7 +831,7 @@ flowchart LR
   R1 --> R2["Access token valid until exp (max 15 min) unless logout-all"]
   S["Admin suspend in FUND /admin"] --> S1["SSO: is_active false, revoke all tokens and sessions"]
   S1 --> S2["Next introspect from any service: active false (cache max 30 s; trading calls uncached)"]
-  S1 --> S3["v1.4 webhook user.suspended to registered services"]
+  S1 --> S3["v1.3c webhook user.suspended to registered services"]
   S1 --> S5["Interim: FUND /admin calls relay and auto-trade cleanup, plus 60 s sweep"]
   S1 --> S6["Device credentials of the user revoked"]
   S3 --> S4["Cloud strategies stopped and soft-deleted, positions untouched, relay disconnects PCs, llm-wiki drops BFF session"]
@@ -842,19 +847,52 @@ Logout of one FUND tab logs out that browser session (refresh cookie gone); othe
 
 ## 9. (g) Phasing plan and open questions
 
-### 9.1 Phasing [Proposal, updated 2026-10-14]
+### 9.1 Phasing [updated 2026-10-15: component order]
+
+**Thomas's component order (2026-10-15):** 1) **complete the SSO server**, 2) **migrate Smart_Gateway_MCP (incl. the
+local broker gateway) to full SSO**, 3) **FUND last**. Until FUND migrates, administration runs through the SSO's own
+Django admin (break-glass, unchanged) **plus the admin REST API** (`curl`/scripts); the FUND `/admin` UI comes with
+the FUND phase. Phase labels were renumbered to follow this order (old → new mapping below).
+
+**"SSO complete" means** (decided 2026-10-15): everything SGMCP and FUND need from the SSO exists, so neither
+migration has to wait for SSO work: admin API + permission import + step-up + per-service credentials (v1.3a),
+device credentials + on-behalf-of (v1.3b, needed by the local broker gateway), signed webhooks incl.
+`user.suspended` (v1.3c, moved forward from the old v1.4 because it is SSO-side). Sign-up, password reset, PKCE and
+RFC 8693 stay in [TODOS.md](../TODOS.md) (not needed by SGMCP or FUND).
+
+```mermaid
+flowchart LR
+  subgraph S1["1. SSO-server completion"]
+    A["v1.2a/v1.2b done"] --> B["v1.3a admin API, import,<br/>step-up, service creds"]
+    B --> C["v1.3b device creds,<br/>on-behalf-of"]
+    C --> D["v1.3c signed webhooks"]
+  end
+  subgraph S2["2. SGMCP migration"]
+    E["v1.4 SGMCP + local broker gateway<br/>on full SSO"]
+  end
+  subgraph S3["3. FUND migration"]
+    F["v1.5a AUTH_PROVIDER=both"] --> G["v1.5b FUND /admin UI,<br/>cloud strategy UI"] --> H["v1.5c AUTH_PROVIDER=sso,<br/>retire fund-auth"]
+  end
+  D --> E --> F
+```
 
 | Phase | Repo(s) | Content | Depends on |
 |---|---|---|---|
 | v1.2a | SSO | **Done** (pushed `107ae38`) | |
-| v1.2b | SSO, llm-wiki | IP binding modes (user tokens only), introspect/permission query, `SSO_TRUSTED_PROXIES`, `sso-client` library, llm-wiki migrates | v1.2a |
-| v1.3a | SSO | SSO admin REST API + audit log + **step-up reauth** (§7.5), bulk permission import (§7.4), service tokens + on-behalf-of (§4.1), **device clients** (`POST /api/v1/devices`, `private_key_jwt`, revoke on suspend, §5.2), `GET /service/users/inactive` feed (§5.6). No user import | v1.2b |
-| v1.3b | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4); agents on `sso-client`, one ServiceClient per service; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.2b, v1.3a |
-| v1.3c | FUND | Admin UI `/admin` incl. step-up, Applications import, devices, interim suspend calls (§7, §5.6) | v1.3a, v1.3b |
-| v1.3d | FUND + SGMCP | **Cloud strategies, local broker pass-through** (§5): SGMCP runs in the FUND cloud next to auto-trade; new `gateway-relay`, pairing, device credentials, outbound WSS; FUND Local Gateway = `local-agent` forwarder + broker daemons only; one live connection per broker account (cold standby); `WAITING_GATEWAY`/halt on PC offline + heartbeat alerts; suspend stops/deletes cloud strategies and disconnects PCs; **`delete_strategy` soft delete, history always kept** (§5.7) | v1.3a, v1.3b |
-| v1.3e | FUND | `AUTH_PROVIDER=sso`, retire `fund-auth` | v1.3b stable |
-| v1.4 | SSO, relay, auto-trade, llm-wiki | Signed webhooks; `user.suspended` replaces the interim calls (sweep stays) | v1.3d |
-| later | | TODOS.md: sign-up, password change/reset, delegated tokens (RFC 8693), llm-wiki host/domain (TBD) | |
+| v1.2b | SSO, llm-wiki | **Done** (QA passed; startup fix `68fd31f`): IP binding modes, introspect/permission query, `SSO_TRUSTED_PROXIES`, `sso-client`, llm-wiki migrated | v1.2a |
+| **v1.3a** | SSO | Admin REST API `/api/v1/admin/…` + audit log `sso_adminauditlog`; **step-up reauth** (§7.5); **permission import** from `sso_permissions.py` (never deletes, marks missing deprecated, §7.4); **per-service credentials**: ServiceClient permissions, rotate-secret, service tokens `POST /api/v1/auth/service-token` (no IP binding, §4.1); inactive-users feed (§5.6). Design: [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md) | v1.2b |
+| **v1.3b** | SSO, sso-client | **Device credentials** for the local broker gateway (`POST /api/v1/devices`, `kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend, §5.2); **on-behalf-of** (`X-SSO-User-Token` + `X-SSO-Client-IP` with a service token, §4.1); `sso-client` 0.2 (service tokens, on-behalf-of) | v1.3a |
+| **v1.3c** | SSO, sso-client | **Signed webhooks** (`user.suspended`, `user.reactivated`, `user.deleted`, `token.revoked`, `permission.changed`, `keys.rotated`), `notify_secret` encrypted at rest, receiver helper in `sso-client`. **SSO server complete** | v1.3a |
+| **v1.4** | SGMCP (+ relay) | **SGMCP and the local broker gateway on full SSO** (§5): SGMCP's `sso_permissions.py` imported; SGMCP API/MCP behind `sso-client` (user tokens for people, service tokens for agents); `gateway-relay` + pairing + device credentials + outbound WSS from the local broker gateway; one live connection per broker account (cold standby); `WAITING_GATEWAY`/halt + heartbeats; suspend (webhook + sweep) stops and deletes strategies, disconnects PCs, **positions untouched**; **`delete_strategy` soft delete, history always kept** (§5.7). Until FUND migrates, strategies are submitted through SGMCP's own API/MCP with an SSO token | v1.3a–c |
+| **v1.5a** | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4), start with `both`; agents on `sso-client`, one ServiceClient per service; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.3a–c, v1.4 |
+| **v1.5b** | FUND | Admin UI `/admin` on the v1.3a API (step-up, import, devices); FUND UI for cloud strategies (submit, broker pick, stay-on warnings, §5) | v1.5a |
+| **v1.5c** | FUND | `AUTH_PROVIDER=sso`, retire `fund-auth` | v1.5a stable |
+| later | | TODOS.md: sign-up, password change/reset, PKCE, delegated tokens (RFC 8693), llm-wiki host/domain (TBD) | |
+
+Old → new labels (documents written before 2026-10-15 used the old ones): v1.3a (SSO) → v1.3a + v1.3b (devices,
+on-behalf-of); v1.3b (FUND auth) → v1.5a; v1.3c (FUND admin UI) → v1.5b; v1.3d (FUND + SGMCP) → v1.4 (SGMCP part) +
+v1.5b (FUND UI part); v1.3e → v1.5c; v1.4 (webhooks) → v1.3c. "Interim suspend calls from FUND `/admin`" are no longer
+needed: webhooks (v1.3c) exist before FUND migrates; the 60 s sweep stays as the safety net.
 
 ### 9.2 Open questions for Thomas
 
@@ -864,13 +902,17 @@ implementation defaults to be confirmed during review of each phase, not open de
 
 ## 10. Decisions (2026-10-14)
 
+### Round 5 (2026-10-15)
+
+18. **Component order: SSO server first, then SGMCP (incl. local broker gateway), FUND last** (§9.1). Until FUND migrates, admin work uses the SSO's Django admin and the admin REST API.
+
 Recorded from Thomas:
 
 1. **FUND users are already in `dcWebUsers`.** `fund-auth` shares it. FUND migrates authentication to the SSO like the other new services; **no user import**.
 2. **Each application ships its own permissions file** (round 2: a separate `sso_permissions.py`, not inside `config.py`); the admin imports them into the SSO from FUND `/admin` (bulk upsert, idempotent, §2, §7.4). The permission names in this document are examples only.
 3. **After cutover every FUND endpoint requires a token**, controlled by `AUTH_PROVIDER` in FUND's root `.env` (`legacy` / `both` / `sso`) (§3.4).
 4. **SSO user login is for external clients (mostly people) and IP binding applies to them; internal processes (AI agents, MCP, services) authenticate as registered service clients with their own credentials, without IP binding.** Confirmed in round 2 (§4.1).
-5. **Suspend stops and deletes the user's running strategies / auto-trade jobs**: interim call from FUND `/admin` + 60 s sweep, then v1.4 webhook (§5.6). Round 2: **no action on open broker positions**.
+5. **Suspend stops and deletes the user's running strategies / auto-trade jobs**: interim call from FUND `/admin` + 60 s sweep, then v1.3c webhook (§5.6). Round 2: **no action on open broker positions**.
 6. **llm-wiki deployment location and domains are TBD / configurable** (ongoing development). The gateway location is now decided (round 2, below).
 7. The cut-off "4)" in the earlier message is ignored.
 
@@ -884,7 +926,7 @@ Recorded from Thomas:
 ### Round 3 (2026-10-14)
 
 12. **Per-service credentials confirmed**: every service and agent has its own ServiceClient.
-13. **All trade/order history is always kept for audit** (suspend, strategy deletion, user deletion). `delete_strategy` must become a soft delete (gateway work item in v1.3d, §5.7).
+13. **All trade/order history is always kept for audit** (suspend, strategy deletion, user deletion). `delete_strategy` must become a soft delete (gateway work item in v1.4, §5.7).
 
 ### Round 4 (2026-10-14)
 

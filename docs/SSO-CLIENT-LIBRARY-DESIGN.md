@@ -22,7 +22,7 @@
 5. [`SSOClient`: permission query](#5-ssoclient-permission-query)
 6. [Caching, timeouts, retries, failure policy](#6-caching-timeouts-retries-failure-policy)
 7. [Decorators and dependencies](#7-decorators-and-dependencies)
-8. [Webhook receiver (v1.4)](#8-webhook-receiver-v14)
+8. [Webhook receiver (v1.3c)](#8-webhook-receiver-v14)
 9. [Configuration](#9-configuration)
 10. [Errors, logging and redaction](#10-errors-logging-and-redaction)
 11. [Testing utilities](#11-testing-utilities)
@@ -61,7 +61,7 @@ clients/python/
 │   ├── cache.py             # TTL cache (in-process; pluggable)
 │   ├── jwks.py              # optional local JWT pre-check ([jwt] extra)
 │   ├── errors.py            # typed exceptions
-│   ├── webhooks.py          # verify_webhook (v1.4)
+│   ├── webhooks.py          # verify_webhook (v1.3c)
 │   ├── testing.py           # FakeSSO, fixtures
 │   └── adapters/
 │       ├── wsgi.py          # generic WSGI middleware
@@ -174,7 +174,7 @@ Responses: no/invalid token → 401 `{"detail":"not_authenticated"}` with `WWW-A
 inactive/IP mismatch → 401 `{"detail":"token_inactive","reason":...}`; missing permission → 403;
 SSO down → 503. Handlers are overridable.
 
-## 8. Webhook receiver (v1.4)
+## 8. Webhook receiver (v1.3c)
 
 ```python
 event = verify_webhook(body: bytes, headers, secret=SSO_WEBHOOK_SECRET, tolerance=300) -> WebhookEvent
@@ -199,7 +199,7 @@ design §6.3.
 | `SSO_CACHE_TTL` | no | `30` | Seconds, 0 disables, capped at 30 |
 | `SSO_FAIL_MODE` | no | `closed` | `closed` \| `cached` |
 | `SSO_LOCAL_PRECHECK` | no | `false` | Needs `[jwt]` |
-| `SSO_WEBHOOK_SECRET` | v1.4 | — | |
+| `SSO_WEBHOOK_SECRET` | v1.3c | — | |
 
 Everything can also be passed as `SSOConfig(...)` arguments. Invalid config raises `SSOConfigError` at startup.
 

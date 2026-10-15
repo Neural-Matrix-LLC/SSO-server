@@ -272,7 +272,7 @@ flowchart TB
 v1.2b (implemented on `feat/v1.2b`) adds the introspect/permission query with client-IP binding
 (`sso/ipbinding.py`, `sso/clientip.py`) and the `sso-client` library (`clients/python/`) on the **service** side
 (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its handlers).
-Planned (not implemented): v1.3a adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
+v1.3a (branch `feat/v1.3a`, [design](DESIGN-v1.3a-admin-api.md)) adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
 `sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
 
 ## 4. Component responsibilities
@@ -365,7 +365,7 @@ erDiagram
     json allowed_origins
     bool is_active
     string app_codename "v1.2a, nullable"
-    string notify_url "v1.2a, nullable, v1.4 webhooks"
+    string notify_url "v1.2a, nullable, v1.3c webhooks"
   }
   sso_revokedsession {
     bigint id PK

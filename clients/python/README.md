@@ -119,4 +119,4 @@ python3.13 -m venv .venv && .venv/bin/pip install -e ".[test]" && .venv/bin/pyte
 ```
 
 Not implemented in 0.1.0 (see the design): local JWKS pre-check (`[jwt]`), circuit breaker, `cached` stale
-fail mode, webhook receiver (v1.4), generic WSGI/ASGI middleware classes.
+fail mode, webhook receiver (v1.3c), generic WSGI/ASGI middleware classes.

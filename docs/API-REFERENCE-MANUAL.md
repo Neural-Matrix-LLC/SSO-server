@@ -3,7 +3,7 @@
 For developers of **clients** (browser SPAs, native apps, scripts, MCP clients, server-side "BFF" apps) and
 **services** (back-ends that accept SSO tokens). As-built reference: branch `feat/app-permissions`; every
 implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `application/*.py` and matches
-[ARCHITECTURE.md](ARCHITECTURE.md) §8–9. Items marked **Planned v1.2a/b** or **v1.4** are designs from
+[ARCHITECTURE.md](ARCHITECTURE.md) §8–9. Items marked **Planned v1.2a/b** or **v1.3c** are designs from
 [DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md) and do **not** exist yet.
 
 ## Contents
@@ -15,7 +15,7 @@ implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `applicati
 - [5. Token claims](#5-token-claims)
 - [6. Error codes](#6-error-codes)
 - [7. Planned v1.2 features](#7-planned-v12-features)
-- [8. Planned admin REST API (v1.3a, proposal)](#8-planned-admin-rest-api-v13a-proposal)
+- [8. Admin REST API (v1.3a)](#8-admin-rest-api-v13a)
 
 ## 1. Basics
 
@@ -249,7 +249,7 @@ python manage.py register_service reporting --name "Reporting" --app app2 \
 access…* on the user or group list). Codenames match `^[a-z][a-z0-9_]{1,62}$`.
 You receive: issuer, JWKS URL (`<issuer>/.well-known/jwks.json`), audience (`myfin-services` unless configured
 otherwise; one token is valid for all services), `client_id` / `client_secret`, and your permission name.
-`--notify-url` stores your future webhook endpoint (HTTPS); nothing is sent before v1.4.
+`--notify-url` stores your future webhook endpoint (HTTPS); nothing is sent before v1.3c.
 
 ### 3.2 Verify tokens locally (JWKS)
 
@@ -514,44 +514,146 @@ Rows marked **Planned** do not exist yet; do not code against them until they ar
 | **Done in v1.2a** `register_service`, admin actions, `sid`, refresh-reuse session revocation | see §3.1, §4 refresh, §5 |
 | **Done in v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
 | **Done in v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
-| **Planned v1.4** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
+| **Planned v1.3c** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
 change/reset are future items in TODOS.md.
 
-## 8. Planned admin REST API (v1.3a, proposal)
+## 8. Admin REST API (v1.3a)
 
-**Planned, proposal pending review.** Nothing below exists yet. Full design: [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
-Callers: the FUND Admin UI (browser, Bearer SSO access token, CORS from the FUND origin). Django admin stays as the
-break-glass tool.
+**Status:** implemented on branch `feat/v1.3a` (not released until merged). Design and rationale:
+[DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md). Django admin stays as the break-glass tool.
 
-- Base path `/api/v1/admin/`. Auth: `Authorization: Bearer <access token>`; the user must be active and hold
-  `application.sso_admin` (checked in the DB on every call; IP binding applies). Errors use the §6 format; new codes
-  `admin_forbidden` (403), `self_action_forbidden` (409), `last_admin` (409), `conflict` (409).
-- Every change writes one `sso_adminauditlog` row (actor, actor IP, action, target, before/after) in the same transaction.
+### 8.1 Basics
 
-| Method + path | Action |
+- Base path `/api/v1/admin`. JSON in and out; errors `{"error","detail"}` (§6 plus §8.6).
+- **Auth:** `Authorization: Bearer <user access token>` of an **active** user who holds `application.sso_admin`
+  (direct or via a group) or is a superuser, checked in the DB on every call. IP binding applies like `/me`.
+  Service tokens are rejected (`401 token_invalid`). Exception: an application's own ServiceClient (HTTP Basic) may
+  call `PUT /apps/{its app_codename}/permissions`.
+- **Step-up** 🔒: send `X-SSO-Reauth: <reauth_token>` from `POST /reauth`; missing/expired → `401 reauth_required`.
+  The token is valid 300 s for the same user, session (`sid`) and client IP, and can be reused inside that window.
+- **Lists:** `?page=1&page_size=50` (max 200) → `{"count","page","page_size","results":[…]}`.
+- **Tracing:** send `X-Request-ID` (optional); every response echoes it and every audit row stores it.
+- **Rate limits:** `admin` 120/min per user; `admin_reauth` 5/min per user.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Admin client
+  participant S as SSO
+  C->>S: POST /api/v1/auth/login (native) -> access_token
+  C->>S: GET /api/v1/admin/users (Bearer)
+  S-->>C: 200 list
+  C->>S: DELETE /api/v1/admin/users/42 (Bearer)
+  S-->>C: 401 reauth_required
+  C->>S: POST /api/v1/admin/reauth {password} (Bearer)
+  S-->>C: 200 {reauth_token, expires_in:300}
+  C->>S: DELETE /api/v1/admin/users/42 (Bearer, X-SSO-Reauth)
+  S-->>C: 204
+```
+
+Example:
+
+```bash
+SSO=https://sso.example.com
+AT=$(curl -s $SSO/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"…","client":"native"}' | jq -r .access_token)
+RT=$(curl -s $SSO/api/v1/admin/reauth -H "Authorization: Bearer $AT" -H 'Content-Type: application/json' \
+  -d '{"password":"…"}' | jq -r .reauth_token)
+curl -s -X POST $SSO/api/v1/admin/users/42/suspend -H "Authorization: Bearer $AT" -H "X-SSO-Reauth: $RT" \
+  -H 'Content-Type: application/json' -d '{}'
+```
+
+### 8.2 Endpoints
+
+| Method + path | Body / query | Success | Notes |
+|---|---|---|---|
+| `POST /reauth` | `{"password"}` | 200 `{"reauth_token","expires_in"}` | wrong password 401 `invalid_credentials` |
+| `GET /users` | `q`, `active`, `group`, `page`, `page_size` | 200 list of user | `q` matches username, email, first/last name |
+| `POST /users` | `{"username", "email"?, "first_name"?, "last_name"?, "password"?, "is_active"?, "groups"?}` | 201 user | no password → unusable password (cannot log in until set) |
+| `GET /users/{id}` | | 200 user | |
+| `PATCH /users/{id}` | `{"email"?, "first_name"?, "last_name"?}` | 200 user | username, staff and superuser flags are not editable here |
+| 🔒 `DELETE /users/{id}` | | 204 | not yourself; not the last admin. Trade history lives in FUND/SGMCP and is never deleted by this |
+| 🔒 `POST /users/{id}/suspend` | | 200 user | `is_active=false`, every token and session revoked at once |
+| `POST /users/{id}/unsuspend` | | 200 user | old tokens stay dead; the user logs in again |
+| `POST /users/{id}/logout-all` | | 204 | revokes all tokens of that user |
+| 🔒 `POST /users/{id}/set-password` | `{"password"}` | 204 | Django password validators; revokes all tokens |
+| `GET /users/{id}/permissions` | | 200 `{"direct","via_groups","effective"}` | `application.*` only |
+| `POST /users/{id}/permissions/{codename}` | | 204 | 🔒 for `sso_admin` |
+| `DELETE /users/{id}/permissions/{codename}` | | 204 | 🔒 for `sso_admin`; not your own `sso_admin`; not the last admin |
+| `PUT /users/{id}/groups` | `{"groups":[names]}` | 200 user | unknown group 400 |
+| `GET /groups` · `POST /groups` | `q` · `{"name"}` | 200 list · 201 group | |
+| `GET /groups/{id}` · `PATCH /groups/{id}` | · `{"name"}` | 200 group | |
+| 🔒 `DELETE /groups/{id}` | | 204 | last-admin check |
+| `PUT /groups/{id}/members` | `{"user_ids":[…]}` | 200 group | 🔒 if the group holds `sso_admin` |
+| `POST` / `DELETE /groups/{id}/permissions/{codename}` | | 204 | 🔒 for `sso_admin` |
+| `GET /permissions` | `app`, `deprecated=true\|false` | 200 list of permission | |
+| `POST /permissions` | `{"codename","name","description"?}` | 201 permission | codename `[a-z][a-z0-9_]{1,62}` |
+| `GET /permissions/{codename}` · `PATCH` | · `{"name"?,"description"?}` | 200 permission | codename immutable |
+| 🔒 `DELETE /permissions/{codename}` | `revoke_all=true` if still granted | 204 | code-defined (`app1`, `sso_admin`) 409 |
+| `GET /services` · `POST /services` | · `{"client_id","name","app_codename"?,"notify_url"?,"perms"?}` | 200 list · 201 service + `client_secret` | secret shown **once** |
+| `GET /services/{client_id}` · `PATCH` | · `{"name"?,"app_codename"?,"notify_url"?,"is_active"?,"perms"?}` | 200 service | 🔒 when `is_active:false` |
+| 🔒 `DELETE /services/{client_id}` | | 204 | its service tokens become inactive at once |
+| 🔒 `POST /services/{client_id}/rotate-secret` | | 200 `{"client_id","client_secret"}` | old secret and old service tokens dead at once |
+| `GET /apps` · `GET /apps/{app}` | | 200 list · 200 app with permissions | |
+| `PUT /apps/{app}/permissions` | import payload, `dry_run=true`, `force=true` | 200 import result | admin or the app's own ServiceClient (Basic) |
+| `GET /audit` | `actor`, `action`, `target_type`, `target_id`, `since`, `page` | 200 list (newest first) | read-only |
+
+Service-side endpoints (not under `/admin`):
+
+| Method + path | Auth | Request | Response |
+|---|---|---|---|
+| `POST /api/v1/auth/service-token` | Basic `client_id:client_secret` | `{"grant_type":"client_credentials"}` | 200 `{"access_token","token_type":"Bearer","expires_in":300}`; bad client 401 `invalid_client`; other grant 400 `unsupported_grant_type` |
+| `GET /api/v1/service/users/inactive` | Basic ServiceClient or Bearer service token | `since` (ISO 8601, required) | 200 `{"users":[{"id","username","event","at"}],"next_since"}` (max 500, oldest first) |
+| `POST /api/v1/auth/introspect` | Basic ServiceClient | `{"token"}` (service token) | 200 `{"active":true,"token_type":"service","sub":"svc:<id>","client_id_subject","app","perms","iat","exp", …}` or `{"active":false}` |
+
+### 8.3 Shapes
+
+```json
+{"id": 42, "username": "amy", "email": "amy@x.org", "first_name": "Amy", "last_name": "Li", "is_active": true,
+ "is_staff": false, "is_superuser": false, "groups": ["trader"], "perms": ["application.app1"],
+ "last_login": "2026-10-15T08:00:00Z", "date_joined": "2026-01-02T00:00:00Z"}
+```
+
+| Resource | Fields |
 |---|---|
-| `GET /users` · `POST /users` | list (`q`, `active`, `group`, `page`), create |
-| `GET` / `PATCH` / `DELETE /users/{id}` | read, edit profile, delete |
-| `POST /users/{id}/suspend` · `/unsuspend` · `/logout-all` · `/set-password` | lifecycle; suspend revokes all tokens (v1.2a) |
-| `GET /users/{id}/permissions` · `POST` / `DELETE /users/{id}/permissions/{codename}` | app access |
-| `PUT /users/{id}/groups` | group membership |
-| `GET` / `POST /groups` · `GET` / `PATCH` / `DELETE /groups/{id}` · `POST` / `DELETE /groups/{id}/permissions/{codename}` | groups |
-| `GET` / `POST /permissions` · `PATCH` / `DELETE /permissions/{codename}` | `application.*` permissions |
-| `GET` / `POST /services` · `GET` / `PATCH` / `DELETE /services/{client_id}` · `POST /services/{client_id}/rotate-secret` | ServiceClients (secret returned once) |
-| `GET /apps` · `PUT /apps/{app_codename}/permissions?dry_run=` | applications; idempotent bulk upsert of an app's `config.py` permissions; returns `created`/`updated`/`unchanged`/`missing`; never deletes |
-| `POST /reauth` | step-up: `{password}` → `reauth_token` (5 min); destructive endpoints need `X-SSO-Reauth`, else `401 reauth_required` |
-| `GET /devices?owner=` · `DELETE /devices/{client_id}` | FUND Local Gateway device credentials |
-| `GET /audit` | audit log (`actor`, `target`, `action`, `since`) |
+| user | as above |
+| group | `id`, `name`, `perms` (`application.*`), `members` (user ids) |
+| permission | `codename`, `perm` (`application.<codename>`), `name`, `description`, `app_codename`, `deprecated`, `deprecated_at`, `code_defined`, `users`, `groups` |
+| service | `client_id`, `name`, `app_codename`, `notify_url`, `is_active`, `perms`, `created`, `secret_rotated_at` (+ `client_secret` once on create/rotate) |
+| app | `app_codename`, `name`, `description`, `version`, `updated`, `permissions` (on detail) |
+| audit | `id`, `ts`, `actor_type`, `actor_id`, `actor_ip`, `action`, `target_type`, `target_id`, `before`, `after`, `request_id`, `result`, `stepup` |
 
-Also planned in v1.3a (not under `/admin`):
+### 8.4 Permission import
 
-| Method + path | Auth | Action |
+```bash
+python scripts/sso_permissions_to_json.py path/to/sso_permissions.py > gw.json   # never executes the file
+curl -X PUT "$SSO/api/v1/admin/apps/gateway/permissions?dry_run=true" -H "Authorization: Bearer $AT" \
+  -H 'Content-Type: application/json' -d @gw.json
+# CI of the app itself, with its own ServiceClient (app_codename=gateway):
+curl -X PUT "$SSO/api/v1/admin/apps/gateway/permissions" -u "sgmcp:$SECRET" -H 'Content-Type: application/json' -d @gw.json
+```
+
+Payload `{"app_name","description"?,"version","permissions":[{"codename","name","description"?}]}` → result
+`{"app","version","dry_run","created","updated","unchanged","missing","deprecated"}`. Codenames must start with
+`<app>_`. **Never deletes**: permissions missing from the file are marked deprecated and keep working. Older
+`version` → 409 `version_conflict` unless `force=true`.
+
+### 8.5 Service token claims
+
+`iss`, `aud`, `exp` (+300 s), `iat`, `jti`, `token_type="service"`, `typ="service"`, `sub="svc:<client_id>"`,
+`client_id`, `app`, `perms`. No `cip`, no `sid`, no refresh token; IP binding never applies. Verify by JWKS
+(check `token_type == "service"`) or by introspect (also catches deactivation and secret rotation).
+
+### 8.6 Error codes added in v1.3a
+
+| HTTP | `error` | Meaning |
 |---|---|---|
-| `POST /api/v1/auth/service-token` | Basic ServiceClient, `grant_type=client_credentials` | 5-min RS256 service token: `sub="svc:<client_id>"`, `typ="service"`, `perms`, no `cip` (IP binding not applied) |
-| `POST /api/v1/devices` | relay service token on behalf of the user | create a device ServiceClient (`kind=device`, owner, Ed25519 public key) after pairing; device tokens via `service-token` with `private_key_jwt`, `typ=device`, no IP binding |
-| `GET /api/v1/service/users/inactive?since=` | service token | user ids suspended or deleted since a cursor, for the suspend sweep |
-
-On behalf of a user, a service sends `Authorization: Bearer <service token>`, `X-SSO-User-Token` and `X-SSO-Client-IP`
-(the browser IP); the user token is checked against that IP.
+| 400 | `unsupported_grant_type` | service-token with a `grant_type` other than `client_credentials` |
+| 401 | `reauth_required` | step-up needed or the reauth token is missing, expired, or for another session/IP |
+| 403 | `admin_forbidden` | caller is not an active SSO admin (or a ServiceClient outside its own app import) |
+| 409 | `self_action_forbidden` | suspend/delete yourself, remove your own `sso_admin` |
+| 409 | `last_admin` | the change would leave no active SSO admin |
+| 409 | `conflict` | duplicate name/codename/client_id; code-defined permission; still granted without `revoke_all` |
+| 409 | `version_conflict` | import `version` older than the stored one |

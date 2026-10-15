@@ -2,7 +2,7 @@
 
 Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). **v1.2a is implemented** on
 branch `feat/v1.2a` (see §10 for the as-built notes and the decisions taken during implementation); **v1.2b is
-implemented** on branch `feat/v1.2b` (§11; llm-wiki-svc migration still open); v1.4 is design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
+implemented** on branch `feat/v1.2b` (§11; llm-wiki-svc migration still open); v1.3c is design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the as-built system and [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
 for the developer manual.
 
@@ -32,12 +32,12 @@ document), **future** (agreed later phase).
 | # | Requirement | Status | Evidence in the repo / design section |
 |---|---|---|---|
 | 1a | REST API | implemented | JSON-only DRF views, `ssoproject/urls.py`, `sso/views.py`; reference in ARCHITECTURE §8 |
-| 1b | SSO informs about token expiry/revocation | new (services) / future (clients) | §6: signed webhooks to registered services (v1.4). Client push (SSE/WebSocket) moved to [TODOS.md](../TODOS.md); clients learn of expiry by rejection |
+| 1b | SSO informs about token expiry/revocation | new (services) / future (clients) | §6: signed webhooks to registered services (v1.3c). Client push (SSE/WebSocket) moved to [TODOS.md](../TODOS.md); clients learn of expiry by rejection |
 | 2a-1 | Client logs in to the SSO and gets a token | implemented | `LoginView` (`sso/views.py`), `issue_token_pair` (`sso/tokens.py`) |
 | 2a-2 | SSO embeds the client IP into the verification | implemented (v1.2b) | §4 (`cip` = HMAC of the exact IP). Today the IP is only used for throttling/logging (`sso/delegation.py`, `sso/throttles.py`) |
 | 2a-3 | Service verifies the token and gets the permission list from the SSO | implemented (v1.2b) | `/api/v1/auth/introspect` exists (`IntrospectView`); v1.2b adds the observed `ip`, `ip_match` and session revocation (§4.4). Local JWKS check stays optional for signature/`exp` |
 | 2a-4 | Service verifies token **and client IP**, so one client's token cannot be used by other clients | implemented (v1.2b) | §4, `SSO_IP_BINDING_MODE = NOIP / WARNING / ENFORCE` |
-| 2b-1 | SSO sends an Expire message to client and services | new (services, v1.4) | §6 webhooks; clients: rejection only (push in TODOS) |
+| 2b-1 | SSO sends an Expire message to client and services | new (services, v1.3c) | §6 webhooks; clients: rejection only (push in TODOS) |
 | 2b-2 | Requests with an expired token are rejected | implemented | `exp` checked with 30 s leeway (`sso/tokens.py`, verifier step 4); 401 `token_invalid` on the SSO |
 | 2c | One SSO for all company applications/services | gap | Permission namespace `application.<codename>` (`application/models.py`, `create_app_permission`), many `ServiceClient` rows (`sso/models.py`). Decision: **one token / one `aud` for all services** (kept). v1.2a: `ServiceClient.app_codename` links a service to its permission (`register_service`). §2, §3 |
 | 3a | Admin: create / delete / suspend users | implemented (v1.2a) | Stock User admin plus *Suspend* / *Unsuspend* actions. Any `is_active` True→False through `save()` revokes all of the user's tokens at once (`sso/signals.py`, `sso/revocation.py`); signal-less writes are caught on use and by `revoke_inactive_users` (§10). §5 |
@@ -63,7 +63,7 @@ flowchart LR
   subgraph SSO["SSO-server (company authentication server)"]
     NG["nginx"]
     DJ["Django: auth API, introspect/permission query, JWKS, admin"]
-    WH["Webhook dispatcher (v1.4)"]
+    WH["Webhook dispatcher (v1.3c)"]
     RD[("Redis")]
   end
   DB[("MySQL dcWebUsers")]
@@ -115,8 +115,8 @@ classDiagram
     client_secret_hash
     is_active
     app_codename: slug  (NEW, -> application.<codename>)
-    notify_url: URL (NEW, webhook, v1.4)
-    notify_secret (NEW, v1.4, HMAC key, encrypted at rest)
+    notify_url: URL (NEW, webhook, v1.3c)
+    notify_secret (NEW, v1.3c, HMAC key, encrypted at rest)
     allowed_origins: JSON list
     redirect_uris: JSON list (future)
   }
@@ -133,7 +133,7 @@ classDiagram
 - **As built (v1.2a):** `app_codename` and `notify_url` are added as **nullable** columns (rollback-safe on the
   shared MySQL: an older image's INSERTs still work). `notify_url` must be HTTPS and is stored only.
   `notify_secret` is **not** added in v1.2a: it must be encrypted at rest and shown once, which needs a key
-  and rotation design that belongs with the webhooks (v1.4).
+  and rotation design that belongs with the webhooks (v1.3c).
 - No per-service audience and no per-service IP-binding override: IP binding is one server-wide setting (§4).
 
 ### 3.3 Onboarding a new service
@@ -438,7 +438,7 @@ sequenceDiagram
   actor A as Admin
   participant AD as Django admin
   participant DB as dcWebUsers
-  participant WH as Webhook dispatcher (v1.4)
+  participant WH as Webhook dispatcher (v1.3c)
   participant SV as Services
   A->>AD: suspend user 42 (is_active=false)
   AD->>DB: is_active=false, revoked_at=now, blacklist refresh tokens (one transaction)
@@ -449,7 +449,7 @@ sequenceDiagram
 
 ## 6. Event notifications: signed webhooks
 
-Decision 7: the API supports **one** mechanism — **signed webhooks to registered services** (v1.4). SSE/WebSocket
+Decision 7: the API supports **one** mechanism — **signed webhooks to registered services** (v1.3c). SSE/WebSocket
 push to clients is not planned (see [TODOS.md](../TODOS.md)); clients learn about expiry or revocation when a
 service or `/refresh` rejects their token.
 
@@ -537,11 +537,11 @@ change passwords in myFinance.
 | v1.2a (**implemented**, §10) | Suspend revokes immediately (signal), admin actions (grant/revoke app, service permission CRUD), `register_service`, ServiceClient `app_codename`, refresh-reuse family revocation, `sid` session claim |
 | v1.2b (**implemented**, §11; llm-wiki-svc migration open) | `SSO_IP_BINDING_MODE` (`NOIP`/`WARNING`/`ENFORCE`), `cip` HMAC claim, introspect `ip` + `ip_match` + session revocation, `introspect` throttle scope, llm-wiki-svc passes browser IP everywhere, client-IP derivation (§4.5) incl. `SSO_TRUSTED_PROXIES` (`SSO_NUM_PROXIES` deprecated fallback), **`sso-client` Python library** ([design](SSO-CLIENT-LIBRARY-DESIGN.md)); llm-wiki-svc migrates to it |
 | v1.3a (**new**, updated 2026-10-14 round 2) | SSO admin REST API + audit log + step-up reauth (`POST /api/v1/admin/reauth`, `X-SSO-Reauth`), bulk permission import from each app's `sso_permissions.py`, service tokens (client credentials, no IP binding) + on-behalf-of, **device clients** for the FUND Local Gateway (`POST /api/v1/devices`, `private_key_jwt`, revoked on suspend), inactive-users feed ([ecosystem design](ECOSYSTEM-INTEGRATION.md) §2, §4.1, §5, §7) |
-| v1.3b (FUND repo) | `AUTH_PROVIDER=legacy\|both\|sso`; agents on `sso-client` with one ServiceClient per service (confirmed); llm-wiki behind configurable `/proxy/llmwiki/` |
-| v1.3c (FUND repo) | Admin UI `/admin` (users, permissions, services, devices, permission import, step-up, interim suspend calls); Django admin stays break-glass |
-| v1.3d (FUND + SGMCP) | Cloud strategies with local broker pass-through: SGMCP in the FUND cloud, FUND `gateway-relay`, pairing, outbound WSS from the FUND Local Gateway (broker daemons only) on the user's PC, one live connection per broker account (cold standby); suspend stops and deletes strategies (positions untouched) and revokes devices; `delete_strategy` becomes a soft delete, order/trade history always kept |
-| v1.3e (FUND repo) | `AUTH_PROVIDER=sso`, retire `fund-auth` |
-| v1.4 | Signed webhooks to registered services; `user.suspended` replaces the interim suspend calls |
+| v1.5a (FUND repo) | `AUTH_PROVIDER=legacy\|both\|sso`; agents on `sso-client` with one ServiceClient per service (confirmed); llm-wiki behind configurable `/proxy/llmwiki/` |
+| v1.5b (FUND repo) | Admin UI `/admin` (users, permissions, services, devices, permission import, step-up, interim suspend calls); Django admin stays break-glass |
+| v1.4 (FUND + SGMCP) | Cloud strategies with local broker pass-through: SGMCP in the FUND cloud, FUND `gateway-relay`, pairing, outbound WSS from the FUND Local Gateway (broker daemons only) on the user's PC, one live connection per broker account (cold standby); suspend stops and deletes strategies (positions untouched) and revokes devices; `delete_strategy` becomes a soft delete, order/trade history always kept |
+| v1.5c (FUND repo) | `AUTH_PROVIDER=sso`, retire `fund-auth` |
+| v1.3c | Signed webhooks to registered services; `user.suspended` replaces the interim suspend calls |
 | future | See [TODOS.md](../TODOS.md): sign-up, password change/reset, hosted login, client push, … |
 
 The v1.3 rows come from Thomas's ecosystem picture (FUND-Financial-Research as the core); they are a proposal
@@ -596,7 +596,7 @@ signals for them). Handled by defence in depth: (1) refresh, introspect and `/me
 spot; (3) `manage.py revoke_inactive_users [--dry-run]` sweeps all inactive users that still hold live tokens
 (cron-able). Residual gap: suspended and reactivated with `update()` both times, with no token use in between,
 and no sweep → pre-suspension tokens survive. Refresh by a suspended user answers 403 `account_inactive` (as
-in §5), also when the suspension already blacklisted that refresh token. The `user.suspended` webhook is v1.4.
+in §5), also when the suspension already blacklisted that refresh token. The `user.suspended` webhook is v1.3c.
 
 **Sessions and reuse.** Login creates `sid` (`secrets.token_urlsafe(16)`), on both tokens; refresh copies it to
 the new pair. The `sid` is written into the refresh token **before** simplejwt stores it as an
@@ -688,7 +688,7 @@ sent to the SSO), fail closed (`SSOUnavailable` → 503 + `Retry-After: 5`), ret
 502-504, Django middleware + `require_permission`, FastAPI `SSO` dependencies, Flask extension, `FakeSSO`
 (httpx `MockTransport`) with pytest fixtures. Not in 0.1.0: local JWKS pre-check, circuit breaker, `cached` fail
 mode, generic WSGI/ASGI middleware classes, `Retry-After` handling for 429 (429 fails closed at once), webhook
-receiver (v1.4).
+receiver (v1.3c).
 
 **Open.** llm-wiki-svc migration to `sso-client` (pass `client_ip` on logout too, D11). Rollout: run `WARNING`
 first and check the `ip_mismatch` rate and the derived IPs (Docker userland-proxy, §4.5.5) before `ENFORCE`.
