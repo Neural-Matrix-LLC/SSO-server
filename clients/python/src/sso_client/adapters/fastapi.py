@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
-from ..client import AsyncSSOClient, bearer_token
+from ..client import AsyncSSOClient, resolve_request
 from ..config import SSOConfig
 from ..errors import NotAuthenticated, SSOError
 from ..ip import get_client_ip
@@ -50,10 +50,11 @@ class SSO:
         return ip
 
     async def check(self, request: Request, require=()) -> CheckResult:
-        token = bearer_token(request.headers.get("authorization"))
+        token, ip, actor = resolve_request(request.headers.get("authorization"), request.headers,
+                                           self.client_ip(request))
         if token is None:
             raise NotAuthenticated("no bearer token")
-        return await self.client.check(token, self.client_ip(request), require)
+        return await self.client.check(token, ip, require, actor_token=actor)
 
     async def user(self, request: Request) -> CheckResult:
         """Dependency: active token, any permissions."""

@@ -36,6 +36,16 @@ class ServiceClient(models.Model):
         db_table="sso_serviceclient_permissions",
         help_text="application.* permissions of this service client (perms of its service tokens).")
     secret_rotated_at = models.DateTimeField(null=True, blank=True)
+    # v1.3b (DESIGN-v1.3b §1, §9): device clients of the local broker gateway, and delegation flags
+    kind = models.CharField(max_length=16, default="service", choices=[("service", "service"), ("device", "device")])
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.CASCADE,
+                              related_name="sso_devices")
+    device_name = models.CharField(max_length=200, blank=True, default="")
+    public_key = models.TextField(null=True, blank=True, help_text="Ed25519 public key (PEM), devices only.")
+    public_key_fingerprint = models.CharField(max_length=64, null=True, blank=True, unique=True)
+    last_used = models.DateTimeField(null=True, blank=True)
+    can_delegate = models.BooleanField(default=False, help_text="May call services on behalf of a user.")
+    can_register_devices = models.BooleanField(default=False, help_text="May register device clients (relay).")
 
     class Meta:
         ordering = ["client_id"]

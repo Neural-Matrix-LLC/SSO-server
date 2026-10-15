@@ -44,6 +44,8 @@ class IntrospectSerializer(serializers.Serializer):
     ip = serializers.JSONField(required=False, allow_null=True)
     # optional: "application.app2" or a list; the response adds "allowed" (all of them held)
     require = serializers.JSONField(required=False)
+    # v1.3b on-behalf-of (DESIGN-v1.3b §5): the calling service's own service token
+    actor_token = serializers.CharField(required=False, max_length=8192)
 
     def validate_ip(self, value):
         if not isinstance(value, str) or len(value) > 128:

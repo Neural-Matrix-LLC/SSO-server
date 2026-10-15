@@ -120,3 +120,20 @@ python3.13 -m venv .venv && .venv/bin/pip install -e ".[test]" && .venv/bin/pyte
 
 Not implemented in 0.1.0 (see the design): local JWKS pre-check (`[jwt]`), circuit breaker, `cached` stale
 fail mode, webhook receiver (v1.3c), generic WSGI/ASGI middleware classes.
+
+
+## 0.2 (SSO v1.3b): service tokens, devices, on-behalf-of
+
+```python
+from sso_client import ServiceTokenSource, DeviceTokenSource, on_behalf_of_headers, generate_device_key
+tokens = ServiceTokenSource(SSOConfig.from_env())          # client credentials, cached, renewed 30 s before exp
+httpx.get(url, headers=on_behalf_of_headers(tokens.get(), user_token, browser_ip))
+sso.check(user_token, ip, require=[...], actor_token=caller_token).via   # "svc:<caller>"
+sso.check_service(service_or_device_token)                 # ServiceCheck(client_id, typ, permissions, owner)
+priv, pub = generate_device_key()                          # device: keep priv on the PC
+DeviceTokenSource(base_url, "dev_...", priv).get()         # private_key_jwt; extra: sso-client[device]
+```
+
+The Django/FastAPI/Flask adapters accept incoming on-behalf-of calls automatically: with `X-SSO-User-Token` and a
+Bearer token, the Bearer is the actor, the IP comes from `X-SSO-Client-IP`, and `result.via` names the caller. A
+caller without `can_delegate` gets 403.

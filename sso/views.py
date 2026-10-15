@@ -334,6 +334,13 @@ class IntrospectView(APIView):
                 if token.get(SID_CLAIM):
                     revoke_session(user, token[SID_CLAIM], "ip_mismatch")
                 return inactive
+        actor = None
+        if ser.validated_data.get("actor_token"):  # v1.3b on-behalf-of: fail closed on a bad actor token
+            from .service_auth import load_service_token
+
+            actor = load_service_token(ser.validated_data["actor_token"])
+            if actor is None:
+                return inactive
         perms = user_app_perms(user)  # fresh from the DB (design A2)
         body = {
             "active": True,
@@ -353,8 +360,14 @@ class IntrospectView(APIView):
             "aud": settings.SSO_AUDIENCE,
             "client_id": request.user.client_id,
         }
+        delegation_ok = True
+        if actor is not None:
+            actor_client = actor[1]
+            delegation_ok = actor_client.kind == "service" and actor_client.can_delegate
+            body["act"] = {"sub": actor[0].get("sub"), "client_id": actor_client.client_id}
+            body["delegation_allowed"] = delegation_ok
         if "require" in ser.validated_data:
-            body["allowed"] = set(ser.validated_data["require"]) <= set(perms)
+            body["allowed"] = delegation_ok and set(ser.validated_data["require"]) <= set(perms)
         return Response(body, headers={"Cache-Control": "no-store"})
 
 
@@ -377,11 +390,16 @@ def _introspect_service_token(raw: str, caller: str):
     token, client = loaded
     from .tokens import service_client_perms
 
-    return Response({
-        "active": True, "token_type": "service", "sub": token.get("sub"), "subject_client_id": client.client_id,
-        "app": client.app_codename, "perms": service_client_perms(client), "ip_binding": "NOIP",
-        "ip_match": None, "iat": token.get("iat"), "exp": token.get("exp"), "iss": settings.SSO_ISSUER,
-        "aud": settings.SSO_AUDIENCE, "client_id": caller}, headers={"Cache-Control": "no-store"})
+    body = {
+        "active": True, "token_type": "service", "typ": client.kind if client.kind == "device" else "service",
+        "sub": token.get("sub"), "subject_client_id": client.client_id,
+        "app": client.app_codename, "perms": [] if client.kind == "device" else service_client_perms(client),
+        "ip_binding": "NOIP", "ip_match": None, "iat": token.get("iat"), "exp": token.get("exp"),
+        "iss": settings.SSO_ISSUER, "aud": settings.SSO_AUDIENCE, "client_id": caller}
+    if client.kind == "device":  # v1.3b: live owner state (load_service_token already refused inactive owners)
+        body["owner"] = str(client.owner_id)
+        body["owner_active"] = True
+    return Response(body, headers={"Cache-Control": "no-store"})
 
 
 # --------------------------------------------------------------------------- discovery / health

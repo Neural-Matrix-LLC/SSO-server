@@ -63,6 +63,10 @@ def revoke_on_is_active_change(sender, instance: User, created=False, raw=False,
     from .revocation import revoke_user_tokens
 
     revoke_user_tokens(instance)
+    if not now_active:  # v1.3b: the owner's gateway devices are cut off with the suspension (stay off after)
+        from .devices import deactivate_owner_devices
+
+        deactivate_owner_devices(instance)
     event = "user.reactivated" if now_active else "user.suspended"
     admin_logger.info(json.dumps({"event": event, "user_id": instance.pk, "tokens_revoked": True},
                                  sort_keys=True))

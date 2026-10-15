@@ -3,7 +3,7 @@ from django.contrib import admin
 from django.urls import path, re_path
 
 from sso import admin_api as adm
-from sso import service_auth, views
+from sso import devices, service_auth, views
 
 admin.site.site_header = "SSO server administration"
 
@@ -40,6 +40,11 @@ urlpatterns = [
     path("api/v1/admin/apps/<str:app>", adm.AppView.as_view()),
     path("api/v1/admin/apps/<str:app>/permissions", adm.AppPermissionsImportView.as_view()),
     path("api/v1/admin/audit", adm.AuditView.as_view()),
+    # v1.3b (docs/DESIGN-v1.3b-devices-on-behalf-of.md)
+    path("api/v1/devices", devices.DevicesView.as_view(), name="sso-devices"),
+    path("api/v1/devices/<slug:client_id>", devices.DeviceView.as_view()),
+    path("api/v1/admin/devices", adm.AdminDevicesView.as_view()),
+    path("api/v1/admin/devices/<slug:client_id>", adm.AdminDeviceView.as_view()),
     path(".well-known/jwks.json", views.JWKSView.as_view(), name="sso-jwks"),
     path(".well-known/openid-configuration", views.DiscoveryView.as_view(), name="sso-discovery"),
     path("healthz", views.HealthView.as_view(), name="sso-healthz"),

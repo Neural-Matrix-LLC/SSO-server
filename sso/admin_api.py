@@ -244,7 +244,8 @@ def ser_permission(p: Permission, rec: ApplicationPermissionRecord | None = None
 def ser_service(c: ServiceClient) -> dict:
     return {"client_id": c.client_id, "name": c.name, "app_codename": c.app_codename, "notify_url": c.notify_url,
             "is_active": c.is_active, "perms": service_client_perms(c), "created": _iso(c.created),
-            "secret_rotated_at": _iso(c.secret_rotated_at)}
+            "secret_rotated_at": _iso(c.secret_rotated_at), "kind": c.kind, "can_delegate": c.can_delegate,
+            "can_register_devices": c.can_register_devices}
 
 
 def ser_audit(a: AdminAuditLog) -> dict:
@@ -721,7 +722,11 @@ def _apply_service_fields(client, data):
 
 class ServicesView(AdminAPIView):
     def get(self, request):
-        return paginate(request, ServiceClient.objects.all().order_by("client_id"), ser_service)
+        qs = ServiceClient.objects.all().order_by("client_id")
+        kind = request.query_params.get("kind")
+        if kind:
+            qs = qs.filter(kind=kind)
+        return paginate(request, qs, ser_service)
 
     def post(self, request):
         data = self.body(request)
@@ -759,19 +764,27 @@ class ServiceView(AdminAPIView):
     def patch(self, request, client_id):
         client = get_service(client_id)
         data = self.body(request)
-        unknown = set(data) - {"name", "app_codename", "notify_url", "is_active", "perms"}
+        unknown = set(data) - {"name", "app_codename", "notify_url", "is_active", "perms", "can_delegate",
+                               "can_register_devices"}
         if unknown:
             raise InvalidRequest("Not editable: " + ", ".join(sorted(unknown)) + ".")
-        if "is_active" in data and not isinstance(data["is_active"], bool):
-            raise InvalidRequest("Missing or malformed fields: is_active.")
+        for flag in ("is_active", "can_delegate", "can_register_devices"):
+            if flag in data and not isinstance(data[flag], bool):
+                raise InvalidRequest(f"Missing or malformed fields: {flag}.")
+        if client.kind == "device" and (data.get("can_delegate") or data.get("can_register_devices")):
+            raise InvalidRequest("A device cannot delegate or register devices.")
         perms = _service_perms(data["perms"]) if "perms" in data else None
         deactivate = data.get("is_active") is False and client.is_active
+        # v1.3b: granting delegation / device registration is security-relevant -> step-up
+        elevate = any(data.get(f) is True and not getattr(client, f) for f in ("can_delegate", "can_register_devices"))
+        deactivate = deactivate or elevate
         if deactivate:
             self.stepup(request, "service.update", "service", client_id)
         before = ser_service(client)
         _apply_service_fields(client, data)
-        if "is_active" in data:
-            client.is_active = data["is_active"]
+        for flag in ("is_active", "can_delegate", "can_register_devices"):
+            if flag in data:
+                setattr(client, flag, data[flag])
         with transaction.atomic():
             client.save()
             if perms is not None:
@@ -872,3 +885,32 @@ class AuditView(AdminAPIView):
                 since = since.replace(tzinfo=dt_timezone.utc)
             qs = qs.filter(ts__gte=since)
         return paginate(request, qs, ser_audit)
+
+
+# --------------------------------------------------------------------------- devices (v1.3b)
+class AdminDevicesView(AdminAPIView):
+    def get(self, request):
+        from .devices import ser_device
+
+        qs = ServiceClient.objects.filter(kind="device").order_by("client_id")
+        owner = request.query_params.get("owner")
+        if owner:
+            if not owner.isdigit():
+                raise InvalidRequest("owner must be a user id.")
+            qs = qs.filter(owner_id=int(owner))
+        return paginate(request, qs, ser_device)
+
+
+class AdminDeviceView(AdminAPIView):
+    def delete(self, request, client_id):
+        from .devices import ser_device
+
+        dev = ServiceClient.objects.filter(client_id=client_id, kind="device").first()
+        if dev is None:
+            raise NotFound("Unknown device.")
+        self.stepup(request, "device.delete", "device", client_id)
+        with transaction.atomic():
+            before = ser_device(dev)
+            dev.delete()
+            audit.record(request, "device.delete", "device", client_id, before=before, stepup=True)
+        return Response(status=status.HTTP_204_NO_CONTENT)

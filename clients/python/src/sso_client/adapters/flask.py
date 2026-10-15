@@ -15,7 +15,7 @@ import functools
 
 from flask import g, jsonify, request
 
-from ..client import SSOClient, bearer_token
+from ..client import SSOClient, resolve_request
 from ..config import SSOConfig
 from ..errors import NotAuthenticated, SSOError
 from ..ip import get_client_ip
@@ -49,12 +49,12 @@ class SSO:
         return resp
 
     def check(self, require=()):
-        token = bearer_token(request.headers.get("Authorization"))
-        if token is None:
-            raise NotAuthenticated("no bearer token")
         if "client_ip" not in g:
             self._set_ip()
-        return self.client.check(token, g.client_ip, require)
+        token, ip, actor = resolve_request(request.headers.get("Authorization"), request.headers, g.client_ip)
+        if token is None:
+            raise NotAuthenticated("no bearer token")
+        return self.client.check(token, ip, require, actor_token=actor)
 
     def require_permission(self, *perms: str):
         def deco(view):

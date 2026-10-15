@@ -47,6 +47,8 @@ class FakeSSO:
         self.client_id, self.client_secret = client_id, client_secret
         self.tokens: dict[str, _Tok] = {}
         self.calls: list[dict] = []
+        self.services: dict[str, dict] = {}       # 0.2: service/device tokens
+        self.service_clients: dict[str, dict] = {}  # client_id -> {secret, perms, can_delegate}
         self.status: int | None = None   # force an HTTP status (e.g. 500, 429)
         self.error: Exception | None = None  # raise a transport error (down())
         self.transport = httpx.MockTransport(self._handle)
@@ -61,7 +63,21 @@ class FakeSSO:
         return token
 
     def revoke(self, token: str) -> None:
+        if token in self.services:
+            self.services[token]["active"] = False
+            return
         self.tokens[token].active = False
+
+    def issue_service(self, client_id: str = "svc-a", *, perms=(), can_delegate: bool = False, typ: str = "service",
+                      owner: str | None = None) -> str:
+        """0.2: a service (or device) token as the SSO's service-token endpoint would issue it."""
+        token = "fake-svc." + secrets.token_urlsafe(24)
+        self.services[token] = {"client_id": client_id, "perms": list(perms), "can_delegate": can_delegate,
+                                "typ": typ, "owner": owner, "active": True}
+        return token
+
+    def register_service(self, client_id: str, secret: str, *, perms=(), can_delegate: bool = False) -> None:
+        self.service_clients[client_id] = {"secret": secret, "perms": list(perms), "can_delegate": can_delegate}
 
     def grant(self, token: str, *perms: str) -> None:
         self.tokens[token].perms.extend(perms)
@@ -90,6 +106,8 @@ class FakeSSO:
             raise self.error
         if self.status is not None:
             return httpx.Response(self.status, json={"error": "forced"})
+        if request.url.path == "/api/v1/auth/service-token" and request.method == "POST":
+            return self._service_token(request)
         if request.url.path != "/api/v1/auth/introspect" or request.method != "POST":
             return httpx.Response(404, json={"error": "not_found"})
         expected = "Basic " + base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
@@ -97,6 +115,21 @@ class FakeSSO:
             return httpx.Response(401, json={"error": "invalid_client"})
         body = json.loads(request.content or b"{}")
         self.calls.append(body)
+        svc = self.services.get(body.get("token", ""))
+        if svc is not None:
+            if not svc["active"]:
+                return httpx.Response(200, json={"active": False})
+            out = {"active": True, "token_type": "service", "typ": svc["typ"], "sub": f"svc:{svc['client_id']}",
+                   "subject_client_id": svc["client_id"], "perms": svc["perms"], "app": None,
+                   "ip_binding": "NOIP", "ip_match": None, "client_id": self.client_id}
+            if svc["owner"] is not None:
+                out.update(owner=svc["owner"], owner_active=True)
+            return httpx.Response(200, json=out)
+        actor = None
+        if body.get("actor_token"):
+            actor = self.services.get(body["actor_token"])
+            if actor is None or not actor["active"]:
+                return httpx.Response(200, json={"active": False})
         tok = self.tokens.get(body.get("token", ""))
         if tok is None or not tok.active or tok.exp <= time.time():
             return httpx.Response(200, json={"active": False})
@@ -111,7 +144,24 @@ class FakeSSO:
         if "require" in body:
             req = [body["require"]] if isinstance(body["require"], str) else body["require"]
             out["allowed"] = set(req) <= set(tok.perms)
+        if actor is not None:
+            ok = actor["typ"] == "service" and actor["can_delegate"]
+            out["act"] = {"sub": f"svc:{actor['client_id']}", "client_id": actor["client_id"]}
+            out["delegation_allowed"] = ok
+            if "allowed" in out:
+                out["allowed"] = out["allowed"] and ok
         return httpx.Response(200, json=out)
+
+    def _service_token(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        if not auth.lower().startswith("basic "):
+            return httpx.Response(401, json={"error": "invalid_client"})
+        cid, _, secret = base64.b64decode(auth.split()[1]).decode().partition(":")
+        sc = self.service_clients.get(cid)
+        if sc is None or sc["secret"] != secret:
+            return httpx.Response(401, json={"error": "invalid_client"})
+        token = self.issue_service(cid, perms=sc["perms"], can_delegate=sc["can_delegate"])
+        return httpx.Response(200, json={"access_token": token, "token_type": "Bearer", "expires_in": 300})
 
 
 def wsgi_environ(peer: str = "127.0.0.1", xff: str | None = None, token: str | None = None, **extra) -> dict:

@@ -15,7 +15,7 @@ import functools
 from django.http import JsonResponse
 from django.utils.functional import SimpleLazyObject
 
-from ..client import SSOClient, bearer_token
+from ..client import SSOClient, resolve_request
 from ..config import SSOConfig
 from ..errors import NotAuthenticated, SSOError
 from ..ip import get_client_ip
@@ -54,10 +54,11 @@ def request_client_ip(request, trusted=None, client_ip_header=None) -> str | Non
 
 
 def check_request(request, require=()):
-    token = bearer_token(request.META.get("HTTP_AUTHORIZATION"))
+    own_ip = getattr(request, "client_ip", None) or request_client_ip(request)
+    token, ip, actor = resolve_request(request.META.get("HTTP_AUTHORIZATION"), request.headers, own_ip)
     if token is None:
         raise NotAuthenticated("no bearer token")
-    return get_client().check(token, getattr(request, "client_ip", None) or request_client_ip(request), require)
+    return get_client().check(token, ip, require, actor_token=actor)
 
 
 class SSOMiddleware:

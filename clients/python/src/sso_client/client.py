@@ -25,7 +25,7 @@ from .cache import TTLCache, cache_key
 from .config import SSOConfig
 from .errors import NotAuthenticated, PermissionDenied, SSOProtocolError, SSOUnavailable, TokenInactive
 from .ip import normalize_ip
-from .models import CheckResult
+from .models import CheckResult, ServiceCheck
 
 logger = logging.getLogger("sso_client")
 RETRY_STATUS = {502, 503, 504}
@@ -44,17 +44,33 @@ class _Base:
         self._timeout = httpx.Timeout(self.config.timeout, connect=self.config.connect_timeout)
 
     @staticmethod
-    def _prepare(token: str, client_ip: str | None, require: Sequence[str] | str) -> tuple[dict, str | None, list]:
+    def _prepare(token: str, client_ip: str | None, require: Sequence[str] | str,
+                 actor_token: str | None = None) -> tuple[dict, str | None, list]:
         if not token or not isinstance(token, str):
             raise NotAuthenticated("no token")
         req = [require] if isinstance(require, str) else list(require)
         ip = normalize_ip(client_ip)
         body: dict = {"token": token}
+        if actor_token:
+            body["actor_token"] = actor_token  # 0.2: on behalf of a user (SSO design v1.3b §5)
         if ip is not None:
             body["ip"] = ip  # missing IP is sent as absent: a mismatch when the token is bound
         if req:
             body["require"] = req
         return body, ip, req
+
+    def _parse_raw(self, resp: httpx.Response) -> dict:
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise SSOUnavailable(f"SSO answered {resp.status_code}")
+        if resp.status_code != 200:
+            raise SSOProtocolError(f"SSO answered {resp.status_code}", resp.status_code)
+        try:
+            body = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            raise SSOProtocolError("SSO answered non-JSON") from None
+        if not isinstance(body, dict) or "active" not in body:
+            raise SSOProtocolError("SSO answer has no 'active'")
+        return body
 
     def _parse(self, resp: httpx.Response, ip: str | None) -> CheckResult:
         if resp.status_code == 429 or resp.status_code >= 500:
@@ -78,13 +94,16 @@ class _Base:
                                     "mode": result.ip_binding}))
         if not result.active:
             raise TokenInactive(result.reason or "inactive")
+        if result.via is not None and result.delegation_allowed is False:
+            raise PermissionDenied(("delegation",))
         missing = [p for p in req if p not in result.permissions]
         if missing:
             raise PermissionDenied(missing)
         return result
 
-    def _key(self, token, ip, req):
-        return cache_key(token, ip)  # permissions are checked locally against the cached set
+    def _key(self, token, ip, req, actor_token=None):
+        key = cache_key(token, ip)  # permissions are checked locally against the cached set
+        return key + ":" + hashlib.sha256(actor_token.encode()).hexdigest() if actor_token else key
 
 
 class SSOClient(_Base):
@@ -93,10 +112,11 @@ class SSOClient(_Base):
         super().__init__(config, cache=cache)
         self.http = http or httpx.Client()
 
-    def check(self, token: str, client_ip: str | None, require: Sequence[str] | str = ()) -> CheckResult:
+    def check(self, token: str, client_ip: str | None, require: Sequence[str] | str = (),
+              actor_token: str | None = None) -> CheckResult:
         started = time.monotonic()
-        body, ip, req = self._prepare(token, client_ip, require)
-        key = self._key(token, ip, req)
+        body, ip, req = self._prepare(token, client_ip, require, actor_token)
+        key = self._key(token, ip, req, actor_token)
         hit = self.cache.get(key)
         if hit is not None:
             return self._finish(token, hit, req, cached=True, attempts=0, started=started)
@@ -119,6 +139,17 @@ class SSOClient(_Base):
         self.cache.set(key, result)
         return self._finish(token, result, req, cached=False, attempts=attempts, started=started)
 
+    def check_service(self, token: str) -> ServiceCheck:
+        """0.2: introspect a service or device token (no IP binding). Raises TokenInactive / SSOUnavailable."""
+        if not token:
+            raise NotAuthenticated("no token")
+        try:
+            resp = self.http.post(self.config.introspect_url, json={"token": token}, auth=self._auth,
+                                  timeout=self._timeout)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise SSOUnavailable(f"SSO unreachable: {type(exc).__name__}") from None
+        return _service_result(self._parse_raw(resp))
+
     def close(self) -> None:
         self.http.close()
 
@@ -129,10 +160,11 @@ class AsyncSSOClient(_Base):
         super().__init__(config, cache=cache)
         self.http = http or httpx.AsyncClient()
 
-    async def check(self, token: str, client_ip: str | None, require: Sequence[str] | str = ()) -> CheckResult:
+    async def check(self, token: str, client_ip: str | None, require: Sequence[str] | str = (),
+              actor_token: str | None = None) -> CheckResult:
         started = time.monotonic()
-        body, ip, req = self._prepare(token, client_ip, require)
-        key = self._key(token, ip, req)
+        body, ip, req = self._prepare(token, client_ip, require, actor_token)
+        key = self._key(token, ip, req, actor_token)
         hit = self.cache.get(key)
         if hit is not None:
             return self._finish(token, hit, req, cached=True, attempts=0, started=started)
@@ -156,6 +188,16 @@ class AsyncSSOClient(_Base):
         self.cache.set(key, result)
         return self._finish(token, result, req, cached=False, attempts=attempts, started=started)
 
+    async def check_service(self, token: str) -> ServiceCheck:
+        if not token:
+            raise NotAuthenticated("no token")
+        try:
+            resp = await self.http.post(self.config.introspect_url, json={"token": token}, auth=self._auth,
+                                        timeout=self._timeout)
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise SSOUnavailable(f"SSO unreachable: {type(exc).__name__}") from None
+        return _service_result(self._parse_raw(resp))
+
     async def aclose(self) -> None:
         await self.http.aclose()
 
@@ -168,3 +210,34 @@ def bearer_token(authorization: str | None) -> str | None:
     if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1]:
         return None
     return parts[1]
+
+
+def _service_result(body: dict) -> ServiceCheck:
+    if not body.get("active") or body.get("token_type") != "service":
+        raise TokenInactive("inactive")
+    return ServiceCheck(client_id=str(body.get("subject_client_id", "")), typ=str(body.get("typ", "service")),
+                        permissions=frozenset(body.get("perms") or ()), app=body.get("app"), owner=body.get("owner"))
+
+
+USER_TOKEN_HEADER = "X-SSO-User-Token"
+CLIENT_IP_HEADER = "X-SSO-Client-IP"
+
+
+def on_behalf_of_headers(service_token: str, user_token: str, client_ip: str | None) -> dict:
+    """0.2: headers for calling another service on behalf of the user of the CURRENT request (never stored)."""
+    h = {"Authorization": f"Bearer {service_token}", USER_TOKEN_HEADER: user_token}
+    ip = normalize_ip(client_ip)
+    if ip:
+        h[CLIENT_IP_HEADER] = ip
+    return h
+
+
+def resolve_request(authorization: str | None, headers, own_ip: str | None) -> tuple[str | None, str | None, str | None]:
+    """(user token, client IP, actor token) of an incoming request. With ``X-SSO-User-Token`` the Bearer is the
+    calling service's token and the IP comes from ``X-SSO-Client-IP`` (accepted only with that actor token: the
+    SSO rejects the call unless the actor is a valid service token allowed to delegate)."""
+    bearer = bearer_token(authorization)
+    user = headers.get(USER_TOKEN_HEADER) if headers is not None else None
+    if user and bearer:
+        return user, headers.get(CLIENT_IP_HEADER), bearer
+    return bearer, own_ip, None

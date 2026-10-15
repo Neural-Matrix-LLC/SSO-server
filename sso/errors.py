@@ -107,6 +107,18 @@ class UnsupportedGrantType(SSOError):
     default_detail = "Only grant_type=client_credentials is supported."
 
 
+class Forbidden(SSOError):
+    error_code = "forbidden"
+    status_code = status.HTTP_403_FORBIDDEN
+    default_detail = "You do not have permission to perform this action."
+
+
+class ServiceUnavailable(SSOError):
+    error_code = "service_unavailable"
+    status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    default_detail = "Service unavailable."
+
+
 GENERIC = {
     400: ("invalid_request", "Missing or malformed fields."),
     401: ("token_invalid", "Authentication credentials were missing or invalid."),

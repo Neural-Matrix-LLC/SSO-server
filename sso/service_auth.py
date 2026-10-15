@@ -25,12 +25,29 @@ def load_service_token(raw: str) -> tuple[SSOServiceToken, ServiceClient] | None
         token = SSOServiceToken(raw)
     except (TokenError, TypeError, ValueError, OverflowError):
         return None
-    client = ServiceClient.objects.filter(client_id=token.get("client_id"), is_active=True).first()
-    if client is None or token.get("sub") != f"svc:{client.client_id}":
+    client = (ServiceClient.objects.select_related("owner")
+              .filter(client_id=token.get("client_id"), is_active=True).first())
+    if client is None:
+        return None
+    if client.kind == "device":  # v1.3b: owner must still be active (checked live)
+        if (token.get("sub") != f"dev:{client.client_id}" or client.owner is None or not client.owner.is_active
+                or token.get("owner") != str(client.owner_id)):
+            return None
+    elif token.get("sub") != f"svc:{client.client_id}":
         return None
     if token.get("rot") != secret_generation(client):  # issued under an older (rotated) secret
         return None
     return token, client
+
+
+def is_service_token(raw: str) -> bool:
+    import jwt
+
+    try:
+        claims = jwt.decode(raw, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return False
+    return isinstance(claims, dict) and claims.get("token_type") == "service"
 
 
 class ServiceTokenAuthentication(authentication.BaseAuthentication):
@@ -42,6 +59,8 @@ class ServiceTokenAuthentication(authentication.BaseAuthentication):
             return None
         if len(header) != 2:
             raise exceptions.AuthenticationFailed("Invalid Authorization header.")
+        if not is_service_token(header[1].decode("latin-1")):
+            return None  # a user token: let the next authentication class handle it
         loaded = load_service_token(header[1].decode("latin-1"))
         if loaded is None:
             raise exceptions.AuthenticationFailed("Service token is invalid.", code="token_invalid")
@@ -56,9 +75,24 @@ class ServiceTokenThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         client_id = getattr(request.user, "client_id", None)
+        if not client_id and isinstance(getattr(request, "data", None), dict):
+            iss = _assertion_iss(request.data.get("client_assertion"))  # device: per claimed device id
+            client_id = f"dev:{iss}" if iss else None
         if not client_id:
             return None
         return self.cache_format % {"scope": self.scope, "ident": client_id}
+
+
+def _assertion_iss(raw) -> str | None:
+    import jwt
+
+    if not isinstance(raw, str) or len(raw) > 8192:
+        return None
+    try:
+        iss = jwt.decode(raw, options={"verify_signature": False}).get("iss")
+    except jwt.PyJWTError:
+        return None
+    return iss[:100] if isinstance(iss, str) else None
 
 
 class ServiceTokenView(APIView):
@@ -66,13 +100,25 @@ class ServiceTokenView(APIView):
     throttle_classes = [ServiceTokenThrottle]
 
     def post(self, request):
-        if not isinstance(request.user, ServicePrincipal):
-            raise InvalidClient()
         if not isinstance(request.data, dict):
             raise InvalidRequest("Request body must be a JSON object.")
-        if request.data.get("grant_type") != "client_credentials":
-            raise UnsupportedGrantType()
-        token = issue_service_token(request.user.client)
+        assertion = request.data.get("client_assertion")
+        if assertion is not None:  # v1.3b device: private_key_jwt (RFC 7523)
+            from .devices import ASSERTION_TYPE, verify_assertion
+
+            if isinstance(request.user, ServicePrincipal) or request.data.get("client_assertion_type") != ASSERTION_TYPE \
+                    or not isinstance(assertion, str) or len(assertion) > 8192:
+                raise InvalidClient()
+            if request.data.get("grant_type") != "client_credentials":
+                raise UnsupportedGrantType()
+            client = verify_assertion(assertion)
+        else:
+            if not isinstance(request.user, ServicePrincipal):
+                raise InvalidClient()
+            if request.data.get("grant_type") != "client_credentials":
+                raise UnsupportedGrantType()
+            client = request.user.client
+        token = issue_service_token(client)
         return Response({"access_token": str(token), "token_type": "Bearer", "expires_in": service_token_ttl_seconds()},
                         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 

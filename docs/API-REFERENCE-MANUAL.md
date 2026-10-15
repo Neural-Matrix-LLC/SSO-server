@@ -657,3 +657,33 @@ Payload `{"app_name","description"?,"version","permissions":[{"codename","name",
 | 409 | `last_admin` | the change would leave no active SSO admin |
 | 409 | `conflict` | duplicate name/codename/client_id; code-defined permission; still granted without `revoke_all` |
 | 409 | `version_conflict` | import `version` older than the stored one |
+
+## 9. Devices and on-behalf-of (v1.3b)
+
+Design: [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md). Implemented on `feat/sso-v1.3`.
+
+| Method + path | Auth | Request | Response / errors |
+|---|---|---|---|
+| `POST /api/v1/devices` | `Authorization: Bearer <service token>` of a client with `can_register_devices`, plus `X-SSO-User-Token: <user access token>` and `X-SSO-Client-IP: <browser IP>` | `{"device_name", "public_key"}` (Ed25519 PEM or base64url raw 32 bytes) | 201 device + `token_endpoint`, `assertion_audience`; 400 bad key; 401 `invalid_client` (no service token) / `token_invalid` (user token missing, revoked, IP mismatch in ENFORCE); 403 `forbidden` (flag missing, user lacks `application.<registering app>`); 409 `conflict` (key already registered, more than `SSO_DEVICE_MAX_PER_USER`) |
+| `GET /api/v1/devices` | Bearer user token | | 200 `{"results":[device]}` (own) |
+| `DELETE /api/v1/devices/{client_id}` | Bearer user token (owner) | | 204, 404 |
+| `POST /api/v1/auth/service-token` (device) | none (the assertion authenticates) | `{"grant_type":"client_credentials","client_assertion_type":"urn:ietf:params:oauth:client-assertion-type:jwt-bearer","client_assertion":"<EdDSA JWT>"}` | 200 device token (300 s); 401 `invalid_client` for any assertion problem or replay; 503 if the replay cache is down |
+| `POST /api/v1/auth/introspect` | Basic | adds `"actor_token": "<caller's service token>"` | adds `act {sub, client_id}`, `delegation_allowed`; invalid actor → `{"active":false}`; `allowed` is false when delegation is not allowed. Device token → `typ:"device"`, `owner`, `owner_active` |
+| `GET /api/v1/admin/devices?owner=` | admin | | list |
+| 🔒 `DELETE /api/v1/admin/devices/{client_id}` | admin + step-up | | 204 |
+| `PATCH /api/v1/admin/services/{client_id}` | admin | `can_delegate`, `can_register_devices` (🔒 to turn on) | service |
+
+Client assertion claims: `iss = sub = <device client_id>`, `aud = <issuer>/api/v1/auth/service-token`, `iat`,
+`exp` (≤ `iat` + 300), unique `jti`; header `alg: EdDSA`. Device token claims: `token_type="service"`,
+`typ="device"`, `sub="dev:<client_id>"`, `client_id`, `owner`, `app`, `perms: []`, `rot`; no `cip`, no `sid`.
+Owner suspended → devices deactivated at once (and stay inactive after unsuspend); owner deleted → devices deleted.
+
+Device resource: `client_id`, `kind`, `device_name`, `owner`, `app_codename`, `is_active`, `created`, `last_used`,
+`public_key_fingerprint`.
+
+On behalf of a user (sso-client 0.2 does this for you):
+
+```bash
+curl -s $SVC_B/api/thing -H "Authorization: Bearer $SERVICE_TOKEN_OF_A" \
+  -H "X-SSO-User-Token: $USER_TOKEN" -H "X-SSO-Client-IP: 203.0.113.7"
+```

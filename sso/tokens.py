@@ -216,6 +216,15 @@ def service_client_perms(client) -> list[str]:
 
 def issue_service_token(client) -> SSOServiceToken:
     token = SSOServiceToken()
+    if getattr(client, "kind", "service") == "device":  # v1.3b: device token, acts as a pipe (no perms)
+        token["sub"] = f"dev:{client.client_id}"
+        token["typ"] = "device"
+        token["client_id"] = client.client_id
+        token["owner"] = str(client.owner_id)
+        token["app"] = client.app_codename or None
+        token["perms"] = []
+        token["rot"] = secret_generation(client)
+        return token
     token["sub"] = f"svc:{client.client_id}"
     token["typ"] = SERVICE_TOKEN_TYPE
     token["client_id"] = client.client_id

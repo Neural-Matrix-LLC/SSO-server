@@ -266,6 +266,9 @@ REST_FRAMEWORK = {
 # v1.3a: step-up window and service token lifetime (DESIGN-v1.3a-admin-api.md §11)
 SSO_ADMIN_REAUTH_SECONDS = env.int("SSO_ADMIN_REAUTH_SECONDS", default=300)
 SSO_SERVICE_TOKEN_TTL_SECONDS = env.int("SSO_SERVICE_TOKEN_TTL_SECONDS", default=300)
+# v1.3b devices (DESIGN-v1.3b §10)
+SSO_DEVICE_MAX_PER_USER = env.int("SSO_DEVICE_MAX_PER_USER", default=10)
+SSO_DEVICE_ASSERTION_MAX_AGE = env.int("SSO_DEVICE_ASSERTION_MAX_AGE", default=300)
 
 SSO_ACCESS_TTL = timedelta(minutes=env.int("SSO_ACCESS_TTL_MIN", default=15))
 SSO_REFRESH_TTL = timedelta(days=env.int("SSO_REFRESH_TTL_DAYS", default=7))
