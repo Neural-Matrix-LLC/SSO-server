@@ -23,7 +23,7 @@ Python 3.11+ (3.13 is the target). Runtime dependency: `httpx`.
 | `SSO_TRUSTED_PROXIES` | empty (trust nobody) | IPs/CIDRs of *your* reverse proxies; never `0.0.0.0/0` |
 | `SSO_CLIENT_IP_HEADER` | empty | optional header your trusted proxy sets to the client IP (`cf-connecting-ip`, `x-real-ip`); read only when the peer is a trusted proxy and it holds a valid IP, else `X-Forwarded-For` logic. Needs `SSO_TRUSTED_PROXIES` |
 | `SSO_TIMEOUT` | `2.0` | seconds per attempt (connect 1 s) |
-| `SSO_RETRIES` | `2` | only connect errors, timeouts, 502/503/504 |
+| `SSO_RETRIES` | `1` | only connect errors, timeouts, 502/503/504 (a hung SSO costs <= 2 x `SSO_TIMEOUT`) |
 | `SSO_CACHE_TTL` | `30` | seconds, capped at 30; `0` disables |
 
 ## Behaviour

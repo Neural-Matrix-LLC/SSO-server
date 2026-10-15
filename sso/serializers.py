@@ -39,10 +39,16 @@ class RefreshInputSerializer(serializers.Serializer):
 
 class IntrospectSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=8192)
-    # v1.2b (design §4.4): client IP observed by the service; unparseable = no IP (a mismatch when bound)
-    ip = serializers.CharField(max_length=128, required=False, allow_blank=True, allow_null=True)
+    # v1.2b (design §4.4): client IP observed by the service; unparseable = no IP (a mismatch when bound).
+    # V12B-01: a non-string or over-long (> 128 chars) value is also "no IP", never a 400.
+    ip = serializers.JSONField(required=False, allow_null=True)
     # optional: "application.app2" or a list; the response adds "allowed" (all of them held)
     require = serializers.JSONField(required=False)
+
+    def validate_ip(self, value):
+        if not isinstance(value, str) or len(value) > 128:
+            return None
+        return value
 
     def validate_require(self, value):
         items = [value] if isinstance(value, str) else value

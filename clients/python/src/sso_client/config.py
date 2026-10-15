@@ -25,7 +25,7 @@ class SSOConfig:
     client_ip_header: str = ""  # e.g. "cf-connecting-ip"; only from trusted proxies
     timeout: float = 2.0
     connect_timeout: float = 1.0
-    retries: int = 2
+    retries: int = 1  # at most one retry: a hung SSO costs <= 2 x timeout
     cache_ttl: float = 30.0
     cache_size: int = 10_000
     allow_http: bool = False
@@ -66,7 +66,7 @@ class SSOConfig:
                 base_url=e.get("SSO_BASE_URL", ""), client_id=e.get("SSO_CLIENT_ID", ""), client_secret=secret,
                 trusted_proxies=e.get("SSO_TRUSTED_PROXIES", ""),
                 client_ip_header=e.get("SSO_CLIENT_IP_HEADER", "").strip(), timeout=float(e.get("SSO_TIMEOUT", "2.0")),
-                retries=int(e.get("SSO_RETRIES", "2")), cache_ttl=float(e.get("SSO_CACHE_TTL", "30")),
+                retries=int(e.get("SSO_RETRIES", "1")), cache_ttl=float(e.get("SSO_CACHE_TTL", "30")),
                 allow_http=_bool(e.get("SSO_ALLOW_HTTP", "false")))
         except ValueError as exc:
             raise SSOConfigError(str(exc)) from None

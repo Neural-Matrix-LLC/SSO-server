@@ -151,7 +151,7 @@ class CheckResult:
 |---|---|---|
 | Cache | TTL `SSO_CACHE_TTL=30` s (max 30, enforced) | Only `active=true` results. Key = `sha256(token) + ":" + ip`. TTL also capped at token `exp`. Pluggable backend (in-process LRU default, 10k entries). |
 | Timeout | `SSO_TIMEOUT=2.0` s (connect 1 s) | Per attempt. |
-| Retries | 2 retries, exponential backoff 0.1/0.3 s + jitter | Only on connect errors, timeouts, 502/503/504. Never on 4xx. Honour `Retry-After` on 429 up to the timeout budget, otherwise fail. |
+| Retries | 1 retry by default (backoff 0.1 s + jitter; 0.3 s for a second one if configured) | Only on connect errors, timeouts, 502/503/504. Never on 4xx. Honour `Retry-After` on 429 up to the timeout budget, otherwise fail. |
 | SSO unreachable | **fail closed** (`SSOUnavailable` → adapters return **503** + `Retry-After: 5`) | `SSO_FAIL_MODE=closed` (default) or `cached` (serve a cached active result up to `SSO_STALE_TTL`, default 0 = off). No `open` mode. |
 | Circuit breaker | open after 5 consecutive failures for 10 s | Avoids pile-up while SSO is down; requests fail fast with 503. |
 
@@ -195,7 +195,7 @@ design §6.3.
 | `SSO_TRUSTED_PROXIES` | no | empty (trust nobody) | Comma-separated IPs/CIDRs |
 | `SSO_CLIENT_IP_HEADER` | no | empty | Trusted-proxy client-IP header (e.g. `cf-connecting-ip`, `x-real-ip`), §3 |
 | `SSO_TIMEOUT` | no | `2.0` | Seconds per attempt |
-| `SSO_RETRIES` | no | `2` | |
+| `SSO_RETRIES` | no | `1` | default timeout 2 s: a hung SSO costs <= ~4.1 s |
 | `SSO_CACHE_TTL` | no | `30` | Seconds, 0 disables, capped at 30 |
 | `SSO_FAIL_MODE` | no | `closed` | `closed` \| `cached` |
 | `SSO_LOCAL_PRECHECK` | no | `false` | Needs `[jwt]` |
@@ -250,14 +250,16 @@ FastAPI:
 ```python
 from fastapi import Depends, FastAPI
 from sso_client import CheckResult
-from sso_client.adapters.fastapi import SSO, require_permission
+from sso_client.adapters.fastapi import SSO
 
 app = FastAPI()
 sso = SSO.from_env()            # reads SSO_* env vars, AsyncSSOClient inside
-sso.install(app)                # client-IP middleware + exception handlers
+sso.install(app)                # exception handlers only (401 / 403 / 503 JSON); no middleware
 
+# require_permission is a method of the SSO instance (there is no module-level function);
+# the client IP is derived per request inside the dependency
 @app.get("/pages")
-async def pages(user: CheckResult = Depends(require_permission("application.app1"))):
+async def pages(user: CheckResult = Depends(sso.require_permission("application.app1"))):
     return {"user": user.user.username}
 ```
 

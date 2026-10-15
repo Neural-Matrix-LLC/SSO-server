@@ -282,3 +282,22 @@ def test_introspect_malformed_claims_are_inactive_not_500(api, user, service, ov
 
     r = _introspect(api, sign(claims(user.pk, **over)))
     assert r.status_code == 200 and r.json() == {"active": False}
+
+
+@pytest.mark.parametrize("bad_ip", [5, 1.5, True, ["203.0.113.7"], {"ip": "203.0.113.7"}, "1" * 129,
+                                    "203.0.113.7" + " " * 200])
+def test_introspect_non_string_or_overlong_ip_is_no_ip_not_400(api, user, service, bad_ip):
+    """V12B-01: treated exactly like an absent ip (unbound token: active, ip_match null)."""
+    t = _login(api)
+    r = _introspect(api, t["access_token"], ip=bad_ip)
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True and body["ip_match"] == _introspect(api, t["access_token"]).json()["ip_match"]
+
+
+def test_introspect_bad_ip_on_a_bound_token_equals_absent_ip(api, user, service):
+    """No IP for an IP-bound token behaves as before for an absent ip (design §4.4)."""
+    t = _login(api)
+    absent = _introspect(api, t["access_token"]).json()
+    weird = _introspect(api, t["access_token"], ip=12345).json()
+    assert {k: absent.get(k) for k in ("active", "ip_match")} == {k: weird.get(k) for k in ("active", "ip_match")}

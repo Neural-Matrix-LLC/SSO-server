@@ -70,6 +70,13 @@ class SSOMiddleware:
         request.sso = SimpleLazyObject(lambda: check_request(request))
         return self.get_response(request)
 
+    def process_exception(self, request, exception):
+        """V12B-02: a view reading the lazy ``request.sso`` without ``@require_permission`` gets the
+        same JSON 401 / 403 / 503 (+ Retry-After) as the decorator, never a 500."""
+        if isinstance(exception, SSOError):
+            return _json_error(exception)
+        return None
+
 
 def _json_error(exc: SSOError) -> JsonResponse:
     status, body, headers = error_response(exc)

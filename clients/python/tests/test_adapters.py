@@ -227,3 +227,69 @@ def test_adapters_honour_client_ip_header(django_setup):
     c = fapp.test_client()
     assert c.get("/ip", headers={"CF-Connecting-IP": A}, environ_base={"REMOTE_ADDR": "127.0.0.1"}).get_json() == {"ip": A}
     assert c.get("/ip", headers={"CF-Connecting-IP": A}, environ_base={"REMOTE_ADDR": B}).get_json() == {"ip": B}
+
+
+@pytest.mark.parametrize("state,status", [("down", 503), ("revoked", 401), ("none", 401)])
+def test_django_lazy_request_sso_without_decorator_is_json_not_500(django_setup, state, status):
+    """V12B-02: through Django's real handler (process_exception), not a hand-called middleware."""
+    from django.test import Client, override_settings
+
+    from sso_client.adapters import django as adapter
+
+    fake = FakeSSO()
+    adapter.set_client(fake.client(retries=0))
+    try:
+        tok = fake.issue("alice", ip=A)
+        headers = {} if state == "none" else {"HTTP_AUTHORIZATION": f"Bearer {tok}"}
+        if state == "down":
+            fake.down()
+        if state == "revoked":
+            fake.revoke(tok)
+        with override_settings(ROOT_URLCONF="tests.dj_lazy_urls",
+                               MIDDLEWARE=["sso_client.adapters.django.SSOMiddleware"]):
+            c = Client(raise_request_exception=False)
+            r = c.get("/plain", REMOTE_ADDR=A, **headers)
+            assert r.status_code == status and r["Content-Type"] == "application/json", r.content
+            if status == 503:
+                assert r["Retry-After"] == "5" and json.loads(r.content) == {"detail": "sso_unavailable"}
+            fake.up()
+            assert c.get("/boom", REMOTE_ADDR=A, **headers).status_code == 500  # other errors untouched
+    finally:
+        adapter.set_client(None)
+
+
+def test_default_timeout_and_retries():
+    from sso_client import SSOConfig
+
+    cfg = SSOConfig(base_url="https://sso.example", client_id="c", client_secret="s")
+    assert cfg.timeout == 2.0 and cfg.retries == 1
+    env = SSOConfig.from_env({"SSO_BASE_URL": "https://sso.example", "SSO_CLIENT_ID": "c",
+                              "SSO_CLIENT_SECRET": "s"})
+    assert env.timeout == 2.0 and env.retries == 1
+
+
+def test_default_retry_count_on_a_dead_sso():
+    """One retry by default: two attempts, then SSOUnavailable."""
+    import httpx
+
+    from sso_client import SSOClient, SSOConfig, SSOUnavailable
+
+    hits = []
+
+    def handler(request):
+        hits.append(1)
+        raise httpx.ConnectError("refused", request=request)
+
+    c = SSOClient(SSOConfig(base_url="https://sso.example", client_id="c", client_secret="s"),
+                  http=httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(SSOUnavailable):
+        c.check("tok", A)
+    assert len(hits) == 2
+
+
+def test_every_adapter_503_carries_retry_after():
+    from sso_client import SSOProtocolError, SSOUnavailable, error_response
+
+    for exc in (SSOUnavailable("x"), SSOProtocolError("y", 500)):
+        status, _, headers = error_response(exc)
+        assert status == 503 and headers["Retry-After"] == "5"

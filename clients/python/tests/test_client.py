@@ -153,7 +153,7 @@ def test_retry_then_success_and_timeout():
         return httpx.Response(200, json={"active": True, "sub": "1", "perms": []})
 
     from sso_client import SSOClient
-    c = SSOClient(SSOConfig("https://sso.t", "i", "s"), http=httpx.Client(transport=httpx.MockTransport(handler)))
+    c = SSOClient(SSOConfig("https://sso.t", "i", "s", retries=2), http=httpx.Client(transport=httpx.MockTransport(handler)))
     assert c.check("t", A).active and len(seen) == 3
     c.close()
 

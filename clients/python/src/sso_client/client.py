@@ -5,7 +5,7 @@ with the service's Basic credentials and returns a CheckResult.
 
 * Cache: only active answers, ``sha256(token):ip``, at most 30 s and never past ``exp``.
 * Fail closed: timeouts, connection errors, 5xx and 429 (after retries) raise SSOUnavailable (adapters: 503).
-  Retries (default 2, backoff 0.1 / 0.3 s + jitter) only for connect errors, timeouts and 502/503/504.
+  Retries (default 1, backoff 0.1 s + jitter; timeout default 2 s) only for connect errors, timeouts and 502/503/504.
 * Raises TokenInactive for ``active:false``, PermissionDenied when a required permission is missing.
 * Tokens, secrets and Authorization headers are never logged (tokens as sha256[:12] only).
 """
