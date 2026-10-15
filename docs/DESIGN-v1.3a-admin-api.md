@@ -197,7 +197,7 @@ Not under `/admin`:
 |---|---|---|
 | `POST /api/v1/auth/service-token` | Basic ServiceClient, body `{"grant_type":"client_credentials"}` | `{access_token, token_type:"Bearer", expires_in:300}` |
 | `GET /api/v1/service/users/inactive?since=<ISO 8601>` | Basic ServiceClient or Bearer service token | `{users:[{id, username, is_active, event, at}], next_since}` |
-| `POST /api/v1/auth/introspect` (v1.2b, extended) | Basic ServiceClient | a service token → `{active, token_type:"service", sub:"svc:<id>", client_id_subject, perms, app, exp, iat}` |
+| `POST /api/v1/auth/introspect` (v1.2b, extended) | Basic ServiceClient | a service token → `{active, token_type:"service", sub:"svc:<id>", subject_client_id, perms, app, exp, iat}` |
 
 ### 4.1 Resource shapes
 
@@ -290,9 +290,10 @@ sequenceDiagram
 
 - Claims: `iss`, `aud`, `exp` (`SSO_SERVICE_TOKEN_TTL_SECONDS`, default 300), `iat`, `jti`, `token_type="service"`,
   `typ="service"`, `sub="svc:<client_id>"`, `client_id`, `app` (`app_codename` or null), `perms` (the client's
-  granted `application.*`). No refresh token, no `cip`, no `sid`; `SSO_IP_BINDING_MODE` does not apply.
-- Introspect returns `active:false` once the client is deactivated, deleted, or its secret was rotated after `iat`
-  (`ServiceClient.secret_rotated_at`).
+  granted `application.*`), `rot` (secret generation: microsecond timestamp of the last rotation, 0 if never). No refresh token, no `cip`, no `sid`; `SSO_IP_BINDING_MODE` does not apply.
+- Introspect returns `active:false` once the client is deactivated, deleted, or its secret was rotated after the token was issued (`rot` claim ≠ current generation)
+  (`ServiceClient.secret_rotated_at`, compared through the `rot` claim, so a token issued in the same second
+  as the rotation is also dead).
 - A service token is **not** accepted by the admin API, `/me` or `/logout-all`.
 - Throttle scope `service_token` (default 60/min per client_id).
 

@@ -501,6 +501,24 @@ per-username throttle still applies) - rotate it with `create_service_client <id
 > `auth_group_permissions` from the backup). Tell the myFinance maintainers never to run
 > `remove_stale_contenttypes` (or to answer "no" for `application`).
 
+## 6b. Admin REST API and service tokens (v1.3a)
+
+Full reference: [docs/API-REFERENCE-MANUAL.md §8](docs/API-REFERENCE-MANUAL.md#8-admin-rest-api-v13a), design:
+[docs/DESIGN-v1.3a-admin-api.md](docs/DESIGN-v1.3a-admin-api.md).
+
+1. `python manage.py migrate` (adds `sso.0003_v13a`, `application.0002_v13a`, and the code-defined
+   `application.sso_admin` permission).
+2. Grant `application.sso_admin` to your admin account (Django admin → Users → permissions, or a group). Superusers
+   are admins without the grant.
+3. Log in natively, then call `/api/v1/admin/...` with the Bearer token. Destructive calls need
+   `POST /api/v1/admin/reauth {"password"}` first and `X-SSO-Reauth: <token>` (5 min).
+4. Services: `POST /api/v1/auth/service-token` with Basic `client_id:secret` and `{"grant_type":"client_credentials"}`.
+5. Import an app's permissions: `python scripts/sso_permissions_to_json.py sso_permissions.py > p.json`, then
+   `PUT /api/v1/admin/apps/<app>/permissions?dry_run=true` (never deletes; missing ones become deprecated).
+
+New settings: `SSO_ADMIN_REAUTH_SECONDS` (300), `SSO_SERVICE_TOKEN_TTL_SECONDS` (300), `SSO_THROTTLE_ADMIN`
+(120/min), `SSO_THROTTLE_ADMIN_REAUTH` (5/min), `SSO_THROTTLE_SERVICE_TOKEN` (60/min).
+
 ## 8. API summary
 
 | Method and path | Auth | Notes |

@@ -606,7 +606,7 @@ Service-side endpoints (not under `/admin`):
 |---|---|---|---|
 | `POST /api/v1/auth/service-token` | Basic `client_id:client_secret` | `{"grant_type":"client_credentials"}` | 200 `{"access_token","token_type":"Bearer","expires_in":300}`; bad client 401 `invalid_client`; other grant 400 `unsupported_grant_type` |
 | `GET /api/v1/service/users/inactive` | Basic ServiceClient or Bearer service token | `since` (ISO 8601, required) | 200 `{"users":[{"id","username","event","at"}],"next_since"}` (max 500, oldest first) |
-| `POST /api/v1/auth/introspect` | Basic ServiceClient | `{"token"}` (service token) | 200 `{"active":true,"token_type":"service","sub":"svc:<id>","client_id_subject","app","perms","iat","exp", …}` or `{"active":false}` |
+| `POST /api/v1/auth/introspect` | Basic ServiceClient | `{"token"}` (service token) | 200 `{"active":true,"token_type":"service","sub":"svc:<id>","subject_client_id","app","perms","iat","exp", …}` or `{"active":false}` |
 
 ### 8.3 Shapes
 
@@ -643,7 +643,7 @@ Payload `{"app_name","description"?,"version","permissions":[{"codename","name",
 ### 8.5 Service token claims
 
 `iss`, `aud`, `exp` (+300 s), `iat`, `jti`, `token_type="service"`, `typ="service"`, `sub="svc:<client_id>"`,
-`client_id`, `app`, `perms`. No `cip`, no `sid`, no refresh token; IP binding never applies. Verify by JWKS
+`client_id`, `app`, `perms`, `rot` (secret generation; tokens from before a rotation are inactive). No `cip`, no `sid`, no refresh token; IP binding never applies. Verify by JWKS
 (check `token_type == "service"`) or by introspect (also catches deactivation and secret rotation).
 
 ### 8.6 Error codes added in v1.3a
