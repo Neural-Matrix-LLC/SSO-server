@@ -184,3 +184,57 @@ automatically: grant `application.app1` explicitly (README quick start step 8).
 
 After any `.env` change, recreate the affected service (`docker compose up -d --force-recreate <service>`);
 a plain `restart` does not re-read `.env`.
+
+## 9. Upgrading the database
+
+Use this when the database is already in use by an older SSO version (for example v1.2b) and you deploy a newer one
+(v1.3: admin API, devices, webhooks). `scripts/upgrade_db.sh` does steps 6 and 7's checks in one go. It is safe to
+re-run: when nothing is pending it only checks.
+
+```bash
+git pull                                            # the new code; .env stays as it is
+read -rs -p 'sso_migrator password: ' SSO_DBPWD && export SSO_DBPWD && echo
+scripts/upgrade_db.sh --plan                        # dry run: DB reachable? what would be applied?
+scripts/upgrade_db.sh                               # build image, backup, migrate, verify (asks before migrating)
+unset SSO_DBPWD
+docker compose up -d --build                        # restart web; also starts the new `webhooks` worker
+```
+
+What it does, in order (exit code is non-zero and nothing more happens if a step fails):
+
+1. **Pre-check**: `docker compose build web`, then `docker/dbcheck.py --strict` in a `web` container (same path
+   to MySQL as the server: step 4 and 5 problems show up here, with the same error numbers as in Troubleshooting).
+2. **State**: `showmigrations` for `sso`, `application`, `token_blacklist` and `migrate --plan`. It **stops** if
+   the plan contains any other app (dcWebUsers is shared with myFinance).
+3. **Backup** (default on, `--no-backup` to skip): `mysqldump` of all `sso_*` and `token_blacklist_*` tables and the
+   SSO rows of `django_migrations`, to `backups/sso-tables-dcWebUsers-<timestamp>.sql.gz` (folder mode 700). The dump
+   runs in a `mysql:8.4` client container on the compose `edge` network, so the `sso_migrator@'172.31.250.%'`
+   account from step 4 works. The password goes into a temporary mode-600 options file that is deleted on exit;
+   it is never on a command line. The dump contains service secret hashes: keep it private. This is **not** a
+   backup of myFinance's tables; take the full dump from README §5 too if you want one.
+4. **Migrate** as `sso_migrator` (`migrate --noinput`).
+5. **Post-check**: `manage.py sso_schema_check` (every SSO migration applied, every v1.1 to v1.3c table and
+   column present) and row counts of `auth_user`, groups and the SSO tables unchanged.
+6. **Summary**.
+
+Options: `--plan`, `--no-backup`, `--backup-dir DIR`, `--no-build`, `-y` (no question), `--venv [DIR]` (bare venv
+on the host instead of compose; then `SSO_DBHOST=host.docker.internal` is read as `127.0.0.1` and the MySQL account
+must allow `localhost`), `--dump-with host|docker`, `--mysql-image`. `scripts/upgrade_db.sh --help` lists them.
+
+New tables and columns per version (raw SQL for a DBA, with rollback notes: [db/upgrade-v1.2-to-v1.3.sql](db/upgrade-v1.2-to-v1.3.sql)):
+
+| Version | Migration | New in the database |
+|---|---|---|
+| v1.2a | `sso.0002_v12a_service_registry_sessions` | `sso_serviceclient.app_codename`, `.notify_url`; table `sso_revokedsession` |
+| v1.3a | `sso.0003_v13a` | `sso_serviceclient.secret_rotated_at`; tables `sso_serviceclient_permissions`, `sso_adminauditlog`, `sso_adminreauth` |
+| v1.3a | `application.0002_v13a` | table `sso_application`; `sso_application_permission_record.app_codename`, `.deprecated_at`, `.description` |
+| v1.3a | `sso.0004_v13a_tombstone` | table `sso_usertombstone` |
+| v1.3b | `sso.0005_v13b` | `sso_serviceclient.kind`, `.owner_id`, `.device_name`, `.public_key`, `.public_key_fingerprint`, `.last_used`, `.can_delegate`, `.can_register_devices` |
+| v1.3c | `sso.0006_v13c` | `sso_serviceclient.notify_events`, `.notify_secret_enc`; tables `sso_webhookevent`, `sso_webhookdelivery` |
+
+All changes only add tables, columns and indexes; no existing row is changed. The post-migrate step adds rows to
+`auth_permission` / `django_content_type` and the code-defined permission `application.sso_admin`. After the
+upgrade:
+
+- Grant `application.sso_admin` (and Django **staff status**) to the people who use the admin API (v1.3a).
+- Add `SSO_WEBHOOK_SECRET_KEY` to `.env` before you set any webhook secret (`.env.example`, v1.3c).

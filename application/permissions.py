@@ -94,6 +94,11 @@ def sync_after_migrate(sender, using="default", **kwargs) -> None:
     ``migrate contenttypes`` on an empty database (README §7 dev sequence), before our tables exist.
     Skip quietly until they do; the run that creates them (a full ``migrate``) syncs.
     """
+    if any(backwards for _migration, backwards in (kwargs.get("plan") or [])):
+        # a rollback (``migrate sso 0002`` / ``migrate application 0001``, docs/db/upgrade-v1.2-to-v1.3.sql): the
+        # schema is now older than this code's models, so reading them would fail after the DDL already ran
+        logger.info("application permission sync skipped on %r: backward migration (rollback)", using)
+        return
     with connections[using].cursor() as cursor:
         present = set(connections[using].introspection.table_names(cursor))
     missing = sorted(_required_tables() - present)

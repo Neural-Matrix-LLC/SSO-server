@@ -3,6 +3,35 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-10-15 — devops: database upgrade script v1.2 → v1.3 (`scripts/upgrade_db.sh`)
+
+**Goal.** Upgrade an existing dcWebUsers database (e.g. at v1.2b: sso 0002, application 0001) to v1.3 (sso
+0003-0006, application 0002) safely and repeatably, on WSL with Docker compose or from a bare venv, plus raw SQL
+for a DBA.
+
+**Implementation.** `scripts/upgrade_db.sh`: pre-check (`docker/dbcheck.py --strict`, new exit-code mode),
+`showmigrations` + `migrate --plan` with a stop if any shared app would change (`--allow-shared-apps` only for
+empty test databases), backup of the SSO-owned tables + their `django_migrations` rows with mysqldump (default on;
+credentials only in a temporary mode-600 `--defaults-extra-file`; in compose mode the dump container joins the
+`edge` network so the `sso_migrator@172.31.250.%` grant works), `migrate`, post-check with the new read-only
+`manage.py sso_schema_check` (all SSO migrations applied, every v1.1-v1.3c table/column present; `--counts`) and
+unchanged row counts; `--plan` dry run; idempotent; non-zero exit on failure. `docs/db/upgrade-v1.2-to-v1.3.sql`:
+`sqlmigrate` output (MySQL 8.4) for sso 0002-0006 and application 0002 with `django_migrations` inserts,
+verification queries and rollback notes. Docs: docs/SSO-Setup.md §9, README §5a. `backups/` git- and docker-ignored.
+
+**Bug found while testing the rollback.** `migrate application 0001` with the v1.3 code failed after the DDL had run:
+the `application` post_migrate permission sync read the v1.3 models on the rolled-back schema (`Unknown column
+...description`). Fix: the sync is skipped when the migrate plan contains backward steps
+(`application/permissions.py`). Also documented: a Django rollback needs DROP granted *before* it starts.
+
+**Tests.** `sso/tests/test_schema_check.py` (7). On MySQL 8.4.11 and 8.0.46 (Docker, host network): v1.2b database
+with sample data → `--plan` (no change) → upgrade (backup restorable, data of every pre-existing table identical,
+schema OK) → re-run (nothing to apply) → wrong password (exit 1) → fresh database with only the shared apps
+(all 20 SSO migrations) → empty database (stop, exit 3); then the v1.3 server as the DML-only `sso_app` on the
+upgraded database: black-box suite 47/47 and a pre-upgrade service client still introspects. Compose mode tested on
+8.0 with the production image. DBA SQL applied by hand on 8.4 → `migrate` has nothing to do, `sso_schema_check` OK,
+no model drift; SQL rollback and Django rollback both bring the v1.2b code back to a clean state.
+
 ## 2026-10-15 — docs: WSL2 setup guide (`docs/SSO-Setup.md`)
 
 **Goal.** Write down the complete local setup for the production compose stack on WSL2 (Docker Engine and

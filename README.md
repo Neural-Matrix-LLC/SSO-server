@@ -353,6 +353,31 @@ either** once SSO is migrated: see the warning in §6a.
 The container **never** runs migrations on its own. The runtime DB account needs only `SELECT, INSERT,
 UPDATE, DELETE`. That covers `flushexpiredtokens`, `last_login`, and the PBKDF2 rehash on login.
 
+### 5a. Upgrading an existing database (e.g. v1.2b to v1.3)
+
+`scripts/upgrade_db.sh` runs the procedure above for an upgrade: pre-check (`docker/dbcheck.py --strict`),
+`showmigrations` + `migrate --plan` (stops if any app other than `sso`, `application`, `token_blacklist` would
+change), backup of the SSO-owned tables (default on), `migrate`, then `manage.py sso_schema_check` and unchanged row
+counts. Idempotent; non-zero exit on any failure. Credentials only from `SSO_DBUSER` (default `sso_migrator`) /
+`SSO_DBPWD` in the environment or a hidden prompt.
+
+```bash
+read -rs -p 'sso_migrator password: ' SSO_DBPWD && export SSO_DBPWD && echo
+scripts/upgrade_db.sh --plan        # dry run
+scripts/upgrade_db.sh               # compose: build, backup to ./backups, migrate, verify
+scripts/upgrade_db.sh --venv .venv  # without Docker (venv with mysqlclient; MySQL account must allow this host)
+unset SSO_DBPWD
+```
+
+New tables/columns: v1.2a `sso_revokedsession`, `sso_serviceclient.app_codename/notify_url`; v1.3a
+`sso_adminauditlog`, `sso_adminreauth`, `sso_serviceclient_permissions`, `sso_application`, `sso_usertombstone`,
+`sso_serviceclient.secret_rotated_at`, `sso_application_permission_record.app_codename/deprecated_at/description`;
+v1.3b `sso_serviceclient.kind/owner_id/device_name/public_key/public_key_fingerprint/last_used/can_delegate/
+can_register_devices`; v1.3c `sso_webhookevent`, `sso_webhookdelivery`, `sso_serviceclient.notify_events/
+notify_secret_enc`. Only additions. DBA SQL and rollback notes:
+[docs/db/upgrade-v1.2-to-v1.3.sql](docs/db/upgrade-v1.2-to-v1.3.sql); step-by-step for WSL:
+[docs/SSO-Setup.md §9](docs/SSO-Setup.md#9-upgrading-the-database).
+
 ## 6. Registering a ServiceClient (for `/api/v1/auth/introspect`)
 
 * Admin: `https://<host>/<SSO_ADMIN_PATH>sso/serviceclient/add/`. Enter `client_id` (a slug) and a name,

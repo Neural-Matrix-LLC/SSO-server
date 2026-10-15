@@ -34,3 +34,6 @@ mysql-ca/*
 
 # QA raw run logs
 qa/run/
+
+# scripts/upgrade_db.sh dumps (contain secret hashes)
+backups/
