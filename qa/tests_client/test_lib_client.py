@@ -197,8 +197,8 @@ def stub():
     srv.shutdown(); srv.server_close()
 
 
-@pytest.mark.parametrize("status,hits,exc", [(500, 1, SSOUnavailable), (502, 3, SSOUnavailable),
-                                             (503, 3, SSOUnavailable), (504, 3, SSOUnavailable),
+@pytest.mark.parametrize("status,hits,exc", [(500, 1, SSOUnavailable), (502, 2, SSOUnavailable),
+                                             (503, 2, SSOUnavailable), (504, 2, SSOUnavailable),
                                              (429, 1, SSOUnavailable), (400, 1, SSOProtocolError),
                                              (200, 1, SSOProtocolError)])
 def test_V12B_LIB_FAIL_01_status_handling(stub, status, hits, exc):
@@ -215,7 +215,7 @@ def test_V12B_LIB_FAIL_02_connection_refused_retries_then_unavailable():
     t0 = time.monotonic()
     with pytest.raises(SSOUnavailable):
         client(f"http://127.0.0.1:{CLOSED}").check("tok", "1.2.3.4")
-    assert 0.35 < time.monotonic() - t0 < 2, "2 retries with 0.1/0.3 s backoff"
+    assert 0.08 < time.monotonic() - t0 < 2, "1 retry (b3dbd2a default, accepted) with 0.1 s backoff + jitter"
 
 
 def test_V12B_LIB_FAIL_03_timeout_bounded(stub):

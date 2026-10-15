@@ -83,3 +83,31 @@ No listeners on 8050-8069. All servers were stopped by recorded PID.
 
 ## Verdict
 **PASS with 2 Low defects and 1 Info item.** None of them blocks release. V12B-01 should be fixed before ENFORCE is used in production.
+
+# Re-verify @ b3dbd2a (2026-10-14, 18:05-19:00 PT)
+Python 3.13.16. Fresh venvs: dev /workspace/tmp/v12b-dev-b3db (from requirements.lock + dev requirements) and lib
+/workspace/tmp/v12b-lib2 (uv, `sso-client[fastapi,flask,django] @ git+file://…@b3dbd2a#subdirectory=clients/python`;
+fresh-venv install from git: OK). The older venvs had been damaged by a box reset.
+
+| Area | binding OFF (NOIP) | binding ON (ENFORCE, with ip) |
+|---|---|---|
+| Developer suite (SQLite) | 379 passed / 7 skipped | n/a |
+| Functional round (v1.1 + v1.2a regression + v1.2b) | **395 passed / 0 failed / 2 skipped** | **395 / 0 / 2** |
+| … of which v1.2b: BIND 24, BFF 6, INTRO 17, PROXY 19, CACHE 4, HDR 12 | all pass | all pass |
+| Throttle phase | 5 / 5 | 5 / 5 |
+| qa/tests_client (sso-client against live SSOs) | **124 / 124** | (ENFORCE SSO on 8065) |
+
+- **V12B-01: fixed.** The 5 INTRO cases now pass in both modes: `ip` over 128 chars, list, object, bool → treated as
+  no IP. Under ENFORCE that means inactive + revoke, not a 400.
+- **V12B-02: fixed.** ADP-05 now requires the lazy `request.sso` without a token to give a JSON 401, and an
+  unreachable SSO to give a JSON 503 `sso_unavailable` with Retry-After 5. Both pass.
+- **V12B-03: fixed.** The §13 FastAPI sample was extracted from the design doc and run against sso-client: it runs
+  without error. The comment now says install() adds exception handlers only.
+- Accepted expectation change (Philip): the sso-client default is now 1 retry. V12B_LIB_FAIL_01[502/503/504] now
+  expect 2 hits (was 3). FAIL_02 (connection refused) now expects one retry with a 0.1 s backoff (0.08-2 s). Both pass.
+- MySQL 8.4: **not run.** The box reset removed Docker, so a quick run is no longer cheap (it needs a reinstall, image
+  pulls and a build). The last MySQL result is 378/0 at b7570cf. b3dbd2a touches the serializer, the Django adapter
+  and docs only; the developer suite above covers the MySQL-only tests' SQLite counterparts.
+- Teardown: servers stopped by recorded PID; nothing listens on 8050-8069. No containers were used (Docker is absent).
+
+**Verdict @ b3dbd2a: PASS. No open v1.2b defects.**

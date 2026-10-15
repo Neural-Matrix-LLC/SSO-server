@@ -196,9 +196,11 @@ def test_V12B_LIB_ADP_05_django_lazy_request_sso(sso_enf, mk_user):
     tok = login(sso_enf, mk_user("lazy"), xff=USER_IP)["access_token"]
     st, body, _ = call("lazy", tok)
     assert st == 200 and body == {"active": True}
-    st, _, _ = call("lazy")       # no token: SSOError from the lazy object, unhandled -> 500 (documented)
-    print("ADP-05 lazy request.sso without token ->", st)
-    assert st in (401, 500)
+    st, _, r = call("lazy")       # V12B-02 fix (b3dbd2a): no token -> JSON 401, not 500
+    assert st == 401, st
+    down = django_app(CLOSED)     # SSO unreachable through the lazy object -> JSON 503 + Retry-After
+    st, body, r = down("lazy", tok)
+    assert st == 503 and body == {"detail": "sso_unavailable"} and _hdr(r, "Retry-After") == "5", (st, body)
 
 
 def test_V12B_LIB_ADP_06_custom_header_through_adapters(make, sso_enf, mk_user):
