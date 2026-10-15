@@ -49,7 +49,7 @@ def test_single_app_migrate_on_an_empty_db_then_full_migrate(tmp_path):
     db = tmp_path / "fresh.sqlite3"
     _ok(_manage(db, "migrate", "contenttypes", "-v", "0"))
     _ok(_manage(db, "migrate", "-v", "0"))
-    assert _app_perms(db) == [("app1", "app1")]
+    assert _app_perms(db) == [("app1", "app1"), ("sso_admin", "sso_admin")]
 
 
 def test_readme_section_7_sequence_end_to_end(tmp_path):
@@ -61,7 +61,7 @@ def test_readme_section_7_sequence_end_to_end(tmp_path):
     planned = {line.split(".")[0] for line in plan.stdout.splitlines() if line and not line.startswith((" ", "Planned"))}
     assert planned == {"application", "sso", "token_blacklist"}
     _ok(_manage(db, "migrate", "-v", "0"))
-    assert _app_perms(db) == [("app1", "app1")]
+    assert _app_perms(db) == [("app1", "app1"), ("sso_admin", "sso_admin")]
     again = _manage(db, "migrate", "--plan")
     _ok(again)
     assert "No planned migration operations" in again.stdout

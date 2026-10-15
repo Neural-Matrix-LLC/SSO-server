@@ -68,7 +68,13 @@ def test_application_migration_creates_no_shared_tables(db):
         if app != "application":
             continue
         for op in migration.operations:
+            if isinstance(op, ops.AddField):  # v1.3a: new nullable columns on our own registry table
+                assert op.model_name == "applicationpermissionrecord", op
+                continue
+            if isinstance(op, ops.AlterModelOptions):  # v1.3a: sso_admin added to Meta.permissions
+                assert op.name == "applicationaccess", op
+                continue
             assert isinstance(op, ops.CreateModel), op
             if not op.options.get("proxy"):
                 created.append(op.options["db_table"])
-    assert sorted(created) == ["sso_application_access", "sso_application_permission_record"]
+    assert sorted(created) == ["sso_application", "sso_application_access", "sso_application_permission_record"]

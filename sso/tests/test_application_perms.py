@@ -46,7 +46,7 @@ def test_app1_permission_created_by_migrate():
     assert p.content_type == ContentType.objects.get(app_label="application", model="applicationaccess")
     assert ApplicationAccess.objects.count() == 0  # anchor table never holds rows
     # no add/change/delete/view noise on the anchor content type
-    assert set(Permission.objects.filter(content_type=p.content_type).values_list("codename", flat=True)) == {"app1"}
+    assert set(Permission.objects.filter(content_type=p.content_type).values_list("codename", flat=True)) == {"app1", "sso_admin"}  # v1.3a: sso_admin is code-defined too
     # recorded in the SSO-side registry by the post-migrate step
     rec = ApplicationPermissionRecord.objects.get(codename="app1")
     assert rec.permission_id == p.pk and str(rec) == "application.app1"
@@ -126,9 +126,9 @@ def test_flag_true_restores_all_apps_for_superusers(api, make_user, settings):
     settings.SSO_SUPERUSER_ALL_APPS = True
     ensure_permission("app2", "Can use app2")
     u = make_user(is_superuser=True)
-    assert user_app_perms(u) == ["application.app1", "application.app2"]  # no auth.*/sso.* permissions
-    assert access_claims(login(api).json()["access_token"])["perms"] == [
-        "application.app1", "application.app2"]
+    all_apps = ["application.app1", "application.app2", "application.sso_admin"]
+    assert user_app_perms(u) == all_apps  # no auth.*/sso.* permissions
+    assert access_claims(login(api).json()["access_token"])["perms"] == all_apps
     settings.SSO_SUPERUSER_ALL_APPS = False
     assert access_claims(login(api).json()["access_token"])["perms"] == []
 
@@ -279,7 +279,7 @@ def test_sync_recreates_only_code_defined_permissions_after_content_type_deleted
     assert not Permission.objects.filter(content_type__app_label="application").exists()
     caplog.set_level(logging.ERROR, logger="sso.application")
     lost = sync_permissions()
-    assert lost == ["app1", "app2"]
+    assert lost == ["app1", "sso_admin", "app2"]
     assert app_perm("app1")
     assert not Permission.objects.filter(content_type__app_label="application", codename="app2").exists()
     assert "ALL GRANTS OF THESE PERMISSIONS WERE LOST" in caplog.text
@@ -309,7 +309,7 @@ def test_migrate_runs_the_sync(make_user, caplog):
     call_command("migrate", "application", verbosity=0)
     assert app_perm("app1")
     assert not Permission.objects.filter(content_type__app_label="application", codename="app2").exists()
-    assert "application.app1, application.app2 were deleted" in caplog.text
+    assert "application.app1, application.sso_admin, application.app2 were deleted" in caplog.text
 
 
 def test_admin_lists_only_application_permissions(make_user, client):
