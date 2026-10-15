@@ -46,6 +46,9 @@ class ServiceClient(models.Model):
     last_used = models.DateTimeField(null=True, blank=True)
     can_delegate = models.BooleanField(default=False, help_text="May call services on behalf of a user.")
     can_register_devices = models.BooleanField(default=False, help_text="May register device clients (relay).")
+    # v1.3c webhooks (DESIGN-v1.3c §1): HMAC key encrypted at rest (Fernet), event filter ([] = all)
+    notify_secret_enc = models.TextField(null=True, blank=True, editable=False)
+    notify_events = models.JSONField(default=list, blank=True)
 
     class Meta:
         ordering = ["client_id"]
@@ -172,3 +175,40 @@ class UserTombstone(models.Model):
 
     def __str__(self) -> str:
         return f"user {self.user_id} ({self.username}) deleted {self.deleted_at.isoformat()}"
+
+
+class WebhookEvent(models.Model):
+    """v1.3c outbox: one row per event, written in the transaction of the change (DESIGN-v1.3c §3)."""
+
+    type = models.CharField(max_length=40, db_index=True)
+    created = models.DateTimeField(default=timezone.now, db_index=True)
+    data = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ["-id"]
+
+    def __str__(self) -> str:
+        return f"{self.pk} {self.type}"
+
+
+class WebhookDelivery(models.Model):
+    """v1.3c: one delivery of an event to one service client (DESIGN-v1.3c §4)."""
+
+    STATUSES = ["pending", "sending", "delivered", "failed", "skipped"]
+    event = models.ForeignKey(WebhookEvent, on_delete=models.CASCADE, related_name="deliveries")
+    client = models.ForeignKey(ServiceClient, on_delete=models.CASCADE, related_name="webhook_deliveries")
+    status = models.CharField(max_length=16, default="pending", db_index=True)
+    attempts = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
+    window_start = models.DateTimeField(default=timezone.now)
+    claimed_at = models.DateTimeField(null=True, blank=True)
+    last_status = models.IntegerField(null=True, blank=True)
+    last_error = models.CharField(max_length=200, blank=True, default="")
+    delivered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-id"]
+        indexes = [models.Index(fields=["status", "next_attempt_at"], name="sso_whd_due_idx")]
+
+    def __str__(self) -> str:
+        return f"delivery {self.pk} of event {self.event_id} to {self.client_id}: {self.status}"

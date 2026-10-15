@@ -69,6 +69,37 @@ services:
     restart: unless-stopped
     logging: *default-logging
 
+  webhooks:
+    # v1.3c webhook worker (docs/DESIGN-v1.3c-webhooks.md §6): same image, no HTTP port, outbound HTTPS only.
+    # One or several replicas: rows are claimed with SELECT ... FOR UPDATE SKIP LOCKED.
+    image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
+    user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
+    command: ["python", "manage.py", "run_webhook_worker"]
+    env_file: .env
+    environment:
+      SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
+      SSO_JWT_KEYS_MOUNT: /run/keys
+    volumes:
+      - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
+      - ${SSO_MYSQL_CA_DIR:-./mysql-ca}:/run/mysql-ca:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge      # egress to the services' notify_url endpoints
+      - backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
   redis:
     # Redis 7.2 is the last BSD-licensed line (deployment plan §5 / Q14: Valkey 8 is a drop-in alternative).
     image: redis:7.2.5-alpine

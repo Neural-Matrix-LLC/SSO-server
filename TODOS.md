@@ -22,14 +22,14 @@ Agreed scope for v1.2a / v1.2b / v1.3c is in [docs/DESIGN-v1.2-requirements.md](
 - [x] **v1.2b: Redis cache for revoked sessions** (done on `feat/v1.2b`, shared Django cache) — cache `sid` revocation lookups in Redis so refresh / introspect skip the DB hit.
 - [ ] **sso-client 0.2: deferred library features** — local JWKS pre-check (`[jwt]`), circuit breaker, `cached` fail mode, `Retry-After` on 429, generic WSGI/ASGI middleware classes.
 - [ ] **v1.2b follow-up: llm-wiki-svc on `sso-client`** (branch `feat/sso-client`), incl. `client_ip` on logout.
-- [ ] **v1.3c: encrypt `notify_secret` at rest** (webhook signing secret).
+- [x] **v1.3c: encrypt `notify_secret` at rest** (Fernet, `SSO_WEBHOOK_SECRET_KEY`; on `feat/sso-v1.3`).
 
 ## Phase plan (component order decided 2026-10-15, see [ECOSYSTEM-INTEGRATION.md §9.1](docs/ECOSYSTEM-INTEGRATION.md))
 
 ### 1. SSO-server completion
-- [ ] **v1.3a** ([design](docs/DESIGN-v1.3a-admin-api.md)): admin REST API `/api/v1/admin/…` + `sso_adminauditlog`; step-up reauth (`POST /api/v1/admin/reauth` → `X-SSO-Reauth`); permission import `PUT /api/v1/admin/apps/{app}/permissions` (idempotent, dry-run, never deletes, marks missing deprecated) + `scripts/sso_permissions_to_json.py`; per-service credentials (ServiceClient perms, rotate-secret, `POST /api/v1/auth/service-token`, no IP binding); inactive-users feed `GET /api/v1/service/users/inactive`.
-- [ ] **v1.3b**: device clients `POST /api/v1/devices` (`kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend); on-behalf-of headers; `sso-client` 0.2 (service tokens, on-behalf-of).
-- [ ] **v1.3c**: signed webhooks (`user.suspended` etc.), encrypt `notify_secret` at rest, webhook receiver in `sso-client`. → SSO server complete.
+- [x] **v1.3a** ([design](docs/DESIGN-v1.3a-admin-api.md)): admin REST API `/api/v1/admin/…` + `sso_adminauditlog`; step-up reauth (`POST /api/v1/admin/reauth` → `X-SSO-Reauth`); permission import `PUT /api/v1/admin/apps/{app}/permissions` (idempotent, dry-run, never deletes, marks missing deprecated) + `scripts/sso_permissions_to_json.py`; per-service credentials (ServiceClient perms, rotate-secret, `POST /api/v1/auth/service-token`, no IP binding); inactive-users feed `GET /api/v1/service/users/inactive`.
+- [x] **v1.3b**: device clients `POST /api/v1/devices` (`kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend); on-behalf-of headers; `sso-client` 0.2 (service tokens, on-behalf-of).
+- [x] **v1.3c**: signed webhooks (`user.suspended` etc.), encrypt `notify_secret` at rest, webhook receiver in `sso-client`. → SSO server complete. (v1.3a-c done on `feat/sso-v1.3`, not pushed.)
 
 ### 2. SGMCP migration
 - [ ] **v1.4 (SGMCP + local broker gateway)**: `sso_permissions.py`; API/MCP on `sso-client`; `gateway-relay`, pairing, device credentials, outbound WSS (long-poll fallback), heartbeats + offline alerts, `WAITING_GATEWAY`/halt, `UNKNOWN` in-flight orders + reconcile, one live connection per broker account (cold standby), suspend → stop/delete strategies (positions untouched) + disconnect; `delete_strategy` soft delete, never purge orders/fills, no `DELETE` grant on history tables.

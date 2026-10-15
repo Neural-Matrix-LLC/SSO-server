@@ -687,3 +687,41 @@ On behalf of a user (sso-client 0.2 does this for you):
 curl -s $SVC_B/api/thing -H "Authorization: Bearer $SERVICE_TOKEN_OF_A" \
   -H "X-SSO-User-Token: $USER_TOKEN" -H "X-SSO-Client-IP: 203.0.113.7"
 ```
+
+## 10. Signed webhooks (v1.3c)
+
+Design: [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md). Implemented on `feat/sso-v1.3`. The compose service
+`webhooks` runs `manage.py run_webhook_worker`.
+
+| Method + path | Auth | Request | Response / errors |
+|---|---|---|---|
+| 🔒 `POST /api/v1/admin/services/{client_id}/rotate-notify-secret` | admin + step-up | | 200 `{"client_id","notify_secret"}` (shown once); 400 for a device; 401 `reauth_required` |
+| `PATCH /api/v1/admin/services/{client_id}` | admin | `notify_events`: list of event types, `[]` = all | service, now with `notify_events`, `has_notify_secret`; 400 unknown type |
+| `GET /api/v1/admin/webhooks/events` | admin | `type`, `since` (ISO 8601), `page`, `page_size` | `{id, type, time, data}`, newest first |
+| `GET /api/v1/admin/webhooks/deliveries` | admin | `status` (`pending`, `sending`, `delivered`, `failed`, `skipped`), `client_id`, `event` | `{id, event_id, event_type, client_id, status, attempts, next_attempt_at, last_status, last_error, delivered_at}` |
+| `POST /api/v1/admin/webhooks/deliveries/{id}/redeliver` | admin | | delivery with `status:"pending"`, `attempts:0`; the 24 h window restarts; 404 |
+| `manage.py rotate_notify_secret <client_id>` | operator | | prints the new secret once |
+
+Events: `user.suspended {sub}`, `user.reactivated {sub}`, `user.deleted {sub, username}`,
+`token.revoked {sub, reason[, sid]}` (reasons `logout_all`, `password_change`, `suspended`, `admin`, `inactive`,
+`revoked`; with `sid`: `refresh_reuse`, `ip_mismatch`), `permission.changed` (direct grant `{sub, perm, granted}`,
+group grant `{group, perm, granted}`, membership `{sub, group, granted}`, import `{app, created, updated, deprecated}`),
+`keys.rotated {kids}`.
+
+Request to the receiver:
+
+```http
+POST <notify_url>
+Content-Type: application/json
+X-SSO-Event-Id: 46
+X-SSO-Event-Type: user.suspended
+X-SSO-Timestamp: 1791800123
+X-SSO-Signature: v1=<hex HMAC-SHA256(notify_secret, timestamp + "." + raw body)>
+
+{"id":46,"sub":"42","time":"2026-10-15T09:15:23Z","type":"user.suspended"}
+```
+
+Receiver rules: verify on the raw bytes, accept a timestamp within ±300 s, answer 2xx within 5 s, dedupe on `id`
+(at-least-once, unordered). Anything other than 2xx is retried with backoff `min(2^(n-1), 600)` s plus jitter for
+24 h, then marked `failed`. Redirects are not followed. `sso_client.verify_webhook()` and `WebhookReceiver` do these
+checks.

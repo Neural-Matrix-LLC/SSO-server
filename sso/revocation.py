@@ -35,12 +35,17 @@ def blacklist_all(user) -> int:
     return len(tokens)
 
 
-def revoke_user_tokens(user) -> None:
-    """Every token of ``user`` issued up to now becomes invalid. One transaction."""
+def revoke_user_tokens(user, reason: str | None = "revoked") -> None:
+    """Every token of ``user`` issued up to now becomes invalid. One transaction. ``reason`` (v1.3c) is sent as
+    ``token.revoked``; None = no event (the caller emits a more specific one, e.g. ``user.deleted``)."""
     with transaction.atomic():
         blacklist_all(user)
         UserTokenRevocation.revoke(user)
         drop_reauth(user)
+        if reason:
+            from .webhooks import emit
+
+            emit("token.revoked", sub=str(user.pk), reason=reason)
 
 
 def token_sid(raw: str) -> str | None:
@@ -113,6 +118,9 @@ def revoke_session(user, sid: str, reason: str) -> int:
         family = [t for t in _live_outstanding(user) if token_sid(t.token) == sid]
         BlacklistedToken.objects.bulk_create([BlacklistedToken(token=t) for t in family], ignore_conflicts=True)
         drop_reauth(user, sid)
+        from .webhooks import emit
+
+        emit("token.revoked", sub=str(user.pk), sid=sid, reason=reason)
     _cache_revoked(sid)
     logger.warning(json.dumps({"event": "session_revoked", "reason": reason, "user_id": user.pk,
                                "tokens_blacklisted": len(family)}, sort_keys=True))

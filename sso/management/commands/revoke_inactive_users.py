@@ -33,11 +33,15 @@ class Command(BaseCommand):
         for user in users:
             count += 1
             if not dry_run:
-                revoke_user_tokens(user)
+                revoke_user_tokens(user, "inactive")
         verb = "would revoke" if dry_run else "revoked"
         self.stdout.write(f"{verb} tokens of {count} inactive user(s)")
         pruned = prune_revoked_sessions(dry_run=dry_run)
         self.stdout.write(f"{'would prune' if dry_run else 'pruned'} {pruned} expired revoked-session row(s)")
+        if not dry_run:  # v1.3c: webhook history older than SSO_WEBHOOK_RETENTION_DAYS
+            from sso.webhooks import prune
+
+            self.stdout.write(f"pruned {prune()} old webhook event(s)")
         if not dry_run:  # v1.3a: expired step-up tokens
             from sso.stepup import prune_expired
 

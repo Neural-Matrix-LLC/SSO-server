@@ -245,7 +245,8 @@ def ser_service(c: ServiceClient) -> dict:
     return {"client_id": c.client_id, "name": c.name, "app_codename": c.app_codename, "notify_url": c.notify_url,
             "is_active": c.is_active, "perms": service_client_perms(c), "created": _iso(c.created),
             "secret_rotated_at": _iso(c.secret_rotated_at), "kind": c.kind, "can_delegate": c.can_delegate,
-            "can_register_devices": c.can_register_devices}
+            "can_register_devices": c.can_register_devices, "notify_events": c.notify_events or [],
+            "has_notify_secret": bool(c.notify_secret_enc)}
 
 
 def ser_audit(a: AdminAuditLog) -> dict:
@@ -379,7 +380,7 @@ class UserView(AdminAPIView):
         self.stepup(request, "user.delete", "user", user.pk)
         with transaction.atomic():
             before = snap_user(user)
-            revoke_user_tokens(user)
+            revoke_user_tokens(user, None)  # user.deleted is emitted by the post_delete signal
             audit.record(request, "user.delete", "user", user.pk, before=before, stepup=True)
             user.delete()
             check_invariants(request.user)
@@ -398,7 +399,7 @@ class UserActionView(AdminAPIView):
                 user.is_active = False
                 user.save()  # the v1.2a signal revokes every token and session
                 if was is False:
-                    revoke_user_tokens(user)
+                    revoke_user_tokens(user, "suspended")
                 audit.record(request, "user.suspend", "user", user.pk, before={"is_active": was},
                              after={"is_active": False}, stepup=True)
                 check_invariants(request.user)
@@ -413,7 +414,7 @@ class UserActionView(AdminAPIView):
             return Response(ser_user(user))
         if action == "logout-all":
             with transaction.atomic():
-                revoke_user_tokens(user)
+                revoke_user_tokens(user, "admin")
                 audit.record(request, "user.logout_all", "user", user.pk)
             return Response(status=status.HTTP_204_NO_CONTENT)
         if action == "set-password":
@@ -425,8 +426,7 @@ class UserActionView(AdminAPIView):
             _validate_pw(password, user)
             with transaction.atomic():
                 user.set_password(password)
-                user.save()
-                revoke_user_tokens(user)
+                user.save()  # the password signal revokes and emits token.revoked(password_change)
                 audit.record(request, "user.set_password", "user", user.pk, after={"password": "changed"},
                              stepup=True)
             return Response(status=status.HTTP_204_NO_CONTENT)
@@ -543,6 +543,11 @@ class GroupView(AdminAPIView):
         self.stepup(request, "group.delete", "group", group.pk)
         with transaction.atomic():
             before = ser_group(group)
+            from .webhooks import emit
+
+            # Django deletes the M2M rows without m2m_changed: tell services the members lost the group
+            for uid in before["members"]:
+                emit("permission.changed", sub=str(uid), group=group.name, granted=False)
             group.delete()
             audit.record(request, "group.delete", "group", pk, before=before, stepup=True)
             check_invariants(request.user)
@@ -765,7 +770,7 @@ class ServiceView(AdminAPIView):
         client = get_service(client_id)
         data = self.body(request)
         unknown = set(data) - {"name", "app_codename", "notify_url", "is_active", "perms", "can_delegate",
-                               "can_register_devices"}
+                               "can_register_devices", "notify_events"}
         if unknown:
             raise InvalidRequest("Not editable: " + ", ".join(sorted(unknown)) + ".")
         for flag in ("is_active", "can_delegate", "can_register_devices"):
@@ -785,6 +790,13 @@ class ServiceView(AdminAPIView):
         for flag in ("is_active", "can_delegate", "can_register_devices"):
             if flag in data:
                 setattr(client, flag, data[flag])
+        if "notify_events" in data:
+            from .webhooks import EVENT_TYPES
+
+            ev = data["notify_events"]
+            if not isinstance(ev, list) or not all(isinstance(e, str) and e in EVENT_TYPES for e in ev):
+                raise InvalidRequest("notify_events: list of " + ", ".join(EVENT_TYPES) + " ([] = all).")
+            client.notify_events = sorted(set(ev))
         with transaction.atomic():
             client.save()
             if perms is not None:
@@ -857,6 +869,11 @@ class AppPermissionsImportView(AdminAPIView):
         try:
             with transaction.atomic():
                 result = import_permissions(app, request.data, dry_run=dry_run, force=force)
+                if not dry_run and result.changed:
+                    from .webhooks import emit
+
+                    emit("permission.changed", app=app, created=result.created, updated=result.updated,
+                         deprecated=result.deprecated)
                 if not dry_run:
                     action = "app.import" if result.changed else "app.import_noop"
                     audit.record(request, action, "app", app, after=result.as_dict())
@@ -914,3 +931,82 @@ class AdminDeviceView(AdminAPIView):
             dev.delete()
             audit.record(request, "device.delete", "device", client_id, before=before, stepup=True)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# --------------------------------------------------------------------------- webhooks (v1.3c)
+class ServiceNotifySecretView(AdminAPIView):
+    def post(self, request, client_id):
+        from .webhook_secrets import encrypt, generate
+
+        client = get_service(client_id)
+        if client.kind != "service":
+            raise InvalidRequest("Devices do not receive webhooks.")
+        self.stepup(request, "service.rotate_notify_secret", "service", client_id)
+        secret = generate()
+        with transaction.atomic():
+            client.notify_secret_enc = encrypt(secret)
+            client.save(update_fields=["notify_secret_enc"])
+            audit.record(request, "service.rotate_notify_secret", "service", client_id, stepup=True)
+        return Response({"client_id": client.client_id, "notify_secret": secret})
+
+
+def ser_event(e) -> dict:
+    return {"id": e.pk, "type": e.type, "time": _iso(e.created), "data": e.data}
+
+
+def ser_delivery(d) -> dict:
+    return {"id": d.pk, "event_id": d.event_id, "event_type": d.event.type, "client_id": d.client.client_id,
+            "status": d.status, "attempts": d.attempts, "next_attempt_at": _iso(d.next_attempt_at),
+            "last_status": d.last_status, "last_error": d.last_error, "delivered_at": _iso(d.delivered_at)}
+
+
+class WebhookEventsView(AdminAPIView):
+    def get(self, request):
+        from .models import WebhookEvent
+
+        qs = WebhookEvent.objects.all()
+        if request.query_params.get("type"):
+            qs = qs.filter(type=request.query_params["type"])
+        if request.query_params.get("since"):
+            since = parse_datetime(request.query_params["since"].replace("Z", "+00:00"))
+            if since is None:
+                raise InvalidRequest("since must be an ISO 8601 timestamp.")
+            if timezone.is_naive(since):
+                since = since.replace(tzinfo=dt_timezone.utc)
+            qs = qs.filter(created__gte=since)
+        return paginate(request, qs, ser_event)
+
+
+class WebhookDeliveriesView(AdminAPIView):
+    def get(self, request):
+        from .models import WebhookDelivery
+
+        qs = WebhookDelivery.objects.select_related("event", "client")
+        p = request.query_params
+        if p.get("status"):
+            if p["status"] not in WebhookDelivery.STATUSES:
+                raise InvalidRequest("Unknown status.")
+            qs = qs.filter(status=p["status"])
+        if p.get("client_id"):
+            qs = qs.filter(client__client_id=p["client_id"])
+        if p.get("event"):
+            if not p["event"].isdigit():
+                raise InvalidRequest("event must be an id.")
+            qs = qs.filter(event_id=int(p["event"]))
+        return paginate(request, qs, ser_delivery)
+
+
+class WebhookRedeliverView(AdminAPIView):
+    def post(self, request, pk):
+        from .models import WebhookDelivery
+
+        d = WebhookDelivery.objects.select_related("event", "client").filter(pk=pk).first()
+        if d is None:
+            raise NotFound("Unknown delivery.")
+        now = timezone.now()
+        with transaction.atomic():
+            WebhookDelivery.objects.filter(pk=d.pk).update(status="pending", attempts=0, next_attempt_at=now,
+                                                           window_start=now, claimed_at=None)
+            audit.record(request, "webhook.redeliver", "delivery", d.pk, before={"status": d.status})
+        d.refresh_from_db()
+        return Response(ser_delivery(d))

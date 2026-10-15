@@ -17,7 +17,8 @@ import logging
 
 from django.contrib.auth.hashers import check_password
 from django.contrib.auth.models import User
-from django.db.models.signals import post_delete, post_save, pre_save
+from django.contrib.auth.models import Group, Permission
+from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
 from django.dispatch import receiver
 
 admin_logger = logging.getLogger("sso.admin")
@@ -38,8 +39,10 @@ def revoke_on_password_change(sender, instance: User, raw=False, update_fields=N
     if old_hash is None or check_password(new_raw, old_hash):
         return
     from .models import UserTokenRevocation
+    from .webhooks import emit
 
     UserTokenRevocation.revoke(instance)
+    emit("token.revoked", sub=str(instance.pk), reason="password_change")
 
 
 @receiver(pre_save, sender=User, dispatch_uid="sso_note_is_active_change")
@@ -62,12 +65,15 @@ def revoke_on_is_active_change(sender, instance: User, created=False, raw=False,
         return
     from .revocation import revoke_user_tokens
 
-    revoke_user_tokens(instance)
+    revoke_user_tokens(instance, None if now_active else "suspended")
     if not now_active:  # v1.3b: the owner's gateway devices are cut off with the suspension (stay off after)
         from .devices import deactivate_owner_devices
 
         deactivate_owner_devices(instance)
     event = "user.reactivated" if now_active else "user.suspended"
+    from .webhooks import emit
+
+    emit(event, sub=str(instance.pk))
     admin_logger.info(json.dumps({"event": event, "user_id": instance.pk, "tokens_revoked": True},
                                  sort_keys=True))
 
@@ -77,5 +83,79 @@ def write_tombstone(sender, instance: User, **kwargs):
     """v1.3a: every deletion leaves a tombstone for the inactive-users feed (and v1.3c ``user.deleted``)."""
     from .models import UserTombstone
 
+    from .webhooks import emit
+
     UserTombstone.objects.create(user_id=instance.pk, username=instance.get_username())
+    emit("user.deleted", sub=str(instance.pk), username=instance.get_username())
     admin_logger.info(json.dumps({"event": "user.deleted", "user_id": instance.pk}, sort_keys=True))
+
+
+# --------------------------------------------------------------------------- v1.3c permission.changed
+def _app_perm_codes(pks) -> list[str]:
+    return sorted("application." + c for c in Permission.objects.filter(
+        pk__in=list(pks or ()), content_type__app_label="application").values_list("codename", flat=True))
+
+
+def _stash_clear(instance, kind):
+    instance._sso_cleared = list(getattr(instance, kind).values_list("pk", flat=True))
+
+
+@receiver(m2m_changed, sender=User.user_permissions.through, dispatch_uid="sso_wh_user_perms")
+def user_perms_changed(sender, instance, action, reverse, pk_set, **kwargs):
+    from .webhooks import emit
+
+    if action == "pre_clear":
+        _stash_clear(instance, "user_set" if reverse else "user_permissions")
+        return
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    pks = getattr(instance, "_sso_cleared", []) if action == "post_clear" else pk_set
+    granted = action == "post_add"
+    if reverse:  # instance is a Permission, pks are users
+        if instance.content_type.app_label != "application":
+            return
+        for uid in sorted(pks or ()):
+            emit("permission.changed", sub=str(uid), perm="application." + instance.codename, granted=granted)
+        return
+    for code in _app_perm_codes(pks):
+        emit("permission.changed", sub=str(instance.pk), perm=code, granted=granted)
+
+
+@receiver(m2m_changed, sender=Group.permissions.through, dispatch_uid="sso_wh_group_perms")
+def group_perms_changed(sender, instance, action, reverse, pk_set, **kwargs):
+    from .webhooks import emit
+
+    if action == "pre_clear":
+        _stash_clear(instance, "group_set" if reverse else "permissions")
+        return
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    pks = getattr(instance, "_sso_cleared", []) if action == "post_clear" else pk_set
+    granted = action == "post_add"
+    if reverse:
+        if instance.content_type.app_label != "application":
+            return
+        for name in sorted(Group.objects.filter(pk__in=list(pks or ())).values_list("name", flat=True)):
+            emit("permission.changed", group=name, perm="application." + instance.codename, granted=granted)
+        return
+    for code in _app_perm_codes(pks):
+        emit("permission.changed", group=instance.name, perm=code, granted=granted)
+
+
+@receiver(m2m_changed, sender=User.groups.through, dispatch_uid="sso_wh_user_groups")
+def user_groups_changed(sender, instance, action, reverse, pk_set, **kwargs):
+    from .webhooks import emit
+
+    if action == "pre_clear":
+        _stash_clear(instance, "user_set" if reverse else "groups")
+        return
+    if action not in ("post_add", "post_remove", "post_clear"):
+        return
+    pks = getattr(instance, "_sso_cleared", []) if action == "post_clear" else pk_set
+    granted = action == "post_add"
+    if reverse:  # instance is a Group, pks are users
+        for uid in sorted(pks or ()):
+            emit("permission.changed", sub=str(uid), group=instance.name, granted=granted)
+        return
+    for name in sorted(Group.objects.filter(pk__in=list(pks or ())).values_list("name", flat=True)):
+        emit("permission.changed", sub=str(instance.pk), group=name, granted=granted)

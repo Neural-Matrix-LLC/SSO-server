@@ -163,7 +163,7 @@ def revoke_if_inactive(user: User, iat) -> None:
     writing auth_user): a still-valid token of an inactive user revokes all of the user's tokens, so they
     stay dead after a later reactivation."""
     if user is not None and not user.is_active and not is_revoked(user, iat):
-        revoke_user_tokens(user)
+        revoke_user_tokens(user, "inactive")
 
 
 # --------------------------------------------------------------------------- auth endpoints
@@ -279,7 +279,7 @@ class LogoutAllView(APIView):
 
     def post(self, request):
         user = request.user
-        revoke_user_tokens(user)
+        revoke_user_tokens(user, "logout_all")
         log_token_event(request, "logout_all", "success", user_id=user.pk)
         response = Response(status=status.HTTP_204_NO_CONTENT)
         clear_refresh_cookie(response)

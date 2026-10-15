@@ -363,7 +363,9 @@ UPDATE, DELETE`. That covers `flushexpiredtokens`, `last_login`, and the PBKDF2 
 * v1.2a, new service in one step (creates `application.app2` if missing and links it as `app_codename`):
   `docker compose exec web python manage.py register_service reporting --name "Reporting" --app app2
   --app-name "Can use app2 (reporting)" [--notify-url https://reporting.example.com/sso/events]`.
-  `notify_url` is stored for the v1.3c webhooks; nothing is sent yet.
+  v1.3c sends signed webhooks to `notify_url`: set the signing secret with
+  `POST /api/v1/admin/services/<id>/rotate-notify-secret` (step-up) or `manage.py rotate_notify_secret <id>`, and run
+  the compose service `webhooks`. Set `SSO_WEBHOOK_SECRET_KEY` in production. See API reference §10.
 
 Hand the secret to the service owner through the password manager. The service calls
 `POST /api/v1/auth/introspect` with HTTP Basic `client_id:client_secret` and the body `{"token": "<access token>"}`.

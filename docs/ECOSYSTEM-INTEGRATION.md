@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| Status | **Design.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10); phase order changed 2026-10-15 (§9.1: SSO complete → SGMCP → FUND). v1.3a is designed in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md) |
+| Status | **Design.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10); phase order changed 2026-10-15 (§9.1: SSO complete → SGMCP → FUND). v1.3a/b/c designed in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md), [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md), [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md) and implemented on branch `feat/sso-v1.3` (local, not pushed) |
 | Scope | How the SSO server, FUND-Financial-Research (frontend + backend services), Smart_Gateway_MCP (SGMCP) and llm-wiki-svc fit together |
 | Sources read | `Neural-Matrix-LLC/FUND-financial-Research` `main` @ `dfffe5e` (2026-09-02), `Neural-Matrix-LLC/Smart_Gateway_MCP` `main` @ `39b3acd` (2026-10-08), `llm-wiki-svc` `feat/sso-login`, this repo `feat/v1.2a` @ `107ae38` |
 

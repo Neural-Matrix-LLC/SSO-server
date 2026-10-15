@@ -189,18 +189,26 @@ Retention: events and deliveries older than `SSO_WEBHOOK_RETENTION_DAYS` (30) ar
 ## 8. Receiver side (sso-client 0.2)
 
 ```python
-from sso_client.webhooks import WebhookReceiver, WebhookError
-rx = WebhookReceiver(secrets=[os.environ["SSO_NOTIFY_SECRET"]])     # list: old + new during rotation
+from sso_client import WebhookReceiver, WebhookVerificationError, verify_webhook
+rx = WebhookReceiver([os.environ["SSO_NOTIFY_SECRET"]])     # list: old + new during rotation
+
+@rx.on("user.suspended")
+def suspended(event):
+    stop_and_delete_strategies(owner_sub=event["sub"])     # positions untouched (decision)
+
 def endpoint(request):                       # any framework: raw body bytes + headers
     try:
-        event = rx.verify(request.headers, request.body)   # signature, ±300 s, dedupe on id
-    except WebhookError:
+        rx.handle(request.body, request.headers)   # signature, ±300 s, dedupe on id, dispatch
+    except WebhookVerificationError:
         return 400
-    if event is None:                         # duplicate
-        return 204
-    if event["type"] == "user.suspended":
-        stop_and_delete_strategies(owner_sub=event["sub"])  # positions untouched (decision)
-    return 204
+    return 204                               # also for a duplicate (handle() returned None)
+```
+
+A handler that raises is not marked as seen, so return 5xx and SSO retries. The dedupe store is in-process:
+with several replicas, dedupe in your DB (unique `event_id`) instead, or use `verify_webhook()` alone.
+
+```text
+(implemented as above in sso-client 0.2: sso_client/webhooks.py)
 ```
 
 ## 9. Configuration

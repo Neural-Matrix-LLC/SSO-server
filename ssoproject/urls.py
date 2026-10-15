@@ -44,6 +44,11 @@ urlpatterns = [
     path("api/v1/devices", devices.DevicesView.as_view(), name="sso-devices"),
     path("api/v1/devices/<slug:client_id>", devices.DeviceView.as_view()),
     path("api/v1/admin/devices", adm.AdminDevicesView.as_view()),
+    # v1.3c (docs/DESIGN-v1.3c-webhooks.md)
+    path("api/v1/admin/services/<slug:client_id>/rotate-notify-secret", adm.ServiceNotifySecretView.as_view()),
+    path("api/v1/admin/webhooks/events", adm.WebhookEventsView.as_view()),
+    path("api/v1/admin/webhooks/deliveries", adm.WebhookDeliveriesView.as_view()),
+    path("api/v1/admin/webhooks/deliveries/<int:pk>/redeliver", adm.WebhookRedeliverView.as_view()),
     path("api/v1/admin/devices/<slug:client_id>", adm.AdminDeviceView.as_view()),
     path(".well-known/jwks.json", views.JWKSView.as_view(), name="sso-jwks"),
     path(".well-known/openid-configuration", views.DiscoveryView.as_view(), name="sso-discovery"),
