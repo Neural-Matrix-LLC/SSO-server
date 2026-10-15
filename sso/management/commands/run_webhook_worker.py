@@ -6,7 +6,7 @@ import time
 
 from django.conf import settings
 from django.core.management.base import BaseCommand
-from django.db import close_old_connections
+from django.db import close_old_connections, connection
 
 from sso.webhooks import process_once
 
@@ -24,7 +24,8 @@ class Command(BaseCommand):
         signal.signal(signal.SIGTERM, lambda *a: stop.update(flag=True))
         while True:
             try:
-                close_old_connections()
+                if not connection.in_atomic_block:  # never drop a caller's transaction (tests, call_command)
+                    close_old_connections()
                 counts = process_once()
                 if once:
                     self.stdout.write(json.dumps(counts, sort_keys=True))
