@@ -128,6 +128,8 @@ services:
       SSO_HOSTNAME: ${SSO_HOSTNAME:?set SSO_HOSTNAME in .env}
       SSO_HTTPS_PORT: ${SSO_HTTPS_PORT:-443}
       SSO_ADMIN_PATH: ${SSO_ADMIN_PATH:-sso-admin/}
+      SSO_ADMIN_UI_PATH: ${SSO_ADMIN_UI_PATH:-admin/}
+      SSO_ADMIN_UI_HOSTNAME: ${SSO_ADMIN_UI_HOSTNAME:-}
       SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
       SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
     volumes:
@@ -136,6 +138,9 @@ services:
       - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme:ro
       # optional admin IP allow-list snippets (empty dir = no restriction)
       - ${SSO_ADMIN_ALLOW_DIR:-./docker/nginx-admin.d}:/etc/nginx/sso-admin.d:ro
+      # v1.3d admin UI: optional IP allow-list snippets, and optional extra server blocks (separate hostname)
+      - ${SSO_ADMIN_UI_ALLOW_DIR:-./docker/nginx-admin-ui.d}:/etc/nginx/sso-admin-ui.d:ro
+      - ${SSO_ADMIN_UI_HOST_DIR:-./docker/nginx-admin-host.d}:/etc/nginx/sso-admin-host.d:ro
     networks:
       - edge
     depends_on:

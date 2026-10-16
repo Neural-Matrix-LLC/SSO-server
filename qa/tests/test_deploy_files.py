@@ -3,6 +3,7 @@ A/B3/B6/B12 (static checks of the repo, no server needed)."""
 import glob
 import os
 import re
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -308,6 +309,24 @@ except Exception as exc:  # ImproperlyConfigured
 else:
     print("LOADED DEBUG=%s" % s.DEBUG)
 """
+
+
+def test_DEPLOY_21_admin_ui_nginx_and_compose(repo):
+    """v1.3d: UI location with its own allow-list dir + login rate limit, optional admin-host include, compose mounts."""
+    conf = _read(repo, "docker/nginx.conf")
+    assert "location /${SSO_ADMIN_UI_PATH} {" in conf and "location = /${SSO_ADMIN_UI_PATH}login/ {" in conf
+    assert conf.count("include /etc/nginx/sso-admin-ui.d/*.conf;") == 2
+    assert "include /etc/nginx/sso-admin-host.d/*.conf;" in conf
+    login_block = conf.split("location = /${SSO_ADMIN_UI_PATH}login/ {")[1].split("}")[0]
+    assert "limit_req zone=sso_login" in login_block
+    nginx = _service_block(_read(repo, "docker-compose.yml"), "nginx")
+    assert _interpolate(_yaml_value(nginx, "SSO_ADMIN_UI_PATH"), {}) == "admin/"
+    assert "${SSO_ADMIN_UI_ALLOW_DIR:-./docker/nginx-admin-ui.d}:/etc/nginx/sso-admin-ui.d:ro" in nginx
+    assert "${SSO_ADMIN_UI_HOST_DIR:-./docker/nginx-admin-host.d}:/etc/nginx/sso-admin-host.d:ro" in nginx
+    for d in ("docker/nginx-admin-ui.d", "docker/nginx-admin-host.d"):
+        assert (Path(repo) / d / "README").is_file()
+        assert not list((Path(repo) / d).glob("*.conf")), f"{d} must ship without active *.conf"
+    assert "SSO_ADMIN_UI_PATH" in _read(repo, ".env.example")
 
 
 @pytest.mark.parametrize("euid,debug,expect", [

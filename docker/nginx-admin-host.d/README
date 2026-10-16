@@ -1,0 +1,4 @@
+Optional whole nginx server blocks (http context) for a separate admin-UI hostname (v1.3d, SSO_ADMIN_UI_HOSTNAME).
+Copy example.conf.sample to e.g. admin-host.conf, replace the host name and cert files (nginx's envsubst only
+renders the main template, so write literal values here). Only *.conf files are included. Also set
+SSO_ADMIN_UI_HOSTNAME and add the name to SSO_ALLOWED_HOSTS; Django then serves the UI only on that Host.
