@@ -1,0 +1,20 @@
+{% extends "adminui/base.html" %}{% block title %}{{ c.client_id }}{% endblock %}
+{% block content %}
+<h1>Service {{ c.client_id }}{% if not c.is_active %} <span class="tag bad">inactive</span>{% endif %}</h1>
+<p class="muted">Created {{ c.created }} · secret rotated {{ c.secret_rotated_at|default:"never" }} · webhook secret {% if c.has_notify_secret %}set{% else %}not set{% endif %}</p>
+<div class="actions">
+<a class="button danger" href="{{ ui }}services/{{ c.client_id }}/rotate-secret">Rotate client secret</a>
+<a class="button danger" href="{{ ui }}services/{{ c.client_id }}/rotate-notify-secret">Rotate webhook secret</a>
+<a class="button danger" href="{{ ui }}services/{{ c.client_id }}/delete">Delete</a></div>
+<form method="post" class="narrow">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}services/{{ c.client_id }}/">
+<label for="n">Name</label><input id="n" name="name" value="{{ c.name }}" required maxlength="200">
+<label for="a">App codename</label><input id="a" name="app_codename" value="{{ c.app_codename|default:'' }}" maxlength="63">
+<label for="u">Webhook URL</label><input id="u" name="notify_url" type="url" value="{{ c.notify_url|default:'' }}" maxlength="500">
+<label for="p">Permissions</label><select id="p" name="perms" multiple size="6">{% for p in all_perms %}<option value="{{ p.codename }}"{% if "application."|add:p.codename in c.perms %} selected{% endif %}>application.{{ p.codename }}</option>{% endfor %}</select>
+<fieldset><legend>Webhook events (none ticked = all)</legend>{% for e in event_types %}<label class="check"><input type="checkbox" name="notify_events" value="{{ e }}"{% if e in c.notify_events %} checked{% endif %}> {{ e }}</label>{% endfor %}</fieldset>
+<label class="check"><input type="checkbox" name="is_active"{% if c.is_active %} checked{% endif %}> Active (deactivating asks for your password)</label>
+<label class="check"><input type="checkbox" name="can_delegate"{% if c.can_delegate %} checked{% endif %}> May act on behalf of users</label>
+<label class="check"><input type="checkbox" name="can_register_devices"{% if c.can_register_devices %} checked{% endif %}> May register devices</label>
+<button type="submit">Save</button></form>
+<h2>Recent webhook deliveries</h2>{% include "adminui/delivery_table.html" with rows=deliveries %}
+{% endblock %}

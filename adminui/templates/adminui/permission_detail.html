@@ -1,0 +1,10 @@
+{% extends "adminui/base.html" %}{% block title %}{{ p.perm }}{% endblock %}
+{% block content %}
+<h1><code>{{ p.perm }}</code>{% if p.deprecated %} <span class="tag bad">deprecated</span>{% endif %}{% if p.code_defined %} <span class="tag">built in</span>{% endif %}</h1>
+<p>App: {{ p.app_codename|default:"(none)" }} · granted to {{ p.users }} user(s), {{ p.groups }} group(s)</p>
+<form method="post" class="narrow">{% csrf_token %}
+<label for="n">Name</label><input id="n" name="name" value="{{ p.name }}" required maxlength="255">
+<label for="d">Description</label><textarea id="d" name="description" rows="3" maxlength="1000">{{ p.description }}</textarea>
+<button type="submit">Save</button></form>
+{% if not p.code_defined %}<p><a class="button danger" href="{{ ui }}permissions/{{ p.codename }}/delete">Delete permission</a></p>{% endif %}
+{% endblock %}

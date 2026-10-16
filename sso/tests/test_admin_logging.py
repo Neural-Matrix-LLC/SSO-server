@@ -70,7 +70,10 @@ def test_admin_registers_client_and_shows_secret_once(admin_client, settings):
 
 
 def test_admin_is_not_at_default_path(client):
-    assert client.get("/admin/").status_code == 404
+    # v1.3d: /admin/ is the SSO admin UI (login redirect), never Django admin
+    r = client.get("/admin/")
+    assert r.status_code == 302 and "/admin/login/" in r["Location"]
+    assert b"Django administration" not in client.get("/admin/login/").content
 
 
 def _events(caplog):

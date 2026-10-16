@@ -1,6 +1,6 @@
 from django.conf import settings
 from django.contrib import admin
-from django.urls import path, re_path
+from django.urls import include, path, re_path
 
 from sso import admin_api as adm
 from sso import devices, service_auth, views
@@ -56,7 +56,11 @@ urlpatterns = [
     path(settings.SSO_ADMIN_PATH, admin.site.urls),
 ]
 
+# v1.3d admin web UI (docs/DESIGN-v1.3d-admin-ui.md); HTML only, no new JSON endpoints
+if settings.SSO_ADMIN_UI_ENABLED:
+    urlpatterns.append(path(settings.SSO_ADMIN_UI_PATH, include("adminui.urls")))
+
 handler400 = "sso.errors.handler400"
-handler403 = "sso.errors.handler403"
-handler404 = "sso.errors.handler404"
-handler500 = "sso.errors.handler500"
+handler403 = "adminui.views.handler403"  # HTML under SSO_ADMIN_UI_PATH, else sso.errors (JSON)
+handler404 = "adminui.views.handler404"
+handler500 = "adminui.views.handler500"

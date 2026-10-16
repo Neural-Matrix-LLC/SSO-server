@@ -93,16 +93,19 @@ INSTALLED_APPS = [
     "corsheaders",
     "sso",
     "application",
+    "adminui",  # v1.3d admin web UI (DESIGN-v1.3d-admin-ui.md)
 ]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "corsheaders.middleware.CorsMiddleware",
-    "django.contrib.sessions.middleware.SessionMiddleware",
+    # v1.3d: Django's SessionMiddleware, but under SSO_ADMIN_UI_PATH it uses the admin UI cookie instead
+    "adminui.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "adminui.middleware.AdminUIGuardMiddleware",  # v1.3d: only acts on SSO_ADMIN_UI_PATH
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -333,6 +336,15 @@ SSO_COOKIE_SECURE = env.bool("SSO_COOKIE_SECURE", default=True)
 SSO_COOKIE_SAMESITE = env.str("SSO_COOKIE_SAMESITE", default="Lax")
 
 SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = env.bool("SSO_SECURE_COOKIES", default=True)
+# v1.3d (DESIGN-v1.3d §5.1): CSRF cookie is HttpOnly + SameSite=Strict (forms carry the token; no JS reads it).
+# The __Host- prefix forces Secure, Path=/ and no Domain; browsers reject it without Secure, so plain-http dev
+# (SSO_SECURE_COOKIES=False) uses the unprefixed name.
+CSRF_COOKIE_NAME = ("__Host-" if CSRF_COOKIE_SECURE else "") + "sso_admin_csrf"
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = "Strict"
+CSRF_COOKIE_DOMAIN = None
+CSRF_COOKIE_PATH = "/"
+CSRF_FAILURE_VIEW = "adminui.views.csrf_failure"
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = False
 SECURE_CONTENT_TYPE_NOSNIFF = True
@@ -348,6 +360,27 @@ SECURE_HSTS_PRELOAD = env.bool("SSO_HSTS_PRELOAD", default=False)
 SILENCED_SYSTEM_CHECKS = ["security.W021"]
 
 SSO_ADMIN_PATH = env.str("SSO_ADMIN_PATH", default="sso-admin/").strip("/") + "/"
+
+# --------------------------------------------------------------------------- v1.3d admin web UI
+# DESIGN-v1.3d-admin-ui.md §15. Django admin (SSO_ADMIN_PATH) stays as break-glass.
+SSO_ADMIN_UI_ENABLED = env.bool("SSO_ADMIN_UI_ENABLED", default=True)
+SSO_ADMIN_UI_PATH = env.str("SSO_ADMIN_UI_PATH", default="admin/").strip("/") + "/"
+if SSO_ADMIN_UI_ENABLED and (SSO_ADMIN_UI_PATH == "/" or SSO_ADMIN_UI_PATH == SSO_ADMIN_PATH
+                             or SSO_ADMIN_UI_PATH.startswith(("api/", ".well-known/", "static/", "healthz"))):
+    raise ImproperlyConfigured("SSO_ADMIN_UI_PATH must be a non-empty prefix that differs from SSO_ADMIN_PATH and "
+                               "does not start with api/, .well-known/, static/ or healthz")
+SSO_ADMIN_UI_HOSTNAME = env.str("SSO_ADMIN_UI_HOSTNAME", default="").strip().lower()
+SSO_ADMIN_UI_IDLE_SECONDS = env.int("SSO_ADMIN_UI_IDLE_SECONDS", default=1800)
+SSO_ADMIN_UI_MAX_AGE_SECONDS = env.int("SSO_ADMIN_UI_MAX_AGE_SECONDS", default=28800)
+if SSO_ADMIN_UI_IDLE_SECONDS < 60 or SSO_ADMIN_UI_MAX_AGE_SECONDS < SSO_ADMIN_UI_IDLE_SECONDS:
+    raise ImproperlyConfigured("SSO_ADMIN_UI_IDLE_SECONDS must be >= 60 and <= SSO_ADMIN_UI_MAX_AGE_SECONDS")
+SSO_ADMIN_UI_IP_BINDING = env.str("SSO_ADMIN_UI_IP_BINDING", default="").strip().upper() or SSO_IP_BINDING_MODE
+if SSO_ADMIN_UI_IP_BINDING not in ("NOIP", "WARNING", "ENFORCE"):
+    raise ImproperlyConfigured("SSO_ADMIN_UI_IP_BINDING must be NOIP, WARNING or ENFORCE")
+SSO_ADMIN_UI_TIME_ZONE = env.str("SSO_ADMIN_UI_TIME_ZONE", default="UTC")
+SSO_ADMIN_UI_COOKIE = ("__Host-" if SESSION_COOKIE_SECURE else "") + "sso_admin_sid"
+SSO_THROTTLE_ADMIN_UI_LOGIN_IP = env.str("SSO_THROTTLE_ADMIN_UI_LOGIN_IP", default="10/min")
+SSO_THROTTLE_ADMIN_UI_LOGIN_USER = env.str("SSO_THROTTLE_ADMIN_UI_LOGIN_USER", default="5/min")
 
 # --------------------------------------------------------------------------- i18n / static
 LANGUAGE_CODE = "en-us"

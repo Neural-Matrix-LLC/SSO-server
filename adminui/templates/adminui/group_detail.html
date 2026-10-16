@@ -1,0 +1,17 @@
+{% extends "adminui/base.html" %}{% block title %}{{ g.name }}{% endblock %}
+{% block content %}
+<h1>Group {{ g.name }}{% if is_admin_group %} <span class="tag">grants SSO admin</span>{% endif %}</h1>
+<form method="post" class="inline">{% csrf_token %}<label for="n">Name</label><input id="n" name="name" value="{{ g.name }}" required maxlength="150"><button type="submit">Rename</button></form>
+<a class="button danger" href="{{ ui }}groups/{{ g.pk }}/delete">Delete group</a>
+<h2>Members</h2>
+<form method="post" action="{{ ui }}groups/{{ g.pk }}/members">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}groups/{{ g.pk }}/">
+<label for="m">Usernames (comma or line separated)</label>
+<textarea id="m" name="usernames" rows="4">{% for x in members %}{{ x.username }}{% if not forloop.last %}, {% endif %}{% endfor %}</textarea>
+<button type="submit">Save members</button></form>
+<h2>Permissions</h2>
+<table><thead><tr><th scope="col">Permission</th><th scope="col">Action</th></tr></thead><tbody>
+{% for p in perms %}<tr><td><code>{{ p }}</code></td><td><form method="post" action="{{ ui }}groups/{{ g.pk }}/permissions" class="inline">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}groups/{{ g.pk }}/"><input type="hidden" name="op" value="revoke"><input type="hidden" name="codename" value="{{ p }}"><button type="submit" class="link">Revoke</button></form></td></tr>{% empty %}<tr><td colspan="2" class="muted">none</td></tr>{% endfor %}
+</tbody></table>
+<form method="post" action="{{ ui }}groups/{{ g.pk }}/permissions" class="inline">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}groups/{{ g.pk }}/"><input type="hidden" name="op" value="grant">
+<label for="gp">Grant</label><select id="gp" name="codename">{% for p in all_perms %}<option value="{{ p.codename }}">application.{{ p.codename }}</option>{% endfor %}</select><button type="submit">Grant</button></form>
+{% endblock %}

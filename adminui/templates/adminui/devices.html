@@ -1,0 +1,9 @@
+{% extends "adminui/base.html" %}{% block title %}Devices{% endblock %}
+{% block content %}
+<h1>Device clients</h1>
+<form method="get" class="filters" role="search"><label for="o">Owner user id</label><input id="o" name="owner" inputmode="numeric" value="{{ f.owner|default:'' }}"><button type="submit">Filter</button></form>
+<table><thead><tr><th scope="col">client_id</th><th scope="col">Name</th><th scope="col">Owner</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col">Status</th></tr></thead><tbody>
+{% for d in page %}<tr><td><a href="{{ ui }}devices/{{ d.client_id }}/">{{ d.client_id }}</a></td><td>{{ d.device_name }}</td><td>{% if d.owner %}<a href="{{ ui }}users/{{ d.owner_id }}/">{{ d.owner.username }}</a>{% endif %}</td><td>{{ d.created|date:"Y-m-d H:i" }}</td><td>{{ d.last_used|date:"Y-m-d H:i"|default:"never" }}</td><td>{% if d.is_active %}active{% else %}<span class="bad">inactive</span>{% endif %}</td></tr>{% empty %}<tr><td colspan="6">None.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+{% endblock %}

@@ -1,0 +1,18 @@
+{% extends "adminui/base.html" %}{% block title %}Permissions{% endblock %}
+{% block content %}
+<h1>Application permissions</h1>
+<form method="get" class="filters" role="search">
+<label for="app">Application</label><select id="app" name="app"><option value="">any</option>{% for a in apps %}<option{% if f.app == a.app_codename %} selected{% endif %}>{{ a.app_codename }}</option>{% endfor %}</select>
+<label for="dep">Deprecated</label><select id="dep" name="deprecated"><option value="">any</option><option value="true"{% if f.deprecated == "true" %} selected{% endif %}>deprecated</option><option value="false"{% if f.deprecated == "false" %} selected{% endif %}>current</option></select>
+<button type="submit">Filter</button></form>
+<table><thead><tr><th scope="col">Permission</th><th scope="col">Name</th><th scope="col">App</th><th scope="col">Users</th><th scope="col">Groups</th><th scope="col">Status</th></tr></thead><tbody>
+{% for p in page %}<tr><td><a href="{{ ui }}permissions/{{ p.codename }}/"><code>{{ p.perm }}</code></a></td><td>{{ p.name }}</td><td>{{ p.app_codename|default:"" }}</td><td>{{ p.users }}</td><td>{{ p.groups }}</td><td>{% if p.deprecated %}<span class="bad">deprecated</span>{% elif p.code_defined %}built in{% else %}current{% endif %}</td></tr>{% empty %}<tr><td colspan="6">None.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+<h2>Create custom permission</h2>
+<form method="post" action="{{ ui }}permissions/new/" class="narrow">{% csrf_token %}
+<label for="c">Codename</label><input id="c" name="codename" required maxlength="63" pattern="[a-z][a-z0-9_]*">
+<label for="n">Name</label><input id="n" name="name" required maxlength="255">
+<label for="d">Description</label><textarea id="d" name="description" rows="2" maxlength="1000"></textarea>
+<button type="submit">Create</button></form>
+{% endblock %}

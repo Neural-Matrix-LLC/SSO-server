@@ -1,0 +1,7 @@
+{% extends "adminui/base.html" %}{% block title %}{{ status }}{% endblock %}
+{% block content %}
+<h1>{% if status == 409 %}Not allowed{% elif status == 404 %}Not found{% elif status == 403 %}Forbidden{% elif status == 429 %}Too many requests{% else %}Request rejected{% endif %}</h1>
+<p class="error" role="alert">{{ detail }}</p>
+<p class="muted">Code: {{ code }}</p>
+{% if back %}<p><a href="{{ back }}">Back</a></p>{% else %}<p><a href="{{ ui }}">Dashboard</a></p>{% endif %}
+{% endblock %}

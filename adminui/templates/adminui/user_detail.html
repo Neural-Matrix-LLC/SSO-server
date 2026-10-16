@@ -1,0 +1,40 @@
+{% extends "adminui/base.html" %}{% block title %}{{ u.username }}{% endblock %}
+{% block content %}
+<h1>{{ u.username }} {% if u.is_active %}<span class="tag">Active</span>{% else %}<span class="tag bad">Suspended</span>{% endif %}{% if u.is_staff %} <span class="tag">staff</span>{% endif %}{% if u.is_superuser %} <span class="tag">superuser</span>{% endif %}{% if is_admin %} <span class="tag">SSO admin</span>{% endif %}</h1>
+<p class="muted">Joined {{ u.date_joined|date:"Y-m-d" }} · last login {{ u.last_login|date:"Y-m-d H:i"|default:"never" }} · {{ sessions }} active session(s)</p>
+<section><h2>Actions</h2>
+<div class="actions">
+{% if u.is_active %}<a class="button danger" href="{{ ui }}users/{{ u.pk }}/suspend">Suspend and log out all sessions</a>{% else %}
+<form method="post" action="{{ ui }}users/{{ u.pk }}/unsuspend" class="inline">{% csrf_token %}<button type="submit">Unsuspend</button></form>{% endif %}
+<form method="post" action="{{ ui }}users/{{ u.pk }}/logout-all" class="inline">{% csrf_token %}<button type="submit">Log out everywhere</button></form>
+<a class="button danger" href="{{ ui }}users/{{ u.pk }}/password">Set password</a>
+<a class="button danger" href="{{ ui }}users/{{ u.pk }}/delete">Delete</a>
+</div></section>
+<section><h2>Profile</h2>
+<form method="post" class="narrow">{% csrf_token %}
+  <label for="e">Email</label><input id="e" name="email" type="email" maxlength="254" value="{{ u.email }}">
+  <label for="fn">First name</label><input id="fn" name="first_name" maxlength="150" value="{{ u.first_name }}">
+  <label for="ln">Last name</label><input id="ln" name="last_name" maxlength="150" value="{{ u.last_name }}">
+  <button type="submit">Save profile</button>
+</form></section>
+<section><h2>Effective permissions</h2>
+<ul>{% for p in perms.effective %}<li><code>{{ p }}</code></li>{% empty %}<li class="muted">none</li>{% endfor %}</ul>
+<h3>Direct grants</h3>
+<table><thead><tr><th scope="col">Permission</th><th scope="col">Action</th></tr></thead><tbody>
+{% for p in perms.direct %}<tr><td><code>{{ p }}</code></td><td><form method="post" action="{{ ui }}users/{{ u.pk }}/permissions" class="inline">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}users/{{ u.pk }}/"><input type="hidden" name="op" value="revoke"><input type="hidden" name="codename" value="{{ p }}"><button type="submit" class="link">Revoke</button></form></td></tr>
+{% empty %}<tr><td colspan="2" class="muted">none</td></tr>{% endfor %}</tbody></table>
+<form method="post" action="{{ ui }}users/{{ u.pk }}/permissions" class="inline">{% csrf_token %}
+  <input type="hidden" name="back" value="{{ ui }}users/{{ u.pk }}/"><input type="hidden" name="op" value="grant">
+  <label for="gp">Grant</label><select id="gp" name="codename">{% for p in all_perms %}<option value="{{ p.codename }}">application.{{ p.codename }}</option>{% endfor %}</select>
+  <button type="submit">Grant</button> <span class="muted">(granting application.sso_admin asks for your password)</span>
+</form>
+{% for g, ps in perms.via_groups.items %}<p>Via group <strong>{{ g }}</strong>: {% for p in ps %}<code>{{ p }}</code> {% empty %}none{% endfor %}</p>{% endfor %}
+</section>
+<section><h2>Groups</h2>
+<form method="post" action="{{ ui }}users/{{ u.pk }}/groups">{% csrf_token %}<input type="hidden" name="back" value="{{ ui }}users/{{ u.pk }}/">
+<fieldset><legend>Member of</legend>{% for g in all_groups %}<label class="check"><input type="checkbox" name="groups" value="{{ g.name }}"{% if g.name in user_groups %} checked{% endif %}> {{ g.name }}</label>{% empty %}<p class="muted">No groups.</p>{% endfor %}</fieldset>
+<button type="submit">Save groups</button></form></section>
+<section><h2>Devices</h2>
+<ul>{% for d in devices %}<li><a href="{{ ui }}devices/{{ d.client_id }}/">{{ d.client_id }}</a> {{ d.device_name }}{% if not d.is_active %} (inactive){% endif %}</li>{% empty %}<li class="muted">none</li>{% endfor %}</ul></section>
+<section><h2>Recent audit</h2>{% include "adminui/audit_table.html" with rows=audit %}</section>
+{% endblock %}

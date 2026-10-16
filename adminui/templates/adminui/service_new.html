@@ -1,0 +1,11 @@
+{% extends "adminui/base.html" %}{% block title %}Register service{% endblock %}
+{% block content %}
+<h1>Register service</h1>
+<form method="post" class="narrow">{% csrf_token %}
+<label for="ci">client_id (letters, digits, - and _)</label><input id="ci" name="client_id" required maxlength="100" pattern="[-a-zA-Z0-9_]+" value="{{ f.client_id|default:'' }}">
+<label for="n">Name</label><input id="n" name="name" required maxlength="200" value="{{ f.name|default:'' }}">
+<label for="a">App codename (optional)</label><input id="a" name="app_codename" maxlength="63" value="{{ f.app_codename|default:'' }}">
+<label for="u">Webhook URL (https, optional)</label><input id="u" name="notify_url" type="url" maxlength="500" value="{{ f.notify_url|default:'' }}">
+<label for="p">Permissions</label><select id="p" name="perms" multiple size="6">{% for p in all_perms %}<option value="{{ p.codename }}">application.{{ p.codename }}</option>{% endfor %}</select>
+<button type="submit">Register</button> <a href="{{ ui }}services/">Cancel</a></form>
+{% endblock %}

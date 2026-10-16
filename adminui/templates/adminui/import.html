@@ -1,0 +1,10 @@
+{% extends "adminui/base.html" %}{% block title %}Import permissions{% endblock %}
+{% block content %}
+<h1>Import an application's permissions</h1>
+<p>Upload the app's <code>sso_permissions.py</code> (read as literals only, never executed) or paste the JSON payload. You get a preview first; nothing is deleted, missing permissions are marked deprecated.</p>
+<form method="post" enctype="multipart/form-data" class="narrow">{% csrf_token %}
+<label for="f">sso_permissions.py or .json (max 64 KiB)</label><input id="f" name="file" type="file" accept=".py,.json">
+<label for="j">or JSON payload</label><textarea id="j" name="json" rows="10">{{ json|default:'' }}</textarea>
+<label class="check"><input type="checkbox" name="force"> Force (allow an older version number)</label>
+<button type="submit">Preview</button></form>
+{% endblock %}

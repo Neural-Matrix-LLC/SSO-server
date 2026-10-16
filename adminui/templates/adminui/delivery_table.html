@@ -1,0 +1,4 @@
+<table><thead><tr><th scope="col">#</th><th scope="col">Event</th><th scope="col">Service</th><th scope="col">Status</th><th scope="col">Attempts</th><th scope="col">Next try</th><th scope="col">Last error</th><th scope="col"></th></tr></thead><tbody>
+{% for d in rows %}<tr><td>{{ d.pk }}</td><td>{{ d.event.type }} #{{ d.event_id }}</td><td>{{ d.client.client_id }}</td><td>{% if d.status == "failed" %}<span class="bad">failed</span>{% else %}{{ d.status }}{% endif %}</td><td>{{ d.attempts }}</td><td>{{ d.next_attempt_at|date:"Y-m-d H:i:s" }}</td><td>{{ d.last_error|truncatechars:80 }}</td>
+<td><form method="post" action="{{ ui }}webhooks/deliveries/{{ d.pk }}/redeliver" class="inline">{% csrf_token %}<input type="hidden" name="back" value="{{ request.get_full_path }}"><button type="submit" class="link">Redeliver</button></form></td></tr>
+{% empty %}<tr><td colspan="8">None.</td></tr>{% endfor %}</tbody></table>
