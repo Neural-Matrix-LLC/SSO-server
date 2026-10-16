@@ -17,7 +17,7 @@ keys/*
 !keys/.gitkeep
 *.pem
 *.key
-docker/certs/*
+docker/certs*/*
 !docker/certs/.gitkeep
 
 # Local data

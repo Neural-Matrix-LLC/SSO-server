@@ -97,6 +97,13 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    # no HTTP port: the image's /healthz probe would always fail here; check the worker's heartbeat file instead
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py", "--worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped
     logging: *default-logging
 

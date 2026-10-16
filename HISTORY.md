@@ -3,6 +3,54 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-10-16 — fix: nginx 502 after redeploying web; webhooks container always unhealthy
+
+**Goal.** Fix `GET /admin/` → 502 (`connect() failed (111: Connection refused) ... upstream:
+"http://172.31.250.2:8000/admin/"`) and the permanently `unhealthy` `webhooks` container. Add worker logging.
+
+**Root cause.**
+- nginx resolved `server web:8000;` once at start-up. `web` and `webhooks` were recreated (image 0.1.1) while nginx
+  kept running: web moved to 172.31.250.3 and the webhook worker took 172.31.250.2, so nginx proxied to the worker,
+  which has no HTTP listener.
+- The webhooks service inherited the image's `HEALTHCHECK` (HTTP `GET /healthz` on :8000), which can never succeed
+  for the worker (`healthcheck failed: ConnectionRefusedError`). The worker also logged nothing while idle, so
+  there was no sign that it was running.
+
+**Implementation.**
+- `docker/nginx.conf`: `resolver 127.0.0.11 valid=10s ipv6=off;` + `zone sso_web 64k;` +
+  `server web:8000 resolve;` (nginx >= 1.27.3, image is 1.28), keepalive kept.
+- `run_webhook_worker`: INFO logs on start (pid, poll, heartbeat path), SIGTERM/stop, non-empty delivery counts,
+  recovery after failure; writes a JSON heartbeat (`ts`, `ok`, `last_ok`, `error`) atomically to
+  `/tmp/sso-webhook-worker.heartbeat` after every loop (not in `--once`).
+- `docker/healthcheck.py`: new `--worker` mode checking the heartbeat (`SSO_HEALTHCHECK_MAX_AGE`, default 300 s);
+  both modes print the failure reason (shown in `docker inspect ... .State.Health`).
+- `docker-compose.yml`: webhooks healthcheck `["CMD", "python", "/app/docker/healthcheck.py", "--worker"]`.
+
+**Related files.** `docker/nginx.conf`, `docker/healthcheck.py`, `docker-compose.yml`,
+`sso/management/commands/run_webhook_worker.py`, `sso/tests/test_webhook_worker_health.py`, `.env.example`,
+`README.md`, `HISTORY.md`
+
+**Test coverage.** New `sso/tests/test_webhook_worker_health.py`: loop logging and heartbeat across success, failure and recovery;
+no heartbeat in `--once`; healthcheck worker mode (missing/corrupt/fresh/retrying/stale/never); web mode message;
+compose and nginx config assertions. `nginx -t` passes on the rendered template (nginx:1.28-alpine).
+
+## 2026-10-16 — docs: v1.3d design §19, reaching the admin UI from another LAN host
+
+**Goal.** Record how to reach the SSO / admin UI from another machine on the LAN, after
+`curl -k https://192.168.0.212/healthz` failed with `tlsv1 unrecognized name` (browser:
+`ERR_SSL_UNRECOGNIZED_NAME_ALERT`).
+
+**Root cause.** Not a bug: IP-literal URLs carry no SNI, so nginx's `:443` default server
+(`ssl_reject_handshake on`) rejects the handshake by design. The server must be called by `SSO_HOSTNAME`.
+
+**Implementation.** New §19 in the design: cause, `curl --resolve` quick check, `.env` + certificate changes for a
+LAN hostname, and §19.1 on editing the Windows hosts file as Administrator (Notepad, PowerShell, WSL). No code,
+config or env variable changes.
+
+**Related files.** `docs/DESIGN-v1.3d-admin-ui.md`, `HISTORY.md`
+
+**Test coverage.** Docs only. No tests added or removed.
+
 ## 2026-10-15 — v1.3d: admin web UI on the SSO server (`feat/v1.3d-admin-ui`)
 
 **Goal.** Implement `docs/DESIGN-v1.3d-admin-ui.md`: the day-to-day admin UI as server-rendered pages at

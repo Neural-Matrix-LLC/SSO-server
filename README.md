@@ -392,6 +392,10 @@ notify_secret_enc`; v1.3d `sso_adminauditlog.channel` (+ index; existing rows ge
   v1.3c sends signed webhooks to `notify_url`: set the signing secret with
   `POST /api/v1/admin/services/<id>/rotate-notify-secret` (step-up) or `manage.py rotate_notify_secret <id>`, and run
   the compose service `webhooks`. Set `SSO_WEBHOOK_SECRET_KEY` in production. See API reference §10.
+  The worker logs start/stop, delivery counts and failures (`docker compose logs webhooks`); its healthcheck
+  (`docker/healthcheck.py --worker`) reads the heartbeat it writes after each loop and turns unhealthy when the last
+  successful loop is older than `SSO_HEALTHCHECK_MAX_AGE` s (default 300). The reason is in
+  `docker inspect --format '{{json .State.Health}}' sso-webhooks-1`.
 
 Hand the secret to the service owner through the password manager. The service calls
 `POST /api/v1/auth/introspect` with HTTP Basic `client_id:client_secret` and the body `{"token": "<access token>"}`.

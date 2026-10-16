@@ -33,6 +33,7 @@ Labels: **[Decision]** agreed with Thomas, **[Proposal]** a design choice for Th
 16. Test plan for QA
 17. Rollout
 18. Open questions
+19. Reaching the UI from another LAN host
 
 ---
 
@@ -566,3 +567,88 @@ Throttle scopes (DRF/Django cache, Redis): `admin_ui_login` 10/min per IP + 5/mi
    cosmetic. [Proposal: `/admin/` + allow-list or separate admin hostname]
 2. **Separate admin hostname** in production (e.g. `admin.<domain>`) or path-only on the main SSO host?
 3. **MFA for admins** (TOTP/WebAuthn) — not in v1.3d; add to TODOS as a follow-up, or required before go-live?
+
+## 19. Reaching the UI from another LAN host
+
+**[Repo]** Symptom when the SSO host is called by IP from another machine (here the SSO host is
+`192.168.0.212`):
+
+```
+$ curl -k https://192.168.0.212/healthz
+curl: (35) error:0A000458:SSL routines::tlsv1 unrecognized name
+```
+
+and `ERR_SSL_UNRECOGNIZED_NAME_ALERT` in the browser for `https://192.168.0.212/admin/`.
+
+**Cause.** Neither curl nor a browser sends SNI for an IP-literal URL. Without a matching name the connection
+goes to nginx's `:443` default server (`docker/nginx.conf`), whose `ssl_reject_handshake on` aborts the
+handshake. Only `server_name ${SSO_HOSTNAME}` serves the SSO, and the certificate must cover that name. This
+is intended: do not make nginx answer on the bare IP. Call the server by a hostname instead.
+
+**Quick check (no changes).** If `SSO_HOSTNAME=localhost`, map that name to the server's IP for one request:
+
+```bash
+curl -k --resolve localhost:443:192.168.0.212 https://localhost/healthz
+```
+
+If this answers, the network path is fine and only the name is missing.
+
+**Fix: give the server a hostname** (`sso.lan` below; any name works).
+
+1. **Server, `.env`:**
+   ```
+   SSO_HOSTNAME=sso.lan
+   SSO_ALLOWED_HOSTS=localhost,127.0.0.1,sso.lan
+   SSO_ISSUER=https://sso.lan
+   SSO_CSRF_TRUSTED_ORIGINS=https://sso.lan
+   ```
+   Changing `SSO_ISSUER` invalidates tokens already issued (their `iss` no longer matches). Keep host-specific
+   values in `.env` only, never in `.env.example`.
+2. **Server, self-signed certificate covering the new name**, then recreate the containers:
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+     -keyout docker/certs/selfsigned.key -out docker/certs/selfsigned.crt \
+     -subj "/CN=sso.lan" -addext "subjectAltName=DNS:sso.lan,DNS:localhost,IP:127.0.0.1"
+   docker compose up -d --force-recreate web nginx
+   ```
+3. **Client, hosts entry** `192.168.0.212    sso.lan` (see below), then open `https://sso.lan/admin/` (accept the
+   self-signed certificate warning) or run `curl -k https://sso.lan/healthz`.
+
+### 19.1 Editing the hosts file on a Windows client
+
+Windows only lets an elevated editor save `C:\Windows\System32\drivers\etc\hosts`.
+
+**Option 1: Notepad**
+
+1. **Start**, type `notepad`, right-click **Notepad** → **Run as administrator**, confirm the prompt.
+2. **File → Open**, paste `C:\Windows\System32\drivers\etc\hosts` as the file name and set the type
+   dropdown to **All Files (\*.\*)** (the file has no extension).
+3. Add at the end:
+   ```
+   192.168.0.212    sso.lan
+   ```
+4. Save with **Ctrl+S**. Make sure it is not saved as `hosts.txt`.
+
+**Option 2: PowerShell.** Right-click **Start** → **Terminal (Admin)** / **Windows PowerShell (Admin)**:
+
+```powershell
+Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "`n192.168.0.212    sso.lan"
+```
+
+**Check:**
+
+```powershell
+ipconfig /flushdns
+ping sso.lan
+```
+
+`ping` should show `192.168.0.212`. Restart an already open browser (it keeps its own DNS cache).
+
+**WSL.** WSL copies the Windows hosts file into its `/etc/hosts` only when it starts. Run `wsl --shutdown` in
+PowerShell and reopen WSL, or add the line in WSL directly:
+
+```bash
+echo "192.168.0.212    sso.lan" | sudo tee -a /etc/hosts
+```
+
+If antivirus (e.g. Defender tamper protection) blocks saving the hosts file, allow the change and save again.
