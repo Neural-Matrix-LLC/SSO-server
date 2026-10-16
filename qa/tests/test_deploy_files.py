@@ -286,7 +286,9 @@ def test_DEPLOY_19_proxy_and_cache_hardening_still_in_place(repo):
     assert re.search(r"SSO_NUM_PROXIES\s*=\s*env\.int\(\"SSO_NUM_PROXIES\",\s*default=0\)",
                      _read(repo, "ssoproject/settings.py"))
     web = _service_block(_read(repo, "docker-compose.yml"), "web")
-    assert _interpolate(_yaml_value(web, "SSO_NUM_PROXIES"), {}) == "1"
+    # b2ec20e: SSO_NUM_PROXIES (deprecated) replaced by SSO_TRUSTED_PROXIES = the nginx edge network
+    assert "SSO_NUM_PROXIES" not in web, "compose must not set the deprecated SSO_NUM_PROXIES"
+    assert _interpolate(_yaml_value(web, "SSO_TRUSTED_PROXIES"), {}) == "172.31.250.0/24"
     assert _interpolate(_yaml_value(web, "SSO_CACHE_URL"), {}) == "redis://redis:6379/0"
     assert not re.search(r"^\s+ports:", web, re.M), "web must not be published"
     conf = "".join(_text(p) for p in _find(repo, "nginx.conf"))
