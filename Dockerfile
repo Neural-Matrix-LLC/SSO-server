@@ -49,6 +49,7 @@ COPY --chown=root:root manage.py ./
 COPY --chown=root:root ssoproject ./ssoproject
 COPY --chown=root:root sso ./sso
 COPY --chown=root:root application ./application
+COPY --chown=root:root adminui ./adminui
 COPY --chown=root:root docker/healthcheck.py docker/dbcheck.py ./docker/
 # Admin static files are collected at build time and served by WhiteNoise (R4). A throw-away DEBUG
 # config is used only for this step (ephemeral key in memory, nothing written but staticfiles/).
