@@ -3,6 +3,40 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-10-15 — v1.3d: admin web UI on the SSO server (`feat/v1.3d-admin-ui`)
+
+**Goal.** Implement `docs/DESIGN-v1.3d-admin-ui.md`: the day-to-day admin UI as server-rendered pages at
+`/<SSO_ADMIN_UI_PATH>` (default `/admin/`), sharing all business rules with the admin REST API.
+
+**Implementation.**
+- `sso/admin_ops.py`: domain layer moved out of `sso/admin_api.py` (guards, invariants, step-up check, users, groups,
+  permissions, services, devices, apps/import, audit, webhooks); the REST API is now thin DRF views over it, URLs and
+  responses unchanged except the additive audit `channel` field and `?channel=` filter.
+- Audit `channel` (`api` | `ui` | `django_admin` reserved | `system`): migration `sso 0007_v13d_audit_channel`
+  (AddField only), `sso_schema_check`, `scripts/upgrade_db.sh`, DBA file `docs/db/upgrade-v1.3-to-v1.3d.sql`.
+- `adminui` app: own session cookie `__Host-sso_admin_sid` (Strict, HttpOnly, browser-session), CSRF cookie
+  `__Host-sso_admin_csrf`, guard middleware (idle 30 min / max 8 h, IP binding, token revocation, admin re-check
+  every request), login throttles, step-up page bound to the UI session and IP, CSP + security headers, all §10 pages,
+  CSV exports (formula-safe), import preview/apply with HMAC digest, HTML error pages under the UI path.
+- `application/permfile.py`: permission files are parsed with `ast` only (64 KiB cap), never executed.
+- Deploy: nginx `location = /${SSO_ADMIN_UI_PATH}login/` (login rate limit) and `location /${SSO_ADMIN_UI_PATH}`,
+  both including `sso-admin-ui.d/*.conf` (allow-list, `SSO_ADMIN_UI_ALLOW_DIR`); optional admin hostname via whole
+  server blocks in `sso-admin-host.d/` (`SSO_ADMIN_UI_HOST_DIR`, sample provided) plus Django's Host check and
+  system check `adminui.E001` (design updated to this approach). Compose and `.env.example` updated.
+- QA fixes V13D-01..04 (see `qa/RESULTS-v1.3d.md`). MFA stays in TODOS.
+
+**Related files.** `adminui/` (new), `sso/admin_ops.py` (new), `sso/admin_api.py`, `sso/stepup.py`, `sso/audit.py`,
+`sso/models.py`, `sso/migrations/0007_v13d_audit_channel.py`, `application/permfile.py`,
+`scripts/sso_permissions_to_json.py`, `ssoproject/settings.py`, `ssoproject/urls.py`, `docker/nginx.conf`,
+`docker/nginx-admin-ui.d/`, `docker/nginx-admin-host.d/`, `docker-compose.yml`, `.env.example`,
+`sso/management/commands/sso_schema_check.py`, `scripts/upgrade_db.sh`, `docs/db/upgrade-v1.3-to-v1.3d.sql`,
+README, ARCHITECTURE, API-REFERENCE-MANUAL, DESIGN-v1.3d, `qa/blackbox/bb_v13d.py`, `qa/RESULTS-v1.3d.md`.
+
+**Test coverage.** New `sso/tests/test_adminui_v13d.py` (58 test cases: auth matrix, cookies, timeouts, IP binding,
+CSRF, step-up, guards, audit channel, import parse-never-execute, secrets, headers, hostname, settings validation);
+new static check DEPLOY_21; DEPLOY_19 fixed. SQLite Django 5.2 and 4.2, MySQL 8.4 (539 passed) and 8.0 (538 passed),
+black-box through nginx 33/33. Details in `qa/RESULTS-v1.3d.md`.
+
 ## 2026-10-15 — docs: admin UI moves from FUND to the SSO server (v1.3d design)
 
 **Goal.** Record Thomas's decision (2026-10-15) that the admin UI lives on the SSO server's own `/admin`, not in
