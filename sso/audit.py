@@ -45,7 +45,16 @@ def _emit(row: AdminAuditLog) -> None:
     logger.info(json.dumps({
         "event": "admin_audit", "action": row.action, "actor": f"{row.actor_type}:{row.actor_id}",
         "ip": row.actor_ip, "target": f"{row.target_type}:{row.target_id}", "result": row.result,
-        "stepup": row.stepup, "request_id": row.request_id}, sort_keys=True, default=str))
+        "stepup": row.stepup, "request_id": row.request_id,
+        "channel": row.channel}, sort_keys=True, default=str))
+
+
+CHANNEL_ATTR = "sso_audit_channel"  # v1.3d: set on the Django request by adminui ("ui"); default "api"
+
+
+def channel_of(request) -> str:
+    django_request = getattr(request, "_request", request)
+    return getattr(django_request, CHANNEL_ATTR, None) or "api"
 
 
 def _build(request, action, target_type, target_id, before, after, result, stepup) -> AdminAuditLog:
@@ -55,7 +64,7 @@ def _build(request, action, target_type, target_id, before, after, result, stepu
     return AdminAuditLog(actor_type=actor_type, actor_id=actor_id, actor_ip=client_ip(request) or "",
                          action=action, target_type=target_type, target_id=str(target_id or "")[:191],
                          before=before, after=after, request_id=request_id(request), result=result,
-                         stepup=bool(stepup))
+                         stepup=bool(stepup), channel=channel_of(request))
 
 
 def record(request, action: str, target_type: str = "", target_id="", *, before=None, after=None,

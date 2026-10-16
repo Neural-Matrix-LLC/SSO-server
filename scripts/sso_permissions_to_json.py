@@ -8,38 +8,12 @@ assignments are read with ``ast.literal_eval``. Any other statement (import, cal
 """
 from __future__ import annotations
 
-import ast
 import json
+import os
 import sys
 
-NAMES = {"APP_CODENAME", "APP_NAME", "APP_DESCRIPTION", "PERMISSIONS_VERSION", "PERMISSIONS"}
-
-
-def parse(source: str) -> dict:
-    tree = ast.parse(source)
-    values = {}
-    for node in tree.body:
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-            continue  # docstring
-        if not (isinstance(node, (ast.Assign, ast.AnnAssign))):
-            raise ValueError(f"line {node.lineno}: only NAME = <literal> assignments are allowed")
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
-            raise ValueError(f"line {node.lineno}: only NAME = <literal> assignments are allowed")
-        name = targets[0].id
-        if name in NAMES:
-            values[name] = ast.literal_eval(node.value)
-    missing = sorted({"APP_CODENAME", "APP_NAME", "PERMISSIONS_VERSION", "PERMISSIONS"} - set(values))
-    if missing:
-        raise ValueError("missing: " + ", ".join(missing))
-    perms = []
-    for item in values["PERMISSIONS"]:
-        if not isinstance(item, (tuple, list)) or len(item) not in (2, 3):
-            raise ValueError(f"PERMISSIONS entry {item!r}: expected (codename, name[, description])")
-        perms.append({"codename": item[0], "name": item[1], "description": item[2] if len(item) == 3 else ""})
-    return {"app_codename": values["APP_CODENAME"], "app_name": values["APP_NAME"],
-            "description": values.get("APP_DESCRIPTION", ""), "version": values["PERMISSIONS_VERSION"],
-            "permissions": perms}
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from application.permfile import PermFileError, parse  # noqa: E402  (no Django needed)
 
 
 def main(argv: list[str]) -> int:
@@ -49,7 +23,7 @@ def main(argv: list[str]) -> int:
     try:
         with open(argv[1], encoding="utf-8") as f:
             data = parse(f.read())
-    except (OSError, SyntaxError, ValueError) as exc:
+    except (OSError, PermFileError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     json.dump(data, sys.stdout, indent=2, ensure_ascii=False)

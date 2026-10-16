@@ -156,6 +156,8 @@ class AdminAuditLog(models.Model):
     request_id = models.CharField(max_length=64, blank=True, default="")
     result = models.CharField(max_length=16, default="ok")  # ok | denied | error
     stepup = models.BooleanField(default=False)
+    # v1.3d: where the change came from: api | ui | django_admin | system
+    channel = models.CharField(max_length=16, default="api", db_index=True)
 
     class Meta:
         ordering = ["-ts", "-id"]

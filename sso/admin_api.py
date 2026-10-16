@@ -1,47 +1,32 @@
 """SSO admin REST API ``/api/v1/admin/…`` (DESIGN-v1.3a-admin-api.md §3-§4).
 
-Caller: an active **staff** (``is_staff``) user holding ``application.sso_admin`` (direct or via a group) or a superuser, with a Bearer
-user access token, checked in the DB on every call (token ``perms`` are not trusted). IP binding applies.
-Exception: an application's own ServiceClient (Basic) may import its own permissions.
+Caller: an active **staff** (``is_staff``) user holding ``application.sso_admin`` (direct or via a group) or a
+superuser, with a Bearer user access token, checked in the DB on every call (token ``perms`` are not trusted). IP
+binding applies. Exception: an application's own ServiceClient (Basic) may import its own permissions.
 
-Every change writes one audit row in the same transaction (sso/audit.py). Destructive actions need step-up
-(``X-SSO-Reauth``, sso/stepup.py). Guards: no self-suspend/delete, never remove your own admin right, at least
-one active admin remains (checked after the change, inside the transaction, so a violation rolls it back).
+v1.3d: the views are thin HTTP adapters; every rule (guards, step-up, audit, webhooks) lives in
+``sso/admin_ops.py``, which the admin web UI (``adminui/``) uses too. The JSON contract is unchanged, plus the
+additive audit ``channel`` field / filter.
 """
 from __future__ import annotations
 
-from datetime import timezone as dt_timezone
-
-from django.contrib.auth.models import Group, Permission, User
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.validators import URLValidator
-from django.db import IntegrityError, transaction
-from django.db.models import Q
-from django.utils import timezone
-from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.throttling import SimpleRateThrottle
 from rest_framework.views import APIView
 
-from application.importer import ImportError_, VersionTooOld, import_permissions
-from application.models import CODENAME_RE, Application, ApplicationPermissionRecord
-from application.permissions import (PREFIX, anchor_content_type, app_permissions, code_defined_codenames,
-                                     delete_permission, ensure_permission, user_app_perms, validate_codename)
-
-from . import audit, stepup
+from . import admin_ops as ops
+from . import audit
+from .admin_ops import (ADMIN_CODENAME, admin_permission, admins_qs, check_invariants, is_sso_admin,  # noqa: F401
+                        ser_app, ser_audit, ser_delivery, ser_event, ser_group, ser_permission, ser_service,
+                        ser_user)
 from .authentication import ServiceClientBasicAuthentication, ServicePrincipal, SSOAccessTokenAuthentication
-from .errors import (AdminForbidden, Conflict, InvalidCredentials, InvalidRequest, LastAdmin, NotFound,
-                     SelfActionForbidden, TokenInvalid, VersionConflict)
+from .errors import AdminForbidden, InvalidRequest, NotFound, TokenInvalid
 from .ipbinding import CIP_CLAIM, ip_matches, log_mismatch, mode as ip_mode
 from .logs import client_ip
-from .models import AdminAuditLog, ServiceClient
-from .revocation import revoke_session, revoke_user_tokens
-from .serializers import check_credentials
-from .tokens import SID_CLAIM, service_client_perms
+from .revocation import revoke_session
+from .tokens import SID_CLAIM
 
-ADMIN_CODENAME = "sso_admin"
 MAX_PAGE_SIZE = 200
 
 
@@ -62,37 +47,6 @@ class AdminTokenAuthentication(SSOAccessTokenAuthentication):
                     revoke_session(user, token[SID_CLAIM], "ip_mismatch")
                 raise TokenInvalid()
         return user, token
-
-
-def admin_permission() -> Permission | None:
-    return Permission.objects.filter(content_type=anchor_content_type(), codename=ADMIN_CODENAME).first()
-
-
-def admins_qs():
-    perm = admin_permission()
-    q = Q(is_superuser=True)
-    if perm is not None:
-        q |= Q(user_permissions=perm) | Q(groups__permissions=perm)
-    # active + is_staff + (sso_admin or superuser): Thomas 2026-10-15, so Django admin and the API agree on staff
-    return User.objects.filter(is_active=True, is_staff=True).filter(q).distinct()
-
-
-def is_sso_admin(user) -> bool:
-    if user is None or not getattr(user, "pk", None):
-        return False
-    return admins_qs().filter(pk=user.pk).exists()
-
-
-def check_invariants(actor) -> None:
-    """After a change, inside its transaction: the actor is still an admin, and some admin remains."""
-    if isinstance(actor, ServicePrincipal):
-        if not admins_qs().exists():
-            raise LastAdmin()
-        return
-    if not is_sso_admin(actor):
-        raise SelfActionForbidden("You cannot remove your own SSO administrator access.")
-    if not admins_qs().exists():  # pragma: no cover - the actor is one
-        raise LastAdmin()
 
 
 class AdminThrottle(SimpleRateThrottle):
@@ -118,16 +72,13 @@ class AdminAPIView(APIView):
     def get_authenticate_header(self, request):
         return 'Bearer realm="sso-admin", error="invalid_token"'
 
-    def initial(self, request, *args, **kwargs):
-        super().initial(request, *args, **kwargs)  # authentication, then throttles
-
     def check_permissions(self, request):
         user = request.user
         if user is None:
             raise TokenInvalid("Authentication credentials were missing or invalid.")
         if isinstance(user, ServicePrincipal):
             if self.allow_service_import:
-                return  # the view checks app ownership
+                return  # admin_ops.import_app checks app ownership
             self._deny(request, "service client")
         if not is_sso_admin(user):
             self._deny(request, "not an sso admin")
@@ -143,12 +94,6 @@ class AdminAPIView(APIView):
         response["Cache-Control"] = "no-store"
         return response
 
-    # helpers
-    def stepup(self, request, action, target_type="", target_id=""):
-        if not stepup.is_valid(request):
-            audit.record_denied(request, action, target_type, target_id, reason="reauth_required", stepup=True)
-            stepup.require_stepup(request)
-
     def body(self, request) -> dict:
         if not isinstance(request.data, dict):
             raise InvalidRequest("Request body must be a JSON object.")
@@ -161,104 +106,13 @@ def paginate(request, qs, ser):
         size = min(MAX_PAGE_SIZE, max(1, int(request.query_params.get("page_size", 50))))
     except ValueError:
         raise InvalidRequest("page and page_size must be integers.") from None
-    count = qs.count()
+    count = qs.count() if hasattr(qs, "count") and not isinstance(qs, list) else len(qs)
     items = qs[(page - 1) * size: page * size]
     return Response({"count": count, "page": page, "page_size": size, "results": [ser(o) for o in items]})
 
 
-def _bool_param(value: str | None) -> bool | None:
-    if value is None or value == "":
-        return None
-    if value.lower() in ("1", "true", "yes"):
-        return True
-    if value.lower() in ("0", "false", "no"):
-        return False
-    raise InvalidRequest("Boolean query parameters take true or false.")
-
-
-def _iso(dt):
-    return dt.isoformat().replace("+00:00", "Z") if dt else None
-
-
-def _str_field(data, key, max_len, *, required=False, allow_blank=True):
-    if key not in data:
-        if required:
-            raise InvalidRequest(f"Missing or malformed fields: {key}.")
-        return None
-    value = data[key]
-    if not isinstance(value, str) or len(value) > max_len or (not allow_blank and not value.strip()):
-        raise InvalidRequest(f"Missing or malformed fields: {key}.")
-    return value.strip() if not allow_blank else value
-
-
-def _codename(raw: str) -> str:
-    code = raw[len(PREFIX):] if raw.startswith(PREFIX) else raw
-    try:
-        return validate_codename(code)
-    except ValueError:
-        raise NotFound("Unknown permission.") from None
-
-
-def get_permission(raw: str) -> Permission:
-    perm = app_permissions().filter(codename=_codename(raw)).first()
-    if perm is None:
-        raise NotFound("Unknown permission.")
-    return perm
-
-
-# --------------------------------------------------------------------------- serializers
-def ser_user(u: User) -> dict:
-    return {"id": u.pk, "username": u.username, "email": u.email or "", "first_name": u.first_name,
-            "last_name": u.last_name, "is_active": u.is_active, "is_staff": u.is_staff,
-            "is_superuser": u.is_superuser, "groups": sorted(g.name for g in u.groups.all()),
-            "perms": user_app_perms(u) if u.is_active else _granted_perms(u),
-            "last_login": _iso(u.last_login), "date_joined": _iso(u.date_joined)}
-
-
-def _granted_perms(u: User) -> list[str]:
-    perms = Permission.objects.filter(content_type__app_label="application").filter(
-        Q(user=u) | Q(group__user=u))
-    return sorted({PREFIX + c for c in perms.values_list("codename", flat=True)})
-
-
-def ser_group(g: Group) -> dict:
-    return {"id": g.pk, "name": g.name,
-            "perms": sorted(PREFIX + c for c in g.permissions.filter(
-                content_type__app_label="application").values_list("codename", flat=True)),
-            "members": sorted(g.user_set.values_list("pk", flat=True))}
-
-
-def ser_permission(p: Permission, rec: ApplicationPermissionRecord | None = None, counts=True) -> dict:
-    if rec is None:
-        rec = ApplicationPermissionRecord.objects.filter(codename=p.codename).first()
-    out = {"codename": p.codename, "perm": PREFIX + p.codename, "name": p.name,
-           "description": rec.description if rec else "", "app_codename": rec.app_codename if rec else None,
-           "deprecated": bool(rec and rec.deprecated_at), "deprecated_at": _iso(rec.deprecated_at) if rec else None,
-           "code_defined": p.codename in code_defined_codenames()}
-    if counts:
-        out["users"] = p.user_set.count()
-        out["groups"] = p.group_set.count()
-    return out
-
-
-def ser_service(c: ServiceClient) -> dict:
-    return {"client_id": c.client_id, "name": c.name, "app_codename": c.app_codename, "notify_url": c.notify_url,
-            "is_active": c.is_active, "perms": service_client_perms(c), "created": _iso(c.created),
-            "secret_rotated_at": _iso(c.secret_rotated_at), "kind": c.kind, "can_delegate": c.can_delegate,
-            "can_register_devices": c.can_register_devices, "notify_events": c.notify_events or [],
-            "has_notify_secret": bool(c.notify_secret_enc)}
-
-
-def ser_audit(a: AdminAuditLog) -> dict:
-    return {"id": a.pk, "ts": _iso(a.ts), "actor_type": a.actor_type, "actor_id": a.actor_id,
-            "actor_ip": a.actor_ip, "action": a.action, "target_type": a.target_type, "target_id": a.target_id,
-            "before": a.before, "after": a.after, "request_id": a.request_id, "result": a.result,
-            "stepup": a.stepup}
-
-
-def snap_user(u: User) -> dict:
-    return {"username": u.username, "email": u.email, "first_name": u.first_name, "last_name": u.last_name,
-            "is_active": u.is_active, "groups": sorted(g.name for g in u.groups.all())}
+def _q(request, key):
+    return request.query_params.get(key)
 
 
 # --------------------------------------------------------------------------- reauth
@@ -266,497 +120,141 @@ class ReauthView(AdminAPIView):
     throttle_classes = [ReauthThrottle]
 
     def post(self, request):
-        data = self.body(request)
-        password = data.get("password")
-        if not isinstance(password, str) or not password or len(password) > 4096:
-            raise InvalidRequest("Missing or malformed fields: password.")
-        ok = check_credentials(request._request, request.user.get_username(), password)
-        if ok is None or ok.pk != request.user.pk:
-            audit.record_denied(request, "reauth", "user", request.user.pk, reason="invalid_credentials")
-            raise InvalidCredentials("Password is incorrect.")
-        with transaction.atomic():
-            raw, ttl = stepup.issue(request)
-            audit.record(request, "reauth", "user", request.user.pk)
+        raw, ttl = ops.reauth(request, self.body(request).get("password"))
         return Response({"reauth_token": raw, "expires_in": ttl})
 
 
 # --------------------------------------------------------------------------- users
-def get_user(pk) -> User:
-    user = User.objects.filter(pk=pk).first()
-    if user is None:
-        raise NotFound("Unknown user.")
-    return user
-
-
 class UsersView(AdminAPIView):
     def get(self, request):
-        qs = User.objects.all().order_by("username").prefetch_related("groups")
-        q = request.query_params.get("q", "").strip()
-        if q:
-            qs = qs.filter(Q(username__icontains=q) | Q(email__icontains=q) | Q(first_name__icontains=q)
-                           | Q(last_name__icontains=q))
-        active = _bool_param(request.query_params.get("active"))
-        if active is not None:
-            qs = qs.filter(is_active=active)
-        group = request.query_params.get("group")
-        if group:
-            qs = qs.filter(groups__name=group)
-        return paginate(request, qs.distinct(), ser_user)
+        qs = ops.users_qs(_q(request, "q"), ops.bool_param(_q(request, "active")), _q(request, "group"))
+        return paginate(request, qs, ser_user)
 
     def post(self, request):
-        data = self.body(request)
-        username = _str_field(data, "username", 150, required=True, allow_blank=False)
-        email = _str_field(data, "email", 254) or ""
-        first = _str_field(data, "first_name", 150) or ""
-        last = _str_field(data, "last_name", 150) or ""
-        password = data.get("password")
-        is_active = data.get("is_active", True)
-        groups = data.get("groups", [])
-        if not isinstance(is_active, bool) or not isinstance(groups, list) or not all(isinstance(g, str) for g in groups):
-            raise InvalidRequest("Missing or malformed fields: is_active, groups.")
-        user = User(username=username, email=email, first_name=first, last_name=last, is_active=is_active)
-        try:
-            user.full_clean(exclude=["password"], validate_unique=False)
-        except DjangoValidationError as exc:
-            raise InvalidRequest("Invalid fields: " + ", ".join(sorted(exc.message_dict))) from None
-        if password is not None:
-            if not isinstance(password, str):
-                raise InvalidRequest("Missing or malformed fields: password.")
-            _validate_pw(password, user)
-        group_objs = list(Group.objects.filter(name__in=groups))
-        if len(group_objs) != len(set(groups)):
-            raise InvalidRequest("Unknown group in groups.")
-        if User.objects.filter(username__iexact=username).exists():
-            raise Conflict("A user with this username exists.")
-        with transaction.atomic():
-            if password is not None:
-                user.set_password(password)
-            else:
-                user.set_unusable_password()
-            try:
-                user.save()
-            except IntegrityError:
-                raise Conflict("A user with this username exists.") from None
-            user.groups.set(group_objs)
-            audit.record(request, "user.create", "user", user.pk, after=snap_user(user))
-        return Response(ser_user(user), status=status.HTTP_201_CREATED)
-
-
-def _validate_pw(password, user):
-    try:
-        validate_password(password, user)
-    except DjangoValidationError as exc:
-        raise InvalidRequest("Password rejected: " + " ".join(exc.messages)) from None
+        return Response(ser_user(ops.create_user(request, self.body(request))), status=status.HTTP_201_CREATED)
 
 
 class UserView(AdminAPIView):
     def get(self, request, pk):
-        return Response(ser_user(get_user(pk)))
+        return Response(ser_user(ops.get_user(pk)))
 
     def patch(self, request, pk):
-        data = self.body(request)
-        unknown = set(data) - {"email", "first_name", "last_name"}
-        if unknown:
-            raise InvalidRequest("Not editable here: " + ", ".join(sorted(unknown)) + ".")
-        user = get_user(pk)
-        before = snap_user(user)
-        for key, max_len in (("email", 254), ("first_name", 150), ("last_name", 150)):
-            value = _str_field(data, key, max_len)
-            if value is not None:
-                setattr(user, key, value)
-        try:
-            user.full_clean(exclude=["password"], validate_unique=False)
-        except DjangoValidationError as exc:
-            raise InvalidRequest("Invalid fields: " + ", ".join(sorted(exc.message_dict))) from None
-        with transaction.atomic():
-            user.save(update_fields=["email", "first_name", "last_name"])
-            audit.record(request, "user.update", "user", user.pk, before=before, after=snap_user(user))
-        return Response(ser_user(user))
+        return Response(ser_user(ops.update_user(request, pk, self.body(request))))
 
     def delete(self, request, pk):
-        user = get_user(pk)
-        if user.pk == request.user.pk:
-            raise SelfActionForbidden("You cannot delete your own account.")
-        self.stepup(request, "user.delete", "user", user.pk)
-        with transaction.atomic():
-            before = snap_user(user)
-            revoke_user_tokens(user, None)  # user.deleted is emitted by the post_delete signal
-            audit.record(request, "user.delete", "user", user.pk, before=before, stepup=True)
-            user.delete()
-            check_invariants(request.user)
+        ops.delete_user(request, pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class UserActionView(AdminAPIView):
     def post(self, request, pk, action):
-        user = get_user(pk)
         if action == "suspend":
-            if user.pk == request.user.pk:
-                raise SelfActionForbidden("You cannot suspend yourself.")
-            self.stepup(request, "user.suspend", "user", user.pk)
-            with transaction.atomic():
-                was = user.is_active
-                user.is_active = False
-                user.save()  # the v1.2a signal revokes every token and session
-                if was is False:
-                    revoke_user_tokens(user, "suspended")
-                audit.record(request, "user.suspend", "user", user.pk, before={"is_active": was},
-                             after={"is_active": False}, stepup=True)
-                check_invariants(request.user)
-            return Response(ser_user(user))
+            return Response(ser_user(ops.suspend_user(request, pk)))
         if action == "unsuspend":
-            with transaction.atomic():
-                was = user.is_active
-                user.is_active = True
-                user.save()
-                audit.record(request, "user.unsuspend", "user", user.pk, before={"is_active": was},
-                             after={"is_active": True})
-            return Response(ser_user(user))
+            return Response(ser_user(ops.unsuspend_user(request, pk)))
         if action == "logout-all":
-            with transaction.atomic():
-                revoke_user_tokens(user, "admin")
-                audit.record(request, "user.logout_all", "user", user.pk)
+            ops.logout_all_user(request, pk)
             return Response(status=status.HTTP_204_NO_CONTENT)
         if action == "set-password":
-            data = self.body(request)
-            password = data.get("password")
-            if not isinstance(password, str) or not password:
-                raise InvalidRequest("Missing or malformed fields: password.")
-            self.stepup(request, "user.set_password", "user", user.pk)
-            _validate_pw(password, user)
-            with transaction.atomic():
-                user.set_password(password)
-                user.save()  # the password signal revokes and emits token.revoked(password_change)
-                audit.record(request, "user.set_password", "user", user.pk, after={"password": "changed"},
-                             stepup=True)
+            ops.get_user(pk)
+            ops.set_user_password(request, pk, self.body(request).get("password"))
             return Response(status=status.HTTP_204_NO_CONTENT)
         raise NotFound()
 
 
 class UserPermissionsView(AdminAPIView):
     def get(self, request, pk):
-        user = get_user(pk)
-        direct = sorted(PREFIX + c for c in user.user_permissions.filter(
-            content_type__app_label="application").values_list("codename", flat=True))
-        via = {g.name: sorted(PREFIX + c for c in g.permissions.filter(
-            content_type__app_label="application").values_list("codename", flat=True))
-            for g in user.groups.all()}
-        return Response({"direct": direct, "via_groups": via, "effective": user_app_perms(user)})
+        return Response(ops.user_permissions(pk))
 
 
 class UserPermissionView(AdminAPIView):
-    def _change(self, request, pk, codename, grant: bool):
-        user = get_user(pk)
-        perm = get_permission(codename)
-        action = "user.grant" if grant else "user.revoke"
-        is_admin_perm = perm.codename == ADMIN_CODENAME
-        if is_admin_perm and not grant and user.pk == request.user.pk:
-            raise SelfActionForbidden("You cannot remove your own SSO administrator access.")
-        if is_admin_perm:
-            self.stepup(request, action, "user", user.pk)
-        with transaction.atomic():
-            (user.user_permissions.add if grant else user.user_permissions.remove)(perm)
-            audit.record(request, action, "user", user.pk, after={"perm": PREFIX + perm.codename},
-                         stepup=is_admin_perm)
-            check_invariants(request.user)
+    def post(self, request, pk, codename):
+        ops.change_user_permission(request, pk, codename, True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    def post(self, request, pk, codename):
-        return self._change(request, pk, codename, True)
-
     def delete(self, request, pk, codename):
-        return self._change(request, pk, codename, False)
-
-
-def _admin_group_ids() -> set[int]:
-    perm = admin_permission()
-    return set(perm.group_set.values_list("pk", flat=True)) if perm else set()
+        ops.change_user_permission(request, pk, codename, False)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class UserGroupsView(AdminAPIView):
     def put(self, request, pk):
-        data = self.body(request)
-        names = data.get("groups")
-        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-            raise InvalidRequest("Missing or malformed fields: groups.")
-        user = get_user(pk)
-        groups = list(Group.objects.filter(name__in=names))
-        if len(groups) != len(set(names)):
-            raise InvalidRequest("Unknown group in groups.")
-        old_ids = set(user.groups.values_list("pk", flat=True))
-        touches_admin = bool((old_ids ^ {g.pk for g in groups}) & _admin_group_ids())
-        if touches_admin:
-            self.stepup(request, "user.groups", "user", user.pk)
-        with transaction.atomic():
-            before = sorted(user.groups.values_list("name", flat=True))
-            user.groups.set(groups)
-            audit.record(request, "user.groups", "user", user.pk, before={"groups": before},
-                         after={"groups": sorted(g.name for g in groups)}, stepup=touches_admin)
-            check_invariants(request.user)
-        return Response(ser_user(user))
+        return Response(ser_user(ops.set_user_groups(request, pk, self.body(request).get("groups"))))
 
 
 # --------------------------------------------------------------------------- groups
-def get_group(pk) -> Group:
-    group = Group.objects.filter(pk=pk).first()
-    if group is None:
-        raise NotFound("Unknown group.")
-    return group
-
-
 class GroupsView(AdminAPIView):
     def get(self, request):
-        qs = Group.objects.all().order_by("name")
-        q = request.query_params.get("q", "").strip()
-        if q:
-            qs = qs.filter(name__icontains=q)
-        return paginate(request, qs, ser_group)
+        return paginate(request, ops.groups_qs(_q(request, "q")), ser_group)
 
     def post(self, request):
-        name = _str_field(self.body(request), "name", 150, required=True, allow_blank=False)
-        if Group.objects.filter(name=name).exists():
-            raise Conflict("A group with this name exists.")
-        with transaction.atomic():
-            group = Group.objects.create(name=name)
-            audit.record(request, "group.create", "group", group.pk, after={"name": name})
-        return Response(ser_group(group), status=status.HTTP_201_CREATED)
+        data = self.body(request)
+        ops.str_field(data, "name", 150, required=True, allow_blank=False)
+        return Response(ser_group(ops.create_group(request, data["name"])), status=status.HTTP_201_CREATED)
 
 
 class GroupView(AdminAPIView):
     def get(self, request, pk):
-        return Response(ser_group(get_group(pk)))
+        return Response(ser_group(ops.get_group(pk)))
 
     def patch(self, request, pk):
-        group = get_group(pk)
-        name = _str_field(self.body(request), "name", 150, required=True, allow_blank=False)
-        if Group.objects.filter(name=name).exclude(pk=group.pk).exists():
-            raise Conflict("A group with this name exists.")
-        with transaction.atomic():
-            before = group.name
-            group.name = name
-            group.save()
-            audit.record(request, "group.update", "group", group.pk, before={"name": before}, after={"name": name})
-        return Response(ser_group(group))
+        data = self.body(request)
+        ops.get_group(pk)
+        ops.str_field(data, "name", 150, required=True, allow_blank=False)
+        return Response(ser_group(ops.rename_group(request, pk, data["name"])))
 
     def delete(self, request, pk):
-        group = get_group(pk)
-        self.stepup(request, "group.delete", "group", group.pk)
-        with transaction.atomic():
-            before = ser_group(group)
-            from .webhooks import emit
-
-            # Django deletes the M2M rows without m2m_changed: tell services the members lost the group
-            for uid in before["members"]:
-                emit("permission.changed", sub=str(uid), group=group.name, granted=False)
-            group.delete()
-            audit.record(request, "group.delete", "group", pk, before=before, stepup=True)
-            check_invariants(request.user)
+        ops.delete_group(request, pk)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class GroupMembersView(AdminAPIView):
     def put(self, request, pk):
-        group = get_group(pk)
-        ids = self.body(request).get("user_ids")
-        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) for i in ids):
-            raise InvalidRequest("Missing or malformed fields: user_ids.")
-        users = list(User.objects.filter(pk__in=ids))
-        if len(users) != len(set(ids)):
-            raise InvalidRequest("Unknown user id in user_ids.")
-        is_admin_group = group.pk in _admin_group_ids()
-        if is_admin_group:
-            self.stepup(request, "group.members", "group", group.pk)
-        with transaction.atomic():
-            before = sorted(group.user_set.values_list("pk", flat=True))
-            group.user_set.set(users)
-            audit.record(request, "group.members", "group", group.pk, before={"members": before},
-                         after={"members": sorted(ids)}, stepup=is_admin_group)
-            check_invariants(request.user)
-        return Response(ser_group(group))
+        ops.get_group(pk)
+        return Response(ser_group(ops.set_group_members(request, pk, self.body(request).get("user_ids"))))
 
 
 class GroupPermissionView(AdminAPIView):
-    def _change(self, request, pk, codename, grant):
-        group = get_group(pk)
-        perm = get_permission(codename)
-        action = "group.grant" if grant else "group.revoke"
-        is_admin_perm = perm.codename == ADMIN_CODENAME
-        if is_admin_perm:
-            self.stepup(request, action, "group", group.pk)
-        with transaction.atomic():
-            (group.permissions.add if grant else group.permissions.remove)(perm)
-            audit.record(request, action, "group", group.pk, after={"perm": PREFIX + perm.codename},
-                         stepup=is_admin_perm)
-            check_invariants(request.user)
+    def post(self, request, pk, codename):
+        ops.change_group_permission(request, pk, codename, True)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    def post(self, request, pk, codename):
-        return self._change(request, pk, codename, True)
-
     def delete(self, request, pk, codename):
-        return self._change(request, pk, codename, False)
+        ops.change_group_permission(request, pk, codename, False)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # --------------------------------------------------------------------------- permissions
 class PermissionsView(AdminAPIView):
     def get(self, request):
-        records = {r.codename: r for r in ApplicationPermissionRecord.objects.all()}
-        perms = list(app_permissions())
-        app = request.query_params.get("app")
-        deprecated = _bool_param(request.query_params.get("deprecated"))
-        out = []
-        for p in perms:
-            rec = records.get(p.codename)
-            if app and (rec is None or rec.app_codename != app):
-                continue
-            if deprecated is not None and bool(rec and rec.deprecated_at) != deprecated:
-                continue
-            out.append((p, rec))
-        return paginate(request, _ListQS(out), lambda pr: ser_permission(pr[0], pr[1]))
+        rows = ops.permissions_list(_q(request, "app"), ops.bool_param(_q(request, "deprecated")))
+        return paginate(request, rows, lambda pr: ser_permission(pr[0], pr[1]))
 
     def post(self, request):
-        data = self.body(request)
-        code = _str_field(data, "codename", 63, required=True, allow_blank=False)
-        name = _str_field(data, "name", 255, required=True, allow_blank=False)
-        desc = _str_field(data, "description", 1000) or ""
-        try:
-            validate_codename(code)
-        except ValueError:
-            raise InvalidRequest(f"codename must match {CODENAME_RE}") from None
-        if app_permissions().filter(codename=code).exists():
-            raise Conflict("This permission exists.")
-        with transaction.atomic():
-            perm, _ = ensure_permission(code, name)
-            ApplicationPermissionRecord.objects.filter(codename=code).update(description=desc)
-            audit.record(request, "permission.create", "permission", code, after={"name": name, "description": desc})
-        return Response(ser_permission(perm), status=status.HTTP_201_CREATED)
-
-
-class _ListQS(list):
-    def count(self):
-        return len(self)
+        return Response(ser_permission(ops.create_permission(request, self.body(request))),
+                        status=status.HTTP_201_CREATED)
 
 
 class PermissionView(AdminAPIView):
     def get(self, request, codename):
-        return Response(ser_permission(get_permission(codename)))
+        return Response(ser_permission(ops.get_permission(codename)))
 
     def patch(self, request, codename):
-        perm = get_permission(codename)
-        data = self.body(request)
-        unknown = set(data) - {"name", "description"}
-        if unknown:
-            raise Conflict("Only name and description can be changed (codename is immutable).")
-        name = _str_field(data, "name", 255, allow_blank=False)
-        desc = _str_field(data, "description", 1000)
-        before = ser_permission(perm, counts=False)
-        with transaction.atomic():
-            if name is not None:
-                ensure_permission(perm.codename, name)
-            if desc is not None:
-                ensure_permission(perm.codename, name or perm.name)
-                ApplicationPermissionRecord.objects.filter(codename=perm.codename).update(description=desc)
-            perm.refresh_from_db()
-            after = ser_permission(perm, counts=False)
-            audit.record(request, "permission.update", "permission", perm.codename,
-                         before={k: before[k] for k in ("name", "description")},
-                         after={k: after[k] for k in ("name", "description")})
-        return Response(ser_permission(perm))
+        ops.get_permission(codename)
+        return Response(ser_permission(ops.update_permission(request, codename, self.body(request))))
 
     def delete(self, request, codename):
-        perm = get_permission(codename)
-        if perm.codename in code_defined_codenames():
-            raise Conflict(f"{PREFIX}{perm.codename} is defined in code and cannot be deleted.")
-        revoke_all = _bool_param(request.query_params.get("revoke_all")) or False
-        users, groups = perm.user_set.count(), perm.group_set.count()
-        services = perm.sso_service_clients.count()
-        if (users or groups or services) and not revoke_all:
-            raise Conflict(f"Still granted to {users} user(s), {groups} group(s), {services} service(s); "
-                           "pass revoke_all=true to delete anyway.")
-        self.stepup(request, "permission.delete", "permission", perm.codename)
-        with transaction.atomic():
-            before = ser_permission(perm)
-            delete_permission(perm)
-            audit.record(request, "permission.delete", "permission", before["codename"], before=before, stepup=True)
-            check_invariants(request.user)
+        ops.delete_permission_op(request, codename, ops.bool_param(_q(request, "revoke_all")) or False)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # --------------------------------------------------------------------------- services
-def get_service(client_id) -> ServiceClient:
-    client = ServiceClient.objects.filter(client_id=client_id).first()
-    if client is None:
-        raise NotFound("Unknown service client.")
-    return client
-
-
-def _service_perms(value) -> list[Permission]:
-    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-        raise InvalidRequest("Missing or malformed fields: perms.")
-    perms = []
-    for raw in value:
-        try:
-            perms.append(get_permission(raw))
-        except NotFound:
-            raise InvalidRequest(f"Unknown permission {raw!r}.") from None
-    return perms
-
-
-def _apply_service_fields(client, data):
-    if "name" in data:
-        client.name = _str_field(data, "name", 200, allow_blank=False).strip()
-    if "app_codename" in data:
-        app = data["app_codename"]
-        if app is not None:
-            try:
-                validate_codename(app if isinstance(app, str) else "")
-            except ValueError:
-                raise InvalidRequest("app_codename must be a valid codename or null.") from None
-        client.app_codename = app
-    if "notify_url" in data:
-        url = data["notify_url"]
-        if url is not None:
-            try:
-                if not isinstance(url, str) or len(url) > 500:
-                    raise DjangoValidationError("bad")
-                URLValidator(schemes=["https"])(url)
-            except DjangoValidationError:
-                raise InvalidRequest("notify_url must be an https URL or null.") from None
-        client.notify_url = url
-
-
 class ServicesView(AdminAPIView):
     def get(self, request):
-        qs = ServiceClient.objects.all().order_by("client_id")
-        kind = request.query_params.get("kind")
-        if kind:
-            qs = qs.filter(kind=kind)
-        return paginate(request, qs, ser_service)
+        return paginate(request, ops.services_qs(_q(request, "kind")), ser_service)
 
     def post(self, request):
-        data = self.body(request)
-        client_id = _str_field(data, "client_id", 100, required=True, allow_blank=False)
-        import re
-        if not re.fullmatch(r"^[-a-zA-Z0-9_]+$", client_id):
-            raise InvalidRequest("client_id must be a slug.")
-        _str_field(data, "name", 200, required=True, allow_blank=False)
-        unknown = set(data) - {"client_id", "name", "app_codename", "notify_url", "perms"}
-        if unknown:
-            raise InvalidRequest("Unknown fields: " + ", ".join(sorted(unknown)) + ".")
-        perms = _service_perms(data.get("perms", []))
-        if ServiceClient.objects.filter(client_id=client_id).exists():
-            raise Conflict("A service client with this client_id exists.")
-        client = ServiceClient(client_id=client_id)
-        _apply_service_fields(client, data)
-        secret = ServiceClient.generate_secret()
-        client.set_secret(secret)
-        with transaction.atomic():
-            try:
-                client.save()
-            except IntegrityError:
-                raise Conflict("A service client with this client_id exists.") from None
-            client.permissions.set(perms)
-            audit.record(request, "service.create", "service", client_id, after=ser_service(client))
+        client, secret = ops.create_service(request, self.body(request))
         body = ser_service(client)
         body["client_secret"] = secret
         return Response(body, status=status.HTTP_201_CREATED)
@@ -764,143 +262,53 @@ class ServicesView(AdminAPIView):
 
 class ServiceView(AdminAPIView):
     def get(self, request, client_id):
-        return Response(ser_service(get_service(client_id)))
+        return Response(ser_service(ops.get_service(client_id)))
 
     def patch(self, request, client_id):
-        client = get_service(client_id)
-        data = self.body(request)
-        unknown = set(data) - {"name", "app_codename", "notify_url", "is_active", "perms", "can_delegate",
-                               "can_register_devices", "notify_events"}
-        if unknown:
-            raise InvalidRequest("Not editable: " + ", ".join(sorted(unknown)) + ".")
-        for flag in ("is_active", "can_delegate", "can_register_devices"):
-            if flag in data and not isinstance(data[flag], bool):
-                raise InvalidRequest(f"Missing or malformed fields: {flag}.")
-        if client.kind == "device" and (data.get("can_delegate") or data.get("can_register_devices")):
-            raise InvalidRequest("A device cannot delegate or register devices.")
-        perms = _service_perms(data["perms"]) if "perms" in data else None
-        deactivate = data.get("is_active") is False and client.is_active
-        # v1.3b: granting delegation / device registration is security-relevant -> step-up
-        elevate = any(data.get(f) is True and not getattr(client, f) for f in ("can_delegate", "can_register_devices"))
-        deactivate = deactivate or elevate
-        if deactivate:
-            self.stepup(request, "service.update", "service", client_id)
-        before = ser_service(client)
-        _apply_service_fields(client, data)
-        for flag in ("is_active", "can_delegate", "can_register_devices"):
-            if flag in data:
-                setattr(client, flag, data[flag])
-        if "notify_events" in data:
-            from .webhooks import EVENT_TYPES
-
-            ev = data["notify_events"]
-            if not isinstance(ev, list) or not all(isinstance(e, str) and e in EVENT_TYPES for e in ev):
-                raise InvalidRequest("notify_events: list of " + ", ".join(EVENT_TYPES) + " ([] = all).")
-            client.notify_events = sorted(set(ev))
-        with transaction.atomic():
-            client.save()
-            if perms is not None:
-                client.permissions.set(perms)
-            audit.record(request, "service.update", "service", client_id, before=before, after=ser_service(client),
-                         stepup=deactivate)
-        return Response(ser_service(client))
+        ops.get_service(client_id)
+        return Response(ser_service(ops.update_service(request, client_id, self.body(request))))
 
     def delete(self, request, client_id):
-        client = get_service(client_id)
-        self.stepup(request, "service.delete", "service", client_id)
-        with transaction.atomic():
-            before = ser_service(client)
-            client.delete()
-            audit.record(request, "service.delete", "service", client_id, before=before, stepup=True)
+        ops.delete_service(request, client_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ServiceRotateView(AdminAPIView):
     def post(self, request, client_id):
-        client = get_service(client_id)
-        self.stepup(request, "service.rotate_secret", "service", client_id)
-        secret = ServiceClient.generate_secret()
-        with transaction.atomic():
-            client.set_secret(secret)
-            client.secret_rotated_at = timezone.now()
-            client.save(update_fields=["client_secret_hash", "secret_rotated_at"])
-            audit.record(request, "service.rotate_secret", "service", client_id, stepup=True)
-        return Response({"client_id": client.client_id, "client_secret": secret})
+        secret = ops.rotate_service_secret(request, client_id)
+        return Response({"client_id": client_id, "client_secret": secret})
 
 
 # --------------------------------------------------------------------------- applications
-def ser_app(a: Application, with_perms=False) -> dict:
-    recs = ApplicationPermissionRecord.objects.filter(app_codename=a.app_codename)
-    out = {"app_codename": a.app_codename, "name": a.name, "description": a.description, "version": a.version,
-           "updated": _iso(a.updated), "permission_count": recs.count(),
-           "deprecated_count": recs.filter(deprecated_at__isnull=False).count()}
-    if with_perms:
-        perms = {p.codename: p for p in app_permissions().filter(codename__in=[r.codename for r in recs])}
-        out["permissions"] = [ser_permission(perms[r.codename], r) for r in recs if r.codename in perms]
-    return out
-
-
 class AppsView(AdminAPIView):
     def get(self, request):
+        from application.models import Application
+
         return paginate(request, Application.objects.all(), ser_app)
 
 
 class AppView(AdminAPIView):
     def get(self, request, app):
-        a = Application.objects.filter(app_codename=app).first()
-        if a is None:
-            raise NotFound("Unknown application.")
-        return Response(ser_app(a, with_perms=True))
+        return Response(ser_app(ops.get_app(app), with_perms=True))
 
 
 class AppPermissionsImportView(AdminAPIView):
     authentication_classes = [AdminTokenAuthentication, ServiceClientBasicAuthentication]
     allow_service_import = True
 
-    def get_authenticate_header(self, request):
-        return 'Bearer realm="sso-admin", error="invalid_token"'
-
     def put(self, request, app):
-        if isinstance(request.user, ServicePrincipal) and request.user.client.app_codename != app:
-            audit.record_denied(request, "app.import", "app", app, reason="service client of another app")
-            raise AdminForbidden("A service client may import only its own application's permissions.")
-        dry_run = _bool_param(request.query_params.get("dry_run")) or False
-        force = _bool_param(request.query_params.get("force")) or False
-        try:
-            with transaction.atomic():
-                result = import_permissions(app, request.data, dry_run=dry_run, force=force)
-                if not dry_run and result.changed:
-                    from .webhooks import emit
-
-                    emit("permission.changed", app=app, created=result.created, updated=result.updated,
-                         deprecated=result.deprecated)
-                if not dry_run:
-                    action = "app.import" if result.changed else "app.import_noop"
-                    audit.record(request, action, "app", app, after=result.as_dict())
-        except ImportError_ as exc:
-            raise InvalidRequest(str(exc)) from None
-        except VersionTooOld as exc:
-            raise VersionConflict(f"Stored version {exc.stored} is newer than {exc.given}; use force=true.") from None
+        result = ops.import_app(request, app, request.data,
+                                dry_run=ops.bool_param(_q(request, "dry_run")) or False,
+                                force=ops.bool_param(_q(request, "force")) or False)
         return Response(result.as_dict())
 
 
 # --------------------------------------------------------------------------- audit
 class AuditView(AdminAPIView):
     def get(self, request):
-        qs = AdminAuditLog.objects.all()
         p = request.query_params
-        if p.get("actor"):
-            qs = qs.filter(actor_id=p["actor"])
-        for key in ("action", "target_type", "target_id"):
-            if p.get(key):
-                qs = qs.filter(**{key: p[key]})
-        if p.get("since"):
-            since = parse_datetime(p["since"].replace("Z", "+00:00")) if isinstance(p["since"], str) else None
-            if since is None:
-                raise InvalidRequest("since must be an ISO 8601 timestamp.")
-            if timezone.is_naive(since):
-                since = since.replace(tzinfo=dt_timezone.utc)
-            qs = qs.filter(ts__gte=since)
+        qs = ops.audit_qs(actor=p.get("actor"), action=p.get("action"), target_type=p.get("target_type"),
+                          target_id=p.get("target_id"), since=p.get("since"), channel=p.get("channel"))
         return paginate(request, qs, ser_audit)
 
 
@@ -909,104 +317,34 @@ class AdminDevicesView(AdminAPIView):
     def get(self, request):
         from .devices import ser_device
 
-        qs = ServiceClient.objects.filter(kind="device").order_by("client_id")
-        owner = request.query_params.get("owner")
-        if owner:
-            if not owner.isdigit():
-                raise InvalidRequest("owner must be a user id.")
-            qs = qs.filter(owner_id=int(owner))
-        return paginate(request, qs, ser_device)
+        return paginate(request, ops.devices_qs(_q(request, "owner")), ser_device)
 
 
 class AdminDeviceView(AdminAPIView):
     def delete(self, request, client_id):
-        from .devices import ser_device
-
-        dev = ServiceClient.objects.filter(client_id=client_id, kind="device").first()
-        if dev is None:
-            raise NotFound("Unknown device.")
-        self.stepup(request, "device.delete", "device", client_id)
-        with transaction.atomic():
-            before = ser_device(dev)
-            dev.delete()
-            audit.record(request, "device.delete", "device", client_id, before=before, stepup=True)
+        ops.delete_device(request, client_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # --------------------------------------------------------------------------- webhooks (v1.3c)
 class ServiceNotifySecretView(AdminAPIView):
     def post(self, request, client_id):
-        from .webhook_secrets import encrypt, generate
-
-        client = get_service(client_id)
-        if client.kind != "service":
-            raise InvalidRequest("Devices do not receive webhooks.")
-        self.stepup(request, "service.rotate_notify_secret", "service", client_id)
-        secret = generate()
-        with transaction.atomic():
-            client.notify_secret_enc = encrypt(secret)
-            client.save(update_fields=["notify_secret_enc"])
-            audit.record(request, "service.rotate_notify_secret", "service", client_id, stepup=True)
-        return Response({"client_id": client.client_id, "notify_secret": secret})
-
-
-def ser_event(e) -> dict:
-    return {"id": e.pk, "type": e.type, "time": _iso(e.created), "data": e.data}
-
-
-def ser_delivery(d) -> dict:
-    return {"id": d.pk, "event_id": d.event_id, "event_type": d.event.type, "client_id": d.client.client_id,
-            "status": d.status, "attempts": d.attempts, "next_attempt_at": _iso(d.next_attempt_at),
-            "last_status": d.last_status, "last_error": d.last_error, "delivered_at": _iso(d.delivered_at)}
+        secret = ops.rotate_notify_secret(request, client_id)
+        return Response({"client_id": client_id, "notify_secret": secret})
 
 
 class WebhookEventsView(AdminAPIView):
     def get(self, request):
-        from .models import WebhookEvent
-
-        qs = WebhookEvent.objects.all()
-        if request.query_params.get("type"):
-            qs = qs.filter(type=request.query_params["type"])
-        if request.query_params.get("since"):
-            since = parse_datetime(request.query_params["since"].replace("Z", "+00:00"))
-            if since is None:
-                raise InvalidRequest("since must be an ISO 8601 timestamp.")
-            if timezone.is_naive(since):
-                since = since.replace(tzinfo=dt_timezone.utc)
-            qs = qs.filter(created__gte=since)
-        return paginate(request, qs, ser_event)
+        return paginate(request, ops.events_qs(_q(request, "type"), _q(request, "since")), ser_event)
 
 
 class WebhookDeliveriesView(AdminAPIView):
     def get(self, request):
-        from .models import WebhookDelivery
-
-        qs = WebhookDelivery.objects.select_related("event", "client")
         p = request.query_params
-        if p.get("status"):
-            if p["status"] not in WebhookDelivery.STATUSES:
-                raise InvalidRequest("Unknown status.")
-            qs = qs.filter(status=p["status"])
-        if p.get("client_id"):
-            qs = qs.filter(client__client_id=p["client_id"])
-        if p.get("event"):
-            if not p["event"].isdigit():
-                raise InvalidRequest("event must be an id.")
-            qs = qs.filter(event_id=int(p["event"]))
-        return paginate(request, qs, ser_delivery)
+        return paginate(request, ops.deliveries_qs(p.get("status"), p.get("client_id"), p.get("event")),
+                        ser_delivery)
 
 
 class WebhookRedeliverView(AdminAPIView):
     def post(self, request, pk):
-        from .models import WebhookDelivery
-
-        d = WebhookDelivery.objects.select_related("event", "client").filter(pk=pk).first()
-        if d is None:
-            raise NotFound("Unknown delivery.")
-        now = timezone.now()
-        with transaction.atomic():
-            WebhookDelivery.objects.filter(pk=d.pk).update(status="pending", attempts=0, next_attempt_at=now,
-                                                           window_start=now, claimed_at=None)
-            audit.record(request, "webhook.redeliver", "delivery", d.pk, before={"status": d.status})
-        d.refresh_from_db()
-        return Response(ser_delivery(d))
+        return Response(ser_delivery(ops.redeliver(request, pk)))

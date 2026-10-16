@@ -17,6 +17,10 @@ from .logs import client_ip
 from .models import AdminReauth
 
 HEADER = "X-SSO-Reauth"
+# v1.3d admin web UI: the request carries this attribute (set by adminui middleware) = the per-login UI session id.
+# The proof is then an AdminReauth row bound to user + "ui:<id>" + IP; the UI never sees a reauth token.
+UI_ATTR = "sso_adminui_sid"
+UI_SID_PREFIX = "ui:"
 
 
 def _sid(request) -> str:
@@ -35,7 +39,45 @@ def issue(request) -> tuple[str, int]:
     return raw, ttl
 
 
+def _ui_sid(request) -> str | None:
+    django_request = getattr(request, "_request", request)
+    value = getattr(django_request, UI_ATTR, None)
+    return UI_SID_PREFIX + value if value else None
+
+
+def issue_for_session(request) -> int:
+    """UI step-up: store a proof bound to the admin, this UI login and this IP. Returns the window (s)."""
+    ui = _ui_sid(request)
+    if not ui:  # pragma: no cover - only called from adminui views
+        raise ReauthRequired()
+    ttl = int(settings.SSO_ADMIN_REAUTH_SECONDS)
+    AdminReauth.objects.create(token_hash=AdminReauth.hash_token(secrets.token_urlsafe(32)), user=request.user,
+                               sid=ui, ip=client_ip(request) or "", expires_at=timezone.now() + timedelta(seconds=ttl))
+    return ttl
+
+
+def session_expiry(request):
+    """End of the current UI step-up window, or None."""
+    ui = _ui_sid(request)
+    if not ui:
+        return None
+    row = (AdminReauth.objects.filter(user=request.user, sid=ui, ip=client_ip(request) or "",
+                                      expires_at__gt=timezone.now()).order_by("-expires_at").first())
+    return row.expires_at if row else None
+
+
+def drop_session(request) -> int:
+    ui = _ui_sid(request)
+    return AdminReauth.objects.filter(sid=ui).delete()[0] if ui else 0
+
+
+def reauth_error(request):
+    return ReauthRequired("This action needs a recent password confirmation.") if _ui_sid(request) else ReauthRequired()
+
+
 def is_valid(request) -> bool:
+    if _ui_sid(request):
+        return session_expiry(request) is not None
     raw = request.headers.get(HEADER, "")
     if not raw or len(raw) > 128:
         return False
