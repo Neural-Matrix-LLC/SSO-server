@@ -11,8 +11,79 @@ failures. The README remains the reference for every variable; see its §3 table
 ## 0. Prerequisites
 
 - WSL2 (Ubuntu 22.04) with Docker Engine and the compose plugin (`docker compose version`).
-- MySQL 8.0/8.4 running in WSL with the existing `dcWebUsers` database (`systemctl is-active mysql`).
+- MySQL 8.0/8.4 running in WSL with the existing `dcWebUsers` database (`systemctl is-active mysql`). To install it, see §0.1.
 - `sudo` rights, which steps 4 and 5 need for the MySQL accounts and the firewall.
+
+### 0.1 Install MySQL 8.4 LTS on Ubuntu (only if MySQL is not installed yet)
+
+Ubuntu's own archive ships MySQL 8.0, so 8.4 LTS comes from Oracle's MySQL APT repository. The `mysql-server`
+and `mysql-client` packages from that repository install the server and the command-line tools: `mysql`,
+`mysqldump`, `mysqladmin`, `mysqlcheck`, `mysqlimport`, `mysqlshow`, `mysqlbinlog`, `mysqlslap` and
+`mysql_config_editor`. (`mysqlpump` was removed in 8.4. Use `mysqldump`.)
+
+1. **WSL only: systemd must be on**, or `systemctl` will not work. `ps -p 1 -o comm=` must print `systemd`.
+   If it does not, add this to `/etc/wsl.conf`, run `wsl --shutdown` in Windows and open WSL again:
+
+   ```ini
+   [boot]
+   systemd=true
+   ```
+
+2. **Add the MySQL APT repository with the 8.4 LTS series selected.** Look up the current `mysql-apt-config`
+   file name at <https://dev.mysql.com/downloads/repo/apt/> and set `CFG` to it:
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y wget gnupg lsb-release debconf-utils
+   CFG=mysql-apt-config_0.8.40-1_all.deb          # the current version from the download page
+   wget -P /tmp "https://dev.mysql.com/get/$CFG"
+   echo 'mysql-apt-config mysql-apt-config/select-server select mysql-8.4-lts' | sudo debconf-set-selections
+   sudo DEBIAN_FRONTEND=noninteractive dpkg -i "/tmp/$CFG"
+   sudo apt-get update                            # must show no error for repo.mysql.com
+   apt-cache policy mysql-server mysql-client     # each Candidate must be 8.4.x from repo.mysql.com
+   ```
+
+   If the Candidate is `8.0.x-0ubuntu...` from `archive.ubuntu.com`, apt has rejected the MySQL repository
+   and step 3 will quietly install Ubuntu's 8.0. The usual cause is an expired signing key: `apt-get update`
+   prints `EXPKEYSIG` or `The following signatures were invalid` for `repo.mysql.com`, and
+   `gpg --show-keys /usr/share/keyrings/mysql-apt-config.gpg` shows `[expired: ...]`. The key in
+   `mysql-apt-config` 0.8.34-1 and older expired on 2025-10-22. Install a newer `mysql-apt-config` (0.8.40-1 is
+   valid until 2027-10-23) with the commands above, then run `apt-get update` again.
+
+   To change the series later, run `sudo dpkg-reconfigure mysql-apt-config` and then `sudo apt-get update`.
+
+3. **Install the server and the client tools:**
+
+   ```bash
+   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server mysql-client
+   sudo systemctl enable --now mysql
+   ```
+
+   In a non-interactive install, `root` gets no password and signs in with `auth_socket`, so `sudo mysql` works,
+   as step 4 expects. If you run the install interactively instead, leave the root password prompt empty to get
+   the same result. Then run `sudo mysql_secure_installation` to remove the anonymous users and the test database.
+
+4. **Check:**
+
+   ```bash
+   systemctl is-active mysql                      # active
+   mysql --version; mysqldump --version           # both: Ver 8.4.x ... (MySQL Community Server - GPL)
+   sudo mysql -e 'SELECT VERSION();'
+   ```
+
+   `mysqldump --version` must not say MariaDB. `scripts/upgrade_db.sh` (step 9) uses the host's `mysqldump` only
+   when it is MySQL's own build. If `mariadb-client` is installed, remove it first
+   (`sudo apt-get remove mariadb-client`).
+
+5. **Create the database** if this is a new machine: `sudo mysql -e 'CREATE DATABASE IF NOT EXISTS dcWebUsers
+   CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;'`. On a machine where myFinance already uses `dcWebUsers`,
+   skip this.
+
+You can upgrade an existing Ubuntu MySQL 8.0 in place to 8.4 with the same steps (8.0 to 8.4 is a supported direct
+upgrade), but take a full `mysqldump` of `dcWebUsers` first ([README §5](../README.md#5-database-first-deployment-and-migrate-procedure)
+step 1). To install only the client tools (for example on a machine where the database is somewhere else), do
+step 2 and then `sudo apt-get install -y mysql-client`. If Ubuntu's 8.0 client is already installed, the same
+command replaces it with 8.4 once the Candidate shows 8.4.x. If apt reports a conflict, first run
+`sudo apt-get remove mysql-client mysql-client-8.0 mysql-client-core-8.0`.
 
 ## 1. Create `.env`
 
