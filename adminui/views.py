@@ -13,6 +13,7 @@ import json
 import time
 import uuid
 from functools import wraps
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.contrib import messages
@@ -81,6 +82,14 @@ def error_page(request, exc: SSOError, back=None):
                                           "detail": str(exc.detail), "back": back}, status=status)
 
 
+def _referer_path(request) -> str:
+    ref = request.headers.get("Referer", "")
+    if not ref or not url_has_allowed_host_and_scheme(ref, allowed_hosts={request.get_host()}, require_https=False):
+        return u()
+    parts = urlsplit(ref)
+    return parts.path + ("?" + parts.query if parts.query else "")
+
+
 def ui_view(fn):
     """SSO errors -> pages: reauth_required -> the step-up page; 404; 400/403/409 -> error page."""
     @wraps(fn)
@@ -88,7 +97,9 @@ def ui_view(fn):
         try:
             return fn(request, *args, **kwargs)
         except ReauthRequired:
-            nxt = request.get_full_path() if request.method == "GET" else (request.POST.get("back") or request.path)
+            # after a POST, come back to the page the form was on (the POST-only URL would answer 405 to a GET)
+            nxt = request.get_full_path() if request.method == "GET" else (request.POST.get("back")
+                                                                            or _referer_path(request))
             return HttpResponseRedirect(u("reauth/") + "?" + urlencode({"next": safe_next(request, nxt)}))
         except NotFound:
             raise Http404() from None
@@ -124,8 +135,14 @@ def throttled(key: str, rate: str) -> bool:
     """Fixed-window counter in the shared cache (Redis). True = over the limit."""
     limit, window = _rate(rate)
     bucket = f"adminui:{key}:{int(time.time() // window)}"
-    added = cache.add(bucket, 1, window + 1)
-    count = 1 if added else cache.incr(bucket)
+    if cache.add(bucket, 1, window + 1):
+        count = 1
+    else:
+        try:
+            count = cache.incr(bucket)
+        except ValueError:  # the key expired between add() and incr()
+            cache.add(bucket, 1, window + 1)
+            count = 1
     return count > limit
 
 
@@ -280,7 +297,7 @@ def users(request):
 def users_export(request):
     rows = ((x.pk, x.username, x.email, x.first_name, x.last_name, x.is_active, x.is_staff,
              ";".join(sorted(g.name for g in x.groups.all())), ops.iso(x.last_login))
-            for x in _users_filtered(request))
+            for x in _users_filtered(request).prefetch_related("groups"))
     with transaction.atomic():
         audit.record(request, "ui.export", "user", "", after={"what": "users", "filters": dict(request.GET.items())})
     return csv_response("users.csv", ["id", "username", "email", "first_name", "last_name", "is_active",

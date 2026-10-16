@@ -53,6 +53,8 @@ CHANNEL_ATTR = "sso_audit_channel"  # v1.3d: set on the Django request by adminu
 
 
 def channel_of(request) -> str:
+    if request is None:
+        return "system"
     django_request = getattr(request, "_request", request)
     return getattr(django_request, CHANNEL_ATTR, None) or "api"
 

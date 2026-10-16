@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import re
 import time
+from urllib.parse import urlencode
 
 import pytest
 from django.conf import settings
@@ -530,3 +531,29 @@ def test_settings_validation():
     env = {"PATH": "/usr/bin:/bin", "SSO_ADMIN_UI_PATH": "sso-admin/", "PYTHONPATH": "."}
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     assert "SSO_ADMIN_UI_PATH must be" in out.stderr
+
+
+def test_stepup_on_post_only_route_returns_to_form_page(c, user):
+    """QA V13D-01: a step-up raised by a POST-only route must not send the admin back to that URL (GET -> 405)."""
+    page = f"{UI}users/{user.pk}/"
+    r = c.post(f"{UI}users/{user.pk}/permissions", {"op": "grant", "codename": "sso_admin"},
+               HTTP_REFERER="https://testserver" + page)
+    assert r.status_code == 302
+    assert r["Location"] == UI + "reauth/?" + urlencode({"next": page})
+    r = c.post(f"{UI}users/{user.pk}/permissions", {"op": "grant", "codename": "sso_admin"},
+               HTTP_REFERER="https://evil.example/" + UI)
+    assert r["Location"] == UI + "reauth/?" + urlencode({"next": UI})
+
+
+def test_throttle_survives_expired_bucket(db, monkeypatch):
+    from adminui import views
+
+    monkeypatch.setattr(views.cache, "add", lambda *a, **k: False)
+    monkeypatch.setattr(views.cache, "incr", lambda *a, **k: (_ for _ in ()).throw(ValueError("gone")))
+    assert views.throttled("k", "5/min") is False
+
+
+def test_audit_channel_without_request_is_system():
+    from sso import audit
+
+    assert audit.channel_of(None) == "system"
