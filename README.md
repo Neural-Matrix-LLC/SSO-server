@@ -374,8 +374,9 @@ New tables/columns: v1.2a `sso_revokedsession`, `sso_serviceclient.app_codename/
 `sso_serviceclient.secret_rotated_at`, `sso_application_permission_record.app_codename/deprecated_at/description`;
 v1.3b `sso_serviceclient.kind/owner_id/device_name/public_key/public_key_fingerprint/last_used/can_delegate/
 can_register_devices`; v1.3c `sso_webhookevent`, `sso_webhookdelivery`, `sso_serviceclient.notify_events/
-notify_secret_enc`. Only additions. DBA SQL and rollback notes:
-[docs/db/upgrade-v1.2-to-v1.3.sql](docs/db/upgrade-v1.2-to-v1.3.sql); step-by-step for WSL:
+notify_secret_enc`; v1.3d `sso_adminauditlog.channel` (+ index; existing rows get `api`). Only additions. DBA SQL and rollback notes:
+[docs/db/upgrade-v1.2-to-v1.3.sql](docs/db/upgrade-v1.2-to-v1.3.sql), then
+[docs/db/upgrade-v1.3-to-v1.3d.sql](docs/db/upgrade-v1.3-to-v1.3d.sql); step-by-step for WSL:
 [docs/SSO-Setup.md §9](docs/SSO-Setup.md#9-upgrading-the-database).
 
 ## 6. Registering a ServiceClient (for `/api/v1/auth/introspect`)
@@ -546,19 +547,24 @@ Full reference: [docs/API-REFERENCE-MANUAL.md §8](docs/API-REFERENCE-MANUAL.md#
 New settings: `SSO_ADMIN_REAUTH_SECONDS` (300), `SSO_SERVICE_TOKEN_TTL_SECONDS` (300), `SSO_THROTTLE_ADMIN`
 (120/min), `SSO_THROTTLE_ADMIN_REAUTH` (5/min), `SSO_THROTTLE_SERVICE_TOKEN` (60/min).
 
-## 6c. Admin web UI (v1.3d, planned)
+## 6c. Admin web UI (v1.3d)
 
 Decision 2026-10-15: the day-to-day **admin UI is part of the SSO server** (not FUND). Design:
-[docs/DESIGN-v1.3d-admin-ui.md](docs/DESIGN-v1.3d-admin-ui.md). Not coded yet; until then use the admin REST API (§6b)
-or Django admin.
+[docs/DESIGN-v1.3d-admin-ui.md](docs/DESIGN-v1.3d-admin-ui.md). Django app `adminui`; the business logic is shared with
+the admin REST API (§6b) through `sso/admin_ops.py`. Needs migration `sso 0007` (`sso_adminauditlog.channel`, §5a).
+First login: any account that passes the check below; for a new install grant `application.sso_admin` and `is_staff`
+in Django admin (break-glass) first.
 
 * Server-rendered Django pages at `https://<host>/<SSO_ADMIN_UI_PATH>` (default `/admin/`), no frontend build.
 * Sign in with an account that is **active + staff + `application.sso_admin`** (or a staff superuser). Own session
   cookie, CSRF, IP-bound session (idle 30 min, max 8 h); destructive actions ask for the password again.
 * Users, groups, permissions, applications + permission import (dry-run diff), services, devices, webhooks, audit log.
 * nginx: allow-list snippets in `SSO_ADMIN_UI_ALLOW_DIR` (default `./docker/nginx-admin-ui.d`); optional separate
-  admin hostname `SSO_ADMIN_UI_HOSTNAME`. Django admin at `SSO_ADMIN_PATH` stays as break-glass.
-* Planned settings: `SSO_ADMIN_UI_ENABLED`, `SSO_ADMIN_UI_PATH`, `SSO_ADMIN_UI_HOSTNAME`, `SSO_ADMIN_UI_ALLOW_DIR`,
+  admin hostname `SSO_ADMIN_UI_HOSTNAME` (whole nginx server block in `SSO_ADMIN_UI_HOST_DIR`, default
+  `./docker/nginx-admin-host.d`, see the `example.conf.sample` there; Django then serves the UI only on that Host and
+  refuses to start if it is not in `SSO_ALLOWED_HOSTS`). Django admin at `SSO_ADMIN_PATH` stays as break-glass.
+* MFA is not implemented (TODOS).
+* Settings: `SSO_ADMIN_UI_ENABLED`, `SSO_ADMIN_UI_PATH`, `SSO_ADMIN_UI_HOSTNAME`, `SSO_ADMIN_UI_ALLOW_DIR`,
   `SSO_ADMIN_UI_IDLE_SECONDS`, `SSO_ADMIN_UI_MAX_AGE_SECONDS`, `SSO_ADMIN_UI_IP_BINDING`, `SSO_ADMIN_UI_TIME_ZONE`
   (full table in the design §15).
 

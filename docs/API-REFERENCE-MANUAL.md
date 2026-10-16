@@ -602,7 +602,7 @@ curl -s -X POST $SSO/api/v1/admin/users/42/suspend -H "Authorization: Bearer $AT
 | 🔒 `POST /services/{client_id}/rotate-secret` | | 200 `{"client_id","client_secret"}` | old secret and old service tokens dead at once |
 | `GET /apps` · `GET /apps/{app}` | | 200 list · 200 app with permissions | |
 | `PUT /apps/{app}/permissions` | import payload, `dry_run=true`, `force=true` | 200 import result | admin or the app's own ServiceClient (Basic) |
-| `GET /audit` | `actor`, `action`, `target_type`, `target_id`, `since`, `page` | 200 list (newest first) | read-only |
+| `GET /audit` | `actor`, `action`, `target_type`, `target_id`, `since`, `channel` (v1.3d), `result`, `page` | 200 list (newest first) | read-only |
 
 Service-side endpoints (not under `/admin`):
 
@@ -627,7 +627,7 @@ Service-side endpoints (not under `/admin`):
 | permission | `codename`, `perm` (`application.<codename>`), `name`, `description`, `app_codename`, `deprecated`, `deprecated_at`, `code_defined`, `users`, `groups` |
 | service | `client_id`, `name`, `app_codename`, `notify_url`, `is_active`, `perms`, `created`, `secret_rotated_at` (+ `client_secret` once on create/rotate) |
 | app | `app_codename`, `name`, `description`, `version`, `updated`, `permissions` (on detail) |
-| audit | `id`, `ts`, `actor_type`, `actor_id`, `actor_ip`, `action`, `target_type`, `target_id`, `before`, `after`, `request_id`, `result`, `stepup` |
+| audit | `id`, `ts`, `actor_type`, `actor_id`, `actor_ip`, `action`, `target_type`, `target_id`, `before`, `after`, `request_id`, `result`, `stepup`, `channel` (v1.3d: `api`, `ui`, `django_admin`, `system`) |
 
 ### 8.4 Permission import
 
@@ -732,7 +732,7 @@ checks.
 
 ## 11. Admin web UI (v1.3d)
 
-**Status:** designed, not coded ([DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)). Decision 2026-10-15: the
+**Status:** implemented in v1.3d ([DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)), app `adminui`. Decision 2026-10-15: the
 admin UI is hosted by the SSO server (FUND has none).
 
 - **No new JSON endpoints.** The UI is server-rendered HTML at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`) and calls
@@ -741,8 +741,8 @@ admin UI is hosted by the SSO server (FUND has none).
   redirects (Post/Redirect/Get), and is usually behind an nginx IP allow-list or a separate admin hostname.
 - Who: active + `is_staff` + `application.sso_admin` (or superuser), checked on every request.
 - Step-up: the same actions as §8 (🔒) require a password confirmation page; window `SSO_ADMIN_REAUTH_SECONDS`.
-- Audit: rows in `sso_adminauditlog` get `channel = "ui"`; v1.3d adds the `channel` field to the audit row shape of
-  `GET /api/v1/admin/audit` (`"api"`, `"ui"`, `"django_admin"`, `"system"`) and an optional `?channel=` filter.
+- Audit: rows in `sso_adminauditlog` get `channel = "ui"`; since v1.3d the `channel` field to the audit row shape of
+  `GET /api/v1/admin/audit` (`"api"`, `"ui"`, `"django_admin"`, `"system"`) and an optional `?channel=` filter (plus `?result=`). The UI audit page can filter by channel and export CSV.
 
 | Area | Routes (relative to `/<SSO_ADMIN_UI_PATH>`) |
 |---|---|

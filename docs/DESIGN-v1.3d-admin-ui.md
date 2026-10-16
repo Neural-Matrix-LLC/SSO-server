@@ -144,7 +144,7 @@ flowchart TB
 | `sso/admin_ops.py` (new) | domain functions extracted from `sso/admin_api.py`; raise typed errors (`SelfActionForbidden`, `LastAdmin`, `Conflict`, `ReauthRequired`) that the API maps to JSON and the UI to form errors/messages |
 | `sso/admin_api.py` | thin DRF views over `admin_ops` (contract unchanged) |
 | `sso/stepup.py` | gains `issue_for_session()` / `verify_for_session()` beside the token-based functions |
-| `sso/migrations/0007_audit_channel.py` | adds `channel` to `sso_adminauditlog` (default `api`, backfilled) |
+| `sso/migrations/0007_v13d_audit_channel.py` | adds `channel` to `sso_adminauditlog` (default `api`; existing rows get it from the column default, no data migration) |
 
 ## 4. Who can access [Decision 2026-10-15, same as the API]
 
@@ -426,7 +426,8 @@ One-time secrets (service secret, notify secret) are rendered once in the POST r
 Today [Repo]: `location /${SSO_ADMIN_PATH}` includes `/etc/nginx/sso-admin.d/*.conf` (mounted from
 `SSO_ADMIN_ALLOW_DIR`, default `./docker/nginx-admin.d`) for an optional allow-list.
 
-v1.3d [Proposal]:
+v1.3d [Proposal] (as built: the login page has its own `location =` with `sso_login`, the rest of the UI uses a
+looser zone `sso_admin_ui` 120 r/min, so normal browsing is not throttled; see `docker/nginx.conf`):
 
 ```nginx
 # Admin web UI (v1.3d). Same allow-list mechanism, own directory so ops can open the UI
@@ -440,11 +441,15 @@ location /${SSO_ADMIN_UI_PATH} {
 
 - `SSO_ADMIN_UI_ALLOW_DIR` (default `./docker/nginx-admin-ui.d`, empty = open) mounted at
   `/etc/nginx/sso-admin-ui.d`.
-- **Optional separate hostname**: with `SSO_ADMIN_UI_HOSTNAME=admin.sso.example.com` nginx renders a second
-  `server` block (own cert via `SSO_ADMIN_UI_TLS_CERT_FILE`/`_KEY_FILE`, defaults to the main pair) that serves
-  only `/${SSO_ADMIN_UI_PATH}`, static files and `/healthz`; the main hostname then returns 404 for the admin UI
-  path. Django additionally rejects UI requests whose `Host` is not the configured admin host
-  (`AdminUISessionGuard`), so a misconfigured nginx cannot expose it.
+- **Optional separate hostname** (as built, decision 2026-10-15): the main template ends with
+  `include /etc/nginx/sso-admin-host.d/*.conf;` (http context). `SSO_ADMIN_UI_HOST_DIR` (default
+  `./docker/nginx-admin-host.d`, empty = no extra host) is mounted there; the operator copies
+  `example.conf.sample` to `*.conf` and writes the admin `server` block with literal host name and cert files
+  (only the main template is rendered by envsubst). It serves only the UI path and `/static/`, everything else 404.
+  The enforcement is Django's: with `SSO_ADMIN_UI_HOSTNAME=admin.sso.example.com` the UI answers 404 on any other
+  `Host` (so the main hostname no longer exposes it even though nginx still proxies the path there), and system
+  check `adminui.E001` refuses to start when that name is not in `SSO_ALLOWED_HOSTS`. No separate
+  `SSO_ADMIN_UI_TLS_CERT_FILE` variables: the cert names live in the snippet.
 - Recommended production: separate hostname + VPN/office allow-list; break-glass Django admin allow-list limited
   to the ops jump host.
 
@@ -487,8 +492,9 @@ user data; audit JSON is pretty-printed server-side and escaped). Uploads (`sso_
   [Decision 2026-10-15].
 - UI-only actions: `ui.login` (ok/denied + reason), `ui.logout`, `ui.session_ip_mismatch`, `ui.access_lost`,
   `ui.export` (filters in `after`), `reauth`, `reauth.drop`.
-- Django admin writes keep `channel = django_admin`; worker/sweep writes `channel = system`; API `channel = api`
-  (backfill default for existing rows).
+- API `channel = api` (also the column default for existing rows); `record()` without a request writes
+  `channel = system`. `django_admin` is reserved: as built, Django admin changes are logged to the `sso.audit`
+  logger only and write no `sso_adminauditlog` rows (unchanged from v1.3).
 - Also emitted as `sso.admin` JSON log lines (unchanged format + `channel`).
 - API visibility: `GET /api/v1/admin/audit` rows gain `"channel"` and the list accepts `?channel=` (additive, no
   breaking change; see [API-REFERENCE-MANUAL.md §11](API-REFERENCE-MANUAL.md#11-admin-web-ui-v13d)).
@@ -508,9 +514,10 @@ user data; audit JSON is pretty-printed server-side and escaped). Uploads (`sso_
 |---|---|---|
 | `SSO_ADMIN_UI_ENABLED` | `true` | `false` = no routes (API-only deployments) |
 | `SSO_ADMIN_UI_PATH` | `admin/` | URL prefix; must differ from `SSO_ADMIN_PATH` (system check error otherwise) |
-| `SSO_ADMIN_UI_HOSTNAME` | empty | separate admin host (nginx second server block + Django host check) |
-| `SSO_ADMIN_UI_TLS_CERT_FILE` / `_KEY_FILE` | main cert | cert for the admin host |
+| `SSO_ADMIN_UI_HOSTNAME` | empty | separate admin host (Django host check; nginx block from `SSO_ADMIN_UI_HOST_DIR`) |
 | `SSO_ADMIN_UI_ALLOW_DIR` | `./docker/nginx-admin-ui.d` | nginx allow-list snippets |
+| `SSO_ADMIN_UI_HOST_DIR` | `./docker/nginx-admin-host.d` | extra nginx `server` blocks (admin hostname) |
+| `SSO_THROTTLE_ADMIN_UI_LOGIN_IP` / `_USER` | `10/min` / `5/min` | UI login throttles |
 | `SSO_ADMIN_UI_IDLE_SECONDS` | `1800` | idle timeout |
 | `SSO_ADMIN_UI_MAX_AGE_SECONDS` | `28800` | absolute session lifetime |
 | `SSO_ADMIN_UI_IP_BINDING` | = `SSO_IP_BINDING_MODE` | `NOIP` / `WARNING` / `ENFORCE` for UI sessions |
@@ -539,7 +546,7 @@ Throttle scopes (DRF/Django cache, Redis): `admin_ui_login` 10/min per IP + 5/mi
 | nginx | allow-list deny → 403; separate hostname: UI 404 on main host, served on admin host; Django host check |
 | A11y | axe-core scan of each page (no serious violations); keyboard-only walk-through of suspend |
 | Regression | full v1.3a-c suite unchanged after the `admin_ops` refactor (MySQL 8.4 + 8.0, Django 5.2 + 4.2); black-box suite 47/47 |
-| Migration | `0007_audit_channel` forward/backward; `scripts/upgrade_db.sh` and `sso_schema_check` know the new column; `docs/db/upgrade-v1.3-to-v1.3d.sql` |
+| Migration | `0007_v13d_audit_channel` forward/backward; `scripts/upgrade_db.sh` and `sso_schema_check` know the new column; `docs/db/upgrade-v1.3-to-v1.3d.sql` |
 
 ## 17. Rollout
 

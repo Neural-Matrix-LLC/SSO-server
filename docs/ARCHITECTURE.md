@@ -275,8 +275,8 @@ v1.2b (implemented on `feat/v1.2b`) adds the introspect/permission query with cl
 (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its handlers).
 v1.3a (branch `feat/v1.3a`, [design](DESIGN-v1.3a-admin-api.md)) adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
 `sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
-v1.3d ([design](DESIGN-v1.3d-admin-ui.md), not coded yet) adds the **admin web UI**: Django app `adminui`
-(server-rendered templates, `AdminUISessionGuard` middleware, CSP headers) at `/<SSO_ADMIN_UI_PATH>` (default
+v1.3d ([design](DESIGN-v1.3d-admin-ui.md)) adds the **admin web UI**: Django app `adminui`
+(server-rendered templates, `AdminUIGuardMiddleware`, CSP headers) at `/<SSO_ADMIN_UI_PATH>` (default
 `/admin/`), and moves the admin business rules from `sso/admin_api.py` into a shared domain layer `sso/admin_ops.py`
 used by both the REST API and the UI:
 
@@ -1250,7 +1250,7 @@ Routes from `ssoproject/urls.py` (nothing else is routed). Base URL = `SSO_ISSUE
 | GET | `/.well-known/openid-configuration` | none | none | `DiscoveryView` |
 | GET | `/healthz` | none | none | `HealthView` |
 | any | `/<SSO_ADMIN_PATH>` (default `/sso-admin/`) | Django admin session (staff) | none | Django admin |
-| GET/POST | `/<SSO_ADMIN_UI_PATH>…` (default `/admin/`, **v1.3d, planned**) | admin UI session `__Host-sso_admin_sid` + CSRF | `admin_ui_login`, `admin_reauth` | `adminui` (HTML only; routes in [DESIGN-v1.3d §10](DESIGN-v1.3d-admin-ui.md#10-routes-complete-reference)) |
+| GET/POST | `/<SSO_ADMIN_UI_PATH>…` (default `/admin/`, v1.3d) | admin UI session `__Host-sso_admin_sid` + CSRF | `admin_ui_login`, `admin_reauth` | `adminui` (HTML only; routes in [DESIGN-v1.3d §10](DESIGN-v1.3d-admin-ui.md#10-routes-complete-reference)) |
 
 ### 8.0 Common rules
 
@@ -1466,7 +1466,7 @@ app access…*), `ServiceClient` (secret generated and shown once on create or "
 `ApplicationPermission` (add / rename via `ensure_permission`, delete with an affected-users confirmation; `app1`
 not deletable), `ApplicationPermissionRecord` (read-only). Actions write `LogEntry` and `sso.admin` JSON lines.
 
-**v1.3d (planned): admin web UI** at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`), the day-to-day admin tool that
+**v1.3d: admin web UI** at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`), the day-to-day admin tool that
 replaces the planned FUND `/admin`. Own session cookie (`__Host-sso_admin_sid`, HttpOnly, Secure, SameSite=Strict),
 independent of the Django admin session; access = active + `is_staff` + `application.sso_admin` or superuser,
 re-checked in the DB on every request; IP-bound session, idle 30 min / absolute 8 h; step-up password page for the
@@ -1636,7 +1636,7 @@ flowchart TB
     end
     V1["SSO_KEYS_DIR to /run/keys ro"]
     V2["SSO_MYSQL_CA_DIR to /run/mysql-ca ro"]
-    V3["docker/nginx.conf template, SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, SSO_ADMIN_UI_ALLOW_DIR (v1.3d), all ro"]
+    V3["docker/nginx.conf template, SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, SSO_ADMIN_UI_ALLOW_DIR + SSO_ADMIN_UI_HOST_DIR (v1.3d), all ro"]
     ENV[".env via env_file"]
   end
   DB[("MySQL dcWebUsers - remote or host.docker.internal")]
@@ -1709,8 +1709,8 @@ HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `
 | Automatic `flushexpiredtokens` | Not run by the image; operator cron (deployment plan) |
 | Cross-tab refresh coordination in `auth.js` | Not implemented (recommendation §7.3) |
 | Hot key reload | Keys read at start; rotation needs a restart |
-| Admin web UI `/admin` (v1.3d) | Designed ([DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)), not coded. Until then: admin REST API + Django admin |
-| MFA for admins | Not planned yet (open question in DESIGN-v1.3d §18) |
+| Admin web UI `/admin` (v1.3d) | Implemented (app `adminui`, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)); domain layer `sso/admin_ops.py` shared with the admin REST API |
+| MFA for admins | Not implemented; in TODOS (open question in DESIGN-v1.3d §18) |
 
 ### 12.2 Discrepancies found between existing docs and the code
 
