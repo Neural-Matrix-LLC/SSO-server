@@ -3,6 +3,24 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-10-15 — docs: admin UI moves from FUND to the SSO server (v1.3d design)
+
+**Goal.** Record Thomas's decision (2026-10-15) that the admin UI lives on the SSO server's own `/admin`, not in
+FUND (FUND is client-facing; the SSO owns administration), and design it as the last SSO-completion phase **v1.3d**,
+before SGMCP v1.4.
+
+**Implementation (docs only, branch `docs/sso-admin-ui`).** New `docs/DESIGN-v1.3d-admin-ui.md`: server-rendered
+Django app `adminui` at `SSO_ADMIN_UI_PATH` (default `admin/`) on a shared domain layer `sso/admin_ops.py` (extracted
+from `sso/admin_api.py`), session login with `__Host-` cookie + CSRF + IP binding, step-up page, pages, complete route
+table, nginx allow-list `sso-admin-ui.d` + optional admin hostname, CSP, audit `channel` column, config, QA test plan,
+rollout, open questions. Updated: `docs/ECOSYSTEM-INTEGRATION.md` (§7 rewritten, §9.1 phase plan with v1.3d and
+v1.5b without admin UI, §5.6 / §8.2 suspend flows, §9.2 open questions, round 6 decision, pointer to the SGMCP v1.4
+design folded in from the unpushed `docs/sso-v1.4-pointer` branch), `docs/ARCHITECTURE.md`,
+`docs/API-REFERENCE-MANUAL.md` §11, `TODOS.md`, `README.md` §6c, `docs/SSO-Setup.md` §10 (appended).
+Django admin stays as break-glass; the admin REST API is unchanged.
+
+**Test coverage.** Docs only, no code change. All Mermaid diagrams in the changed files render with `mmdc`.
+
 ## 2026-10-15 — devops: database upgrade script v1.2 → v1.3 (`scripts/upgrade_db.sh`)
 
 **Goal.** Upgrade an existing dcWebUsers database (e.g. at v1.2b: sso 0002, application 0001) to v1.3 (sso
