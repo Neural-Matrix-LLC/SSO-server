@@ -28,6 +28,14 @@
 --   v1.3c  sso_serviceclient.notify_events (json, default []), .notify_secret_enc; tables sso_webhookevent,
 --          sso_webhookdelivery
 
+-- Select the SSO database first (or run: mysql dcWebUsers < this-file.sql). Change the name if yours differs.
+USE dcWebUsers;
+
+-- GUARD: this file UPGRADES an existing v1.2 SSO schema. If the next statement fails with
+-- "Table 'dcWebUsers.sso_serviceclient' doesn't exist", this is a FIRST INSTALL (no sso_* tables yet):
+-- stop here and run scripts/upgrade_db.sh instead (Django migrate creates all SSO tables from scratch).
+SELECT COUNT(*) AS sso_serviceclient_rows FROM `sso_serviceclient`;
+
 -- ============================================================================ block 1: sso.0002_v12a_service_registry_sessions (v1.2a)
 --
 -- Add field app_codename to serviceclient

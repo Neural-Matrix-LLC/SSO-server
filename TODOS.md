@@ -13,7 +13,8 @@ Agreed scope for v1.2a / v1.2b / v1.3c is in [docs/DESIGN-v1.2-requirements.md](
 - [ ] **Client push notifications (SSE or WebSocket)** — only if clients need proactive "token expired/revoked" messages; today clients learn by rejection (401). Services already get signed webhooks (v1.3c).
 - [ ] **Cross-tab refresh coordination in the browser helper** (BroadcastChannel / Web Locks) so the losing tab is not logged out.
 - [ ] **Hosted self-service account page** (profile, active sessions list, "log out this session").
-- [ ] **Webhook admin tooling** — redeliver failed events, rotate `notify_secret`.
+- [ ] **Webhook admin tooling** — redeliver failed events, rotate `notify_secret` (API exists since v1.3c; UI in v1.3d).
+- [ ] **MFA for admin logins** (TOTP or WebAuthn) for the v1.3d admin UI — open question whether it is needed before go-live.
 - [ ] **Decommission myFinance** — after it is phased out, move `dcWebUsers` ownership fully to the SSO, drop shared-DB compatibility constraints (Django version pinning, stock User model).
 
 ## Scheduled follow-ups
@@ -29,14 +30,15 @@ Agreed scope for v1.2a / v1.2b / v1.3c is in [docs/DESIGN-v1.2-requirements.md](
 ### 1. SSO-server completion
 - [x] **v1.3a** ([design](docs/DESIGN-v1.3a-admin-api.md)): admin REST API `/api/v1/admin/…` + `sso_adminauditlog`; step-up reauth (`POST /api/v1/admin/reauth` → `X-SSO-Reauth`); permission import `PUT /api/v1/admin/apps/{app}/permissions` (idempotent, dry-run, never deletes, marks missing deprecated) + `scripts/sso_permissions_to_json.py`; per-service credentials (ServiceClient perms, rotate-secret, `POST /api/v1/auth/service-token`, no IP binding); inactive-users feed `GET /api/v1/service/users/inactive`.
 - [x] **v1.3b**: device clients `POST /api/v1/devices` (`kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend); on-behalf-of headers; `sso-client` 0.2 (service tokens, on-behalf-of).
-- [x] **v1.3c**: signed webhooks (`user.suspended` etc.), encrypt `notify_secret` at rest, webhook receiver in `sso-client`. → SSO server complete. (v1.3a-c done on `feat/sso-v1.3`, not pushed.)
+- [x] **v1.3c**: signed webhooks (`user.suspended` etc.), encrypt `notify_secret` at rest, webhook receiver in `sso-client`. (v1.3a-c done on `feat/sso-v1.3`, pushed.)
+- [ ] **v1.3d** ([design](docs/DESIGN-v1.3d-admin-ui.md), decision 2026-10-15: admin UI moves from FUND to the SSO): admin web UI at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`), server-rendered Django app `adminui`; domain layer `sso/admin_ops.py` shared with the REST API; session login (active + `is_staff` + `sso_admin`/superuser), `__Host-` cookie, CSRF, IP binding, idle/absolute timeout, step-up page; users, groups, permissions, apps + import diff, services, devices, webhooks, audit (+ CSV); audit `channel` column (migration `0007`, upgrade script + SQL); nginx `sso-admin-ui.d` allow-list + optional admin hostname; strict CSP; a11y basics. → SSO server complete.
 
 ### 2. SGMCP migration
 - [ ] **v1.4 (SGMCP + local broker gateway)**: `sso_permissions.py`; API/MCP on `sso-client`; `gateway-relay`, pairing, device credentials, outbound WSS (long-poll fallback), heartbeats + offline alerts, `WAITING_GATEWAY`/halt, `UNKNOWN` in-flight orders + reconcile, one live connection per broker account (cold standby), suspend → stop/delete strategies (positions untouched) + disconnect; `delete_strategy` soft delete, never purge orders/fills, no `DELETE` grant on history tables.
 
 ### 3. FUND migration (last)
 - [ ] **v1.5a**: `sso_permissions.py` + `AUTH_PROVIDER=legacy|both|sso` (start `both`); agents on `sso-client`, one ServiceClient per service; llm-wiki behind `/proxy/llmwiki/`.
-- [ ] **v1.5b**: Admin UI `/admin` on the v1.3a API; cloud-strategy UI (submit, broker pick, stay-on warnings, per-PC heartbeat status).
+- [ ] **v1.5b**: cloud-strategy UI (the admin UI moved to SSO v1.3d) (submit, broker pick, stay-on warnings, per-PC heartbeat status).
 - [ ] **v1.5c**: `AUTH_PROVIDER=sso`, retire `fund-auth`.
 
 ### Other

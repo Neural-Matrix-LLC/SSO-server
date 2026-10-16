@@ -16,6 +16,9 @@ implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `applicati
 - [6. Error codes](#6-error-codes)
 - [7. Planned v1.2 features](#7-planned-v12-features)
 - [8. Admin REST API (v1.3a)](#8-admin-rest-api-v13a)
+- [9. Devices and on-behalf-of (v1.3b)](#9-devices-and-on-behalf-of-v13b)
+- [10. Signed webhooks (v1.3c)](#10-signed-webhooks-v13c)
+- [11. Admin web UI (v1.3d)](#11-admin-web-ui-v13d)
 
 ## 1. Basics
 
@@ -236,7 +239,8 @@ def with_backoff(call, tries=5):
 
 ### 3.1 Register your service
 
-Ask an SSO admin to run (or do it in the admin UI at `/<SSO_ADMIN_PATH>`):
+Ask an SSO admin to run (or do it in the SSO admin UI at `/<SSO_ADMIN_UI_PATH>services/new/` once v1.3d ships, or in
+Django admin at `/<SSO_ADMIN_PATH>`):
 
 ```bash
 python manage.py register_service reporting --name "Reporting" --app app2 \
@@ -725,3 +729,32 @@ Receiver rules: verify on the raw bytes, accept a timestamp within ±300 s, answ
 (at-least-once, unordered). Anything other than 2xx is retried with backoff `min(2^(n-1), 600)` s plus jitter for
 24 h, then marked `failed`. Redirects are not followed. `sso_client.verify_webhook()` and `WebhookReceiver` do these
 checks.
+
+## 11. Admin web UI (v1.3d)
+
+**Status:** designed, not coded ([DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)). Decision 2026-10-15: the
+admin UI is hosted by the SSO server (FUND has none).
+
+- **No new JSON endpoints.** The UI is server-rendered HTML at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`) and calls
+  the same domain layer as §8-10 in-process. Automation keeps using `/api/v1/admin/*`; nothing in §8-10 changes.
+- Not an API for programs: it uses a session cookie (`__Host-sso_admin_sid`) and CSRF tokens, answers HTML and
+  redirects (Post/Redirect/Get), and is usually behind an nginx IP allow-list or a separate admin hostname.
+- Who: active + `is_staff` + `application.sso_admin` (or superuser), checked on every request.
+- Step-up: the same actions as §8 (🔒) require a password confirmation page; window `SSO_ADMIN_REAUTH_SECONDS`.
+- Audit: rows in `sso_adminauditlog` get `channel = "ui"`; v1.3d adds the `channel` field to the audit row shape of
+  `GET /api/v1/admin/audit` (`"api"`, `"ui"`, `"django_admin"`, `"system"`) and an optional `?channel=` filter.
+
+| Area | Routes (relative to `/<SSO_ADMIN_UI_PATH>`) |
+|---|---|
+| Session | `login/`, `logout/`, `logout-everywhere/`, `reauth/`, `reauth/drop/`, `me/` |
+| Dashboard | `` |
+| Users | `users/`, `users/new/`, `users/{id}/`, `users/{id}/suspend`, `…/unsuspend`, `…/logout-all`, `…/password`, `…/delete`, `…/permissions`, `…/groups`, `users/export.csv` |
+| Groups | `groups/`, `groups/new/`, `groups/{id}/`, `…/members`, `…/permissions`, `…/delete` |
+| Permissions | `permissions/`, `permissions/new/`, `permissions/{codename}/`, `…/delete` |
+| Applications | `apps/`, `apps/{app}/`, `apps/import/`, `apps/import/apply` |
+| Services | `services/`, `services/new/`, `services/{client_id}/`, `…/rotate-secret`, `…/rotate-notify-secret`, `…/delete` |
+| Devices | `devices/`, `devices/{client_id}/`, `…/revoke` |
+| Webhooks | `webhooks/`, `webhooks/deliveries/`, `webhooks/deliveries/{id}/redeliver` |
+| Audit | `audit/`, `audit/{id}/`, `audit/export.csv` |
+
+Full method / step-up / audit-action table: [DESIGN-v1.3d §10](DESIGN-v1.3d-admin-ui.md#10-routes-complete-reference).

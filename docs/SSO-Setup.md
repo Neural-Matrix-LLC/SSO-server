@@ -309,3 +309,32 @@ upgrade:
 
 - Grant `application.sso_admin` (and Django **staff status**) to the people who use the admin API (v1.3a).
 - Add `SSO_WEBHOOK_SECRET_KEY` to `.env` before you set any webhook secret (`.env.example`, v1.3c).
+
+## 10. Admin web UI access (v1.3d, planned)
+
+Not available yet: this section describes the SSO admin UI designed in
+[DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md) (decision 2026-10-15: the admin UI lives on the SSO, not FUND).
+Until it ships, use Django admin (§8) or the admin REST API (README §6b).
+
+Once v1.3d is deployed:
+
+1. Make sure your admin account is **active**, has **staff status** and holds `application.sso_admin` (directly or
+   via a group). A staff superuser also works.
+2. Optional, recommended outside localhost: limit who can reach it.
+   ```bash
+   mkdir -p docker/nginx-admin-ui.d
+   printf 'allow 127.0.0.1;\nallow 172.31.250.0/24;\ndeny all;\n' > docker/nginx-admin-ui.d/allow.conf
+   ```
+   (`SSO_ADMIN_UI_ALLOW_DIR` points elsewhere if you keep it outside the repo.)
+3. In `.env`, keep the defaults for localhost (`SSO_ADMIN_UI_PATH=admin/`, no `SSO_ADMIN_UI_HOSTNAME`) and make sure
+   `SSO_CSRF_TRUSTED_ORIGINS` contains `https://localhost`.
+4. `scripts/upgrade_db.sh` (one new audit column), then `docker compose up -d --build`.
+5. Open `https://localhost/admin/` and sign in. Suspend, delete, set password, rotate secrets and granting
+   `sso_admin` ask for your password again (valid 5 min).
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `403 Forbidden` from nginx on `/admin/` | your IP is not in `docker/nginx-admin-ui.d/*.conf` | add an `allow` line, `docker compose up -d --force-recreate nginx` |
+| "Invalid username or password, or no admin access" with the right password | account not staff, not active, or missing `application.sso_admin` | fix in Django admin (`/sso-admin/`) |
+| `403 CSRF verification failed` | admin origin not in `SSO_CSRF_TRUSTED_ORIGINS` | add `https://localhost` (exact scheme/host/port), recreate `web` |
+| Sent back to the login page after a while or after a network change | idle timeout (30 min) or IP binding | sign in again |

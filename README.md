@@ -546,6 +546,22 @@ Full reference: [docs/API-REFERENCE-MANUAL.md §8](docs/API-REFERENCE-MANUAL.md#
 New settings: `SSO_ADMIN_REAUTH_SECONDS` (300), `SSO_SERVICE_TOKEN_TTL_SECONDS` (300), `SSO_THROTTLE_ADMIN`
 (120/min), `SSO_THROTTLE_ADMIN_REAUTH` (5/min), `SSO_THROTTLE_SERVICE_TOKEN` (60/min).
 
+## 6c. Admin web UI (v1.3d, planned)
+
+Decision 2026-10-15: the day-to-day **admin UI is part of the SSO server** (not FUND). Design:
+[docs/DESIGN-v1.3d-admin-ui.md](docs/DESIGN-v1.3d-admin-ui.md). Not coded yet; until then use the admin REST API (§6b)
+or Django admin.
+
+* Server-rendered Django pages at `https://<host>/<SSO_ADMIN_UI_PATH>` (default `/admin/`), no frontend build.
+* Sign in with an account that is **active + staff + `application.sso_admin`** (or a staff superuser). Own session
+  cookie, CSRF, IP-bound session (idle 30 min, max 8 h); destructive actions ask for the password again.
+* Users, groups, permissions, applications + permission import (dry-run diff), services, devices, webhooks, audit log.
+* nginx: allow-list snippets in `SSO_ADMIN_UI_ALLOW_DIR` (default `./docker/nginx-admin-ui.d`); optional separate
+  admin hostname `SSO_ADMIN_UI_HOSTNAME`. Django admin at `SSO_ADMIN_PATH` stays as break-glass.
+* Planned settings: `SSO_ADMIN_UI_ENABLED`, `SSO_ADMIN_UI_PATH`, `SSO_ADMIN_UI_HOSTNAME`, `SSO_ADMIN_UI_ALLOW_DIR`,
+  `SSO_ADMIN_UI_IDLE_SECONDS`, `SSO_ADMIN_UI_MAX_AGE_SECONDS`, `SSO_ADMIN_UI_IP_BINDING`, `SSO_ADMIN_UI_TIME_ZONE`
+  (full table in the design §15).
+
 ## 8. API summary
 
 | Method and path | Auth | Notes |
@@ -604,7 +620,8 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 * **Logout** in cookie mode with no cookie returns 204. With an invalid token it returns 401
   `token_invalid` and still clears the cookie.
 * **JSON-only parser** (no form or multipart), so a cross-site form POST cannot reach the API. Form posts get 415.
-* **`/admin/` is moved** to `SSO_ADMIN_PATH` (default `sso-admin/`).
+* **`/admin/` is moved** to `SSO_ADMIN_PATH` (default `sso-admin/`). From v1.3d (planned), `/admin/` is the SSO's own
+  admin web UI (`SSO_ADMIN_UI_PATH`), not Django admin.
 * **HSTS preload** deploy-check warning (`security.W021`) is silenced. Preloading binds the whole domain,
   so the domain owner should decide it.
 * **WhiteNoise** serves the admin static files (collected at image build).
@@ -639,3 +656,5 @@ Error codes: `invalid_request` 400, `invalid_credentials` 401, `token_invalid` 4
 9. Should the cookie-mode `Origin` check also cover `/login` (login-CSRF hardening)? It is not required by
    the addendum and is not implemented.
 10. ~~QA seed R27 guard / real-domain origin in `qa/tests/conftest.py`~~ **Done by QA** (QA results §8).
+11. v1.3d admin UI: path (`/admin/` or less guessable), separate admin hostname, MFA for admins
+    ([design §18](docs/DESIGN-v1.3d-admin-ui.md#18-open-questions)).
