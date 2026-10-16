@@ -41,7 +41,8 @@ Labels used in this document:
 FUND-Financial-Research is the core product: a React SPA plus a group of Python agent services for financial
 research [Repo]. The SSO server replaces FUND's own login (`fund-auth`, HS256 JWT) and becomes the one
 authentication server for FUND, llm-wiki-svc and Smart_Gateway_MCP; myFinance is phasing out. The day-to-day
-admin page moves into the FUND frontend on top of a new SSO admin REST API; Django admin stays as break-glass.
+admin UI lives **on the SSO server itself** at `/admin` (v1.3d, decision 2026-10-15, [design](DESIGN-v1.3d-admin-ui.md));
+FUND is client-facing only. The admin REST API (v1.3a) stays for scripts and CI; Django admin stays as break-glass.
 FUND users are already in `dcWebUsers` (`fund-auth` shares it), each application declares its permissions in its
 separate `sso_permissions.py` for import, strategies run in the FUND cloud while broker logins stay on the user's PC (FUND Local Gateway, pass-through, outbound link), and FUND switches provider with `AUTH_PROVIDER` in its root `.env` (decisions 2026-10-14).
 
@@ -49,6 +50,7 @@ separate `sso_permissions.py` for import, strategies run in the FUND cloud while
 flowchart LR
   subgraph Internet["Untrusted: internet and user machines"]
     BR["Browser: FUND SPA (React 18 + Vite, app/)"]
+    ABR["Admin browser - SSO /admin UI (v1.3d)"]
     MCPC["MCP / AI agents and scripts - registered service clients"]
   end
 
@@ -62,7 +64,6 @@ flowchart LR
       RL["gateway-relay [Proposal] - device links"]
     end
     FAUTH["fund-auth :8011 Django - legacy login on dcWebUsers, retired after cutover"]
-    ADMUI["FUND /admin UI [Proposal]"]
   end
 
   subgraph CLD["FUND cloud - strategies [Decision 2026-10-14 round 4]"]
@@ -85,17 +86,17 @@ flowchart LR
 
   subgraph SSOH["SSO host - compose project sso"]
     SNG["nginx - TLS, rate limit"]
-    SSO["SSO server Django - auth API, introspect, JWKS, admin REST API [Proposal], Django admin break-glass"]
+    SSO["SSO server Django - auth API, introspect, JWKS, admin REST API (v1.3a), admin web UI /admin (v1.3d), Django admin break-glass"]
     RDS["Redis - throttles, revoked sessions"]
   end
   DCW[("MySQL dcWebUsers - users, groups, application perms, tokens, service clients")]
   BRKX["Broker venues: Futu, IBKR, Webull"]
 
-  BR -- "HTTPS login / refresh cookie / admin API" --> SNG
+  BR -- "HTTPS login / refresh cookie" --> SNG
+  ABR -- "HTTPS /admin session cookie, allow-list" --> SNG
   BR -- "HTTPS SPA + Bearer SSO token" --> FNG
   FNG -- "XFF, Bearer" --> ORC & RES & STO & AT
   FNG -.-> FAUTH
-  ADMUI --- BR
   MCPC -- "client credentials: service token" --> SNG
   MCPC -- "MCP + service token, no IP binding" --> GW
   MCPC -- "MCP + service token" --> LW
@@ -126,7 +127,7 @@ flowchart LR
 | Services → SSO | introspect, BFF login, admin calls | ServiceClient Basic credentials; `client_ip` accepted only from an authenticated ServiceClient |
 | FUND cloud ↔ user PC | broker requests from cloud strategies over the device link (pass-through; one live connection per broker account) | today one static `SGMCP_AUTH_TOKEN` to a host gateway [Repo]; target: the FUND Local Gateway on the user's PC connects **outbound** to `gateway-relay` with a device credential (no IP binding); auto-trade calls the relay with service token + user token; suspend stops and deletes strategies and revokes devices |
 | SGMCP → brokers | orders, account data | broker credentials, sessions and `/ui` live only on the user's PC [Decision 2026-10-14] |
-| Admin | user / permission / service changes | FUND `/admin` → SSO admin REST API with `application.sso_admin`; Django admin = break-glass, superusers only |
+| Admin | user / permission / service changes | SSO admin UI `/admin` (v1.3d: session cookie + CSRF, IP binding, nginx allow-list, active + `is_staff` + `application.sso_admin`); scripts/CI → admin REST API; Django admin = break-glass, superusers only |
 
 **Which component holds what**
 
@@ -274,6 +275,26 @@ v1.2b (implemented on `feat/v1.2b`) adds the introspect/permission query with cl
 (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its handlers).
 v1.3a (branch `feat/v1.3a`, [design](DESIGN-v1.3a-admin-api.md)) adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
 `sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
+v1.3d ([design](DESIGN-v1.3d-admin-ui.md), not coded yet) adds the **admin web UI**: Django app `adminui`
+(server-rendered templates, `AdminUISessionGuard` middleware, CSP headers) at `/<SSO_ADMIN_UI_PATH>` (default
+`/admin/`), and moves the admin business rules from `sso/admin_api.py` into a shared domain layer `sso/admin_ops.py`
+used by both the REST API and the UI:
+
+```mermaid
+flowchart TB
+  N["nginx: /admin/ (sso-admin-ui.d allow-list) | /api/v1/admin/* | /sso-admin/ (sso-admin.d)"]
+  U["adminui views + templates (session, CSRF, step-up page)"]
+  A["sso/admin_api.py DRF views (Bearer, X-SSO-Reauth)"]
+  D["Django admin (break-glass)"]
+  O["sso/admin_ops.py: guards, step-up check, revoke, import, webhooks outbox"]
+  S["sso/audit.py (channel api/ui/django_admin/system), sso/stepup.py, sso/revocation.py, application/importer.py"]
+  M[("dcWebUsers: auth_*, django_session, sso_adminreauth, sso_adminauditlog, ...")]
+  N --> U & A & D
+  U --> O
+  A --> O
+  D -.-> S
+  O --> S --> M
+```
 
 ## 4. Component responsibilities
 
@@ -1229,6 +1250,7 @@ Routes from `ssoproject/urls.py` (nothing else is routed). Base URL = `SSO_ISSUE
 | GET | `/.well-known/openid-configuration` | none | none | `DiscoveryView` |
 | GET | `/healthz` | none | none | `HealthView` |
 | any | `/<SSO_ADMIN_PATH>` (default `/sso-admin/`) | Django admin session (staff) | none | Django admin |
+| GET/POST | `/<SSO_ADMIN_UI_PATH>…` (default `/admin/`, **v1.3d, planned**) | admin UI session `__Host-sso_admin_sid` + CSRF | `admin_ui_login`, `admin_reauth` | `adminui` (HTML only; routes in [DESIGN-v1.3d §10](DESIGN-v1.3d-admin-ui.md#10-routes-complete-reference)) |
 
 ### 8.0 Common rules
 
@@ -1444,6 +1466,13 @@ app access…*), `ServiceClient` (secret generated and shown once on create or "
 `ApplicationPermission` (add / rename via `ensure_permission`, delete with an affected-users confirmation; `app1`
 not deletable), `ApplicationPermissionRecord` (read-only). Actions write `LogEntry` and `sso.admin` JSON lines.
 
+**v1.3d (planned): admin web UI** at `/<SSO_ADMIN_UI_PATH>` (default `/admin/`), the day-to-day admin tool that
+replaces the planned FUND `/admin`. Own session cookie (`__Host-sso_admin_sid`, HttpOnly, Secure, SameSite=Strict),
+independent of the Django admin session; access = active + `is_staff` + `application.sso_admin` or superuser,
+re-checked in the DB on every request; IP-bound session, idle 30 min / absolute 8 h; step-up password page for the
+v1.3a destructive actions; own nginx allow-list directory (`SSO_ADMIN_UI_ALLOW_DIR`) and an optional separate
+admin hostname. Django admin stays break-glass. Details: [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md).
+
 ### 8.11 Error codes
 
 | HTTP | `error` | Meaning | Raised by |
@@ -1607,7 +1636,7 @@ flowchart TB
     end
     V1["SSO_KEYS_DIR to /run/keys ro"]
     V2["SSO_MYSQL_CA_DIR to /run/mysql-ca ro"]
-    V3["docker/nginx.conf template, SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, all ro"]
+    V3["docker/nginx.conf template, SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, SSO_ADMIN_UI_ALLOW_DIR (v1.3d), all ro"]
     ENV[".env via env_file"]
   end
   DB[("MySQL dcWebUsers - remote or host.docker.internal")]
@@ -1680,6 +1709,8 @@ HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `
 | Automatic `flushexpiredtokens` | Not run by the image; operator cron (deployment plan) |
 | Cross-tab refresh coordination in `auth.js` | Not implemented (recommendation §7.3) |
 | Hot key reload | Keys read at start; rotation needs a restart |
+| Admin web UI `/admin` (v1.3d) | Designed ([DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)), not coded. Until then: admin REST API + Django admin |
+| MFA for admins | Not planned yet (open question in DESIGN-v1.3d §18) |
 
 ### 12.2 Discrepancies found between existing docs and the code
 

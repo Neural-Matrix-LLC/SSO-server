@@ -490,6 +490,8 @@ user data; audit JSON is pretty-printed server-side and escaped). Uploads (`sso_
 - Django admin writes keep `channel = django_admin`; worker/sweep writes `channel = system`; API `channel = api`
   (backfill default for existing rows).
 - Also emitted as `sso.admin` JSON log lines (unchanged format + `channel`).
+- API visibility: `GET /api/v1/admin/audit` rows gain `"channel"` and the list accepts `?channel=` (additive, no
+  breaking change; see [API-REFERENCE-MANUAL.md §11](API-REFERENCE-MANUAL.md#11-admin-web-ui-v13d)).
 
 ## 14. Accessibility, i18n
 
