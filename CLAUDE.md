@@ -100,3 +100,9 @@ permissions (`app1`) and logs ERROR for lost ones; `create_app_permission` adds 
 - README §9 maps spec §11 requirements to test names; update it when renaming or adding such tests.
 - Per the user's global rules, every change is logged in `HISTORY.md` at the repo root (not created yet:
   create it with the first logged change).
+
+## Database migrations rule (Thomas, 2026-10-16)
+`scripts/upgrade_db.sh` is the single upgrade path for every SSO database change. For each new migration in
+`sso/` or `application/`: append it to the MANIFEST block at the top of `scripts/upgrade_db.sh`, add its
+tables/columns to `EXPECTED` in `sso/management/commands/sso_schema_check.py`, and add a
+`docs/db/upgrade-<prev>-to-<ver>.sql`. `sso/tests/test_upgrade_manifest.py` fails if any of these is missing.

@@ -2,6 +2,16 @@
 # Upgrade the SSO-owned schema in the shared dcWebUsers database to the code's level (v1.3d: sso 0003-0007,
 # application 0002; from v1.1 also sso 0002). Safe to re-run: with nothing to apply it only checks.
 #
+# ---- MIGRATION MANIFEST: every SSO schema change, oldest first. RULE: each new migration in sso/ or application/
+# ---- MUST be appended here (and its tables/columns to sso_schema_check.EXPECTED, plus a docs/db/*.sql for DBAs);
+# ---- sso/tests/test_upgrade_manifest.py fails the build otherwise. Step 4 (migrate) applies all pending ones.
+# MANIFEST v1.1   sso.0001_initial application.0001_initial
+# MANIFEST v1.2   sso.0002_v12a_service_registry_sessions
+# MANIFEST v1.3a  sso.0003_v13a application.0002_v13a sso.0004_v13a_tombstone
+# MANIFEST v1.3b  sso.0005_v13b
+# MANIFEST v1.3c  sso.0006_v13c
+# MANIFEST v1.3d  sso.0007_v13d_audit_channel
+#
 #   scripts/upgrade_db.sh [options]
 #
 # Steps: 1 pre-check (DB reachable, docker/dbcheck.py --strict)  2 current state (showmigrations + migrate --plan;
@@ -108,6 +118,7 @@ pyrun() {  # python file inside the runner (path relative to the repo / /app)
 }
 
 echo "SSO database upgrade: runner=$RUNNER db=$DBNAME user=$SSO_DBUSER mode=$([[ $PLAN == 1 ]] && echo plan || echo apply)"
+echo "covers: $(sed -n 's/^# MANIFEST \(v[^ ]*\).*/\1/p' "$0" | paste -sd, -) (manifest at top of $0)"
 if [[ "$RUNNER" == compose && "$BUILD" == 1 ]]; then
   STEP="build"; say "0. docker compose build web (the image must contain the new migrations)"
   $DOCKER compose build -q web
