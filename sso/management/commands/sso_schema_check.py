@@ -47,6 +47,9 @@ EXPECTED = {
         "sso_webhookdelivery": ["id", "event_id", "client_id", "status", "attempts", "next_attempt_at",
                                 "window_start", "claimed_at", "last_status", "last_error", "delivered_at"],
     },
+    "v1.3d": {
+        "sso_adminauditlog": ["channel"],
+    },
 }
 
 
@@ -101,4 +104,4 @@ class Command(BaseCommand):
             for p in problems:
                 self.stderr.write("ERROR " + p)
             raise SystemExit(1)
-        self.stdout.write("schema OK: all SSO migrations applied, v1.1-v1.3c tables and columns present")
+        self.stdout.write("schema OK: all SSO migrations applied, v1.1-v1.3d tables and columns present")

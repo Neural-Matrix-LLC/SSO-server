@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Upgrade the SSO-owned schema in the shared dcWebUsers database to the code's level (v1.3: sso 0003-0006,
+# Upgrade the SSO-owned schema in the shared dcWebUsers database to the code's level (v1.3d: sso 0003-0007,
 # application 0002; from v1.1 also sso 0002). Safe to re-run: with nothing to apply it only checks.
 #
 #   scripts/upgrade_db.sh [options]
@@ -7,7 +7,7 @@
 # Steps: 1 pre-check (DB reachable, docker/dbcheck.py --strict)  2 current state (showmigrations + migrate --plan;
 # STOP if the plan touches any app other than sso / application / token_blacklist)  3 backup of the SSO-owned
 # tables (mysqldump, default on)  4 migrate  5 post-check (manage.py sso_schema_check: all SSO migrations applied,
-# every v1.1-v1.3c table/column present; row counts unchanged)  6 summary. Exit code != 0 on any failure.
+# every v1.1-v1.3d table/column present; row counts unchanged)  6 summary. Exit code != 0 on any failure.
 #
 # Runner (default: compose when docker-compose.yml + docker compose are available, else venv):
 #   --compose            docker compose run --rm web python manage.py ... (builds the image first, see --no-build)
@@ -186,7 +186,7 @@ else
     OPTS=(--single-transaction --quick --hex-blob --no-tablespaces --default-character-set=utf8mb4 --skip-triggers)
     [[ "$MARIA" == 1 ]] || OPTS+=(--set-gtid-purged=OFF --column-statistics=0)
     {
-      echo "-- SSO-owned tables of $DBNAME before the v1.3 upgrade, $TS. Restore: docs/db/upgrade-v1.2-to-v1.3.sql (rollback)."
+      echo "-- SSO-owned tables of $DBNAME before the upgrade, $TS. Restore/rollback notes: docs/db/upgrade-v1.2-to-v1.3.sql, docs/db/upgrade-v1.3-to-v1.3d.sql."
       client mysqldump "${OPTS[@]}" "$DBNAME" $TABLES
       echo "-- django_migrations rows of sso / application / token_blacklist (data only)"
       client mysqldump "${OPTS[@]}" --no-create-info --skip-add-locks \
