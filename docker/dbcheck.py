@@ -22,6 +22,11 @@ try:
     ok = check_database("upgrade" if STRICT else "startup")
     if ok:
         logger.info("%s: database reachable at %s", "upgrade" if STRICT else "startup", db_target())
+        if not STRICT:
+            from sso.dbcheck import check_migrations
+
+            if check_migrations("startup"):
+                logger.info("startup: database schema up to date")
         if STRICT:
             print(f"db ok: {db_target()}")
 except Exception as exc:  # noqa: BLE001 - settings errors surface again in gunicorn with a traceback

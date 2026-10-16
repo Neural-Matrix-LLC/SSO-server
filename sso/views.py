@@ -425,8 +425,13 @@ class DiscoveryView(APIView):
 
 class HealthView(APIView):
     def get(self, request):
-        from sso.dbcheck import check_database
+        from sso.dbcheck import check_database, check_migrations
 
         if not check_database("healthz"):
             return Response({"error": "unhealthy", "detail": "database"}, status=503)
+        # Pending SSO migrations: ERROR log (at most every 5 min) but stay 200, so nginx/admin stay reachable
+        # while the operator runs scripts/upgrade_db.sh.
+        if not check_migrations("healthz", min_interval=300):
+            return Response({"status": "ok", "warning": "database migrations pending"},
+                            headers={"Cache-Control": "no-store"})
         return Response({"status": "ok"}, headers={"Cache-Control": "no-store"})

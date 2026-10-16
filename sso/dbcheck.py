@@ -34,3 +34,48 @@ def check_database(context: str, alias: str = "default") -> bool:
             pass
         return False
     return True
+
+
+# SSO-owned Django apps whose migrations this server needs (the shared dcWebUsers DB also holds other apps'
+# tables, which are not our business).
+SSO_MIGRATION_APPS = ("sso", "application", "token_blacklist")
+
+_last_pending_log = 0.0
+
+
+def pending_migrations(alias: str = "default") -> list[str]:
+    """Return 'app.migration' names of SSO-owned migrations not yet applied to the database."""
+    from django.db.migrations.executor import MigrationExecutor
+
+    executor = MigrationExecutor(connections[alias])
+    targets = executor.loader.graph.leaf_nodes()
+    plan = executor.migration_plan(targets)
+    return [f"{m.app_label}.{m.name}" for m, backwards in plan
+            if not backwards and m.app_label in SSO_MIGRATION_APPS]
+
+
+def check_migrations(context: str, alias: str = "default", min_interval: float = 0.0) -> bool:
+    """Log an ERROR if SSO migrations are pending (schema older than the code). Returns True when up to date.
+
+    ``min_interval`` (seconds) rate-limits the ERROR line for repeated callers such as /healthz. Never raises.
+    """
+    global _last_pending_log
+    import time
+
+    try:
+        pending = pending_migrations(alias)
+    except Exception as exc:  # noqa: BLE001 - DB down is reported by check_database
+        logger.error("%s: could not check database migrations at %s (%s: %s)",
+                     context, db_target(alias), exc.__class__.__name__, exc)
+        return False
+    if not pending:
+        return True
+    now = time.monotonic()
+    if not min_interval or now - _last_pending_log >= min_interval:
+        _last_pending_log = now
+        logger.error(
+            "%s: database schema at %s is behind the code: %d pending migration(s): %s. "
+            "Run scripts/upgrade_db.sh (docs/SSO-Setup.md, 'Upgrading the database').",
+            context, db_target(alias), len(pending), ", ".join(pending),
+        )
+    return False
