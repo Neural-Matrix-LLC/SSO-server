@@ -1,0 +1,61 @@
+# Local/QA MySQL (addendum B.14, deployment plan §2.1 / R29). Production runs MySQL 8.0 today and moves
+# to 8.4 later, so the default is mysql:8.0 and the same setup is meant to be run with mysql:8.4 as well.
+# MYSQL_IMAGE picks the server (QA_MYSQL_TAG=8.0|8.4 from the deployment plan also works when MYSQL_IMAGE is unset).
+# Each version needs its OWN data volume: an 8.4 data dir cannot be opened by 8.0 (no downgrade), and 8.4 silently
+# upgrades an 8.0 one. Passwords come from the git-ignored .env.test:
+#   scripts/dev_setup.sh                         # creates .env.test with random passwords (once)
+#   T='docker compose --env-file .env.test -f docker-compose.test.yml'
+#   $T run --rm --build tests                                                    # mysql:8.0
+#   MYSQL_IMAGE=mysql:8.4 SSO_TEST_MYSQL_VOLUME=sso-test-mysql-8.4 $T run --rm --build tests
+#   $T down -v ; MYSQL_IMAGE=mysql:8.4 SSO_TEST_MYSQL_VOLUME=sso-test-mysql-8.4 $T down -v   # throw the data away
+# "tests" runs the full pytest suite on MySQL. It connects as root because pytest-django creates and
+# drops its own test_dcWebUsers database. The DML-only sso_app account is what the app uses in the dev stack
+# (docker-compose.dev.yml) and what QA checks (R17).
+name: sso-test
+
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}
+    # server defaults kept on purpose: caching_sha2_password is the default plugin on 8.0 and 8.4;
+    # mysql_native_password is still enabled on 8.0 and disabled on 8.4. The init script sets the plugin explicitly.
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:?set it in .env.test}
+      MYSQL_DATABASE: dcWebUsers
+      SSO_TEST_APP_PASSWORD: ${SSO_TEST_APP_PASSWORD:?set it in .env.test}
+      SSO_TEST_MIGRATOR_PASSWORD: ${SSO_TEST_MIGRATOR_PASSWORD:?set it in .env.test}
+    volumes:
+      - sso-test-mysql:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    # no published port
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+      args:
+        DJANGO_SPEC: ${SSO_TEST_DJANGO_SPEC:-Django>=5.2,<5.3}
+    environment:
+      SSO_DB_ENGINE: mysql
+      SSO_DBHOST: mysql
+      SSO_DBPORT: "3306"
+      SSO_DBUSER: root
+      SSO_DBPWD: ${SSO_TEST_MYSQL_ROOT_PASSWORD}
+      SSO_TEST_DBNAME: test_dcWebUsers
+      # for test_mysql_integration.py: proves the init-script accounts log in with caching_sha2_password
+      SSO_TEST_APP_PASSWORD: ${SSO_TEST_APP_PASSWORD}
+      SSO_TEST_MIGRATOR_PASSWORD: ${SSO_TEST_MIGRATOR_PASSWORD}
+      SSO_TEST_EXPECT_MYSQL: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    command: ["pytest", "-q", "--cov-fail-under=90"]
+
+volumes:
+  sso-test-mysql:
+    name: ${SSO_TEST_MYSQL_VOLUME:-sso-test-mysql-8.0}

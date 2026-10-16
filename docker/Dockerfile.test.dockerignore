@@ -1,0 +1,16 @@
+# Build context rules for docker/Dockerfile.test (BuildKit per-Dockerfile ignore file).
+.git
+.venv*
+**/__pycache__
+.pytest_cache
+.coverage*
+keys
+**/*.pem
+.env
+.env.*
+*.sql
+*.sql.gz
+*.sqlite3
+docker/certs
+qa
+devops

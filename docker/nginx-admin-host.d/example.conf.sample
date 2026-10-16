@@ -1,0 +1,23 @@
+# Separate admin-UI hostname (v1.3d). Rename to *.conf and edit the literal values.
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name sso-admin.example.com;
+    ssl_certificate     /etc/nginx/certs/admin-fullchain.pem;
+    ssl_certificate_key /etc/nginx/certs/admin-privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_tickets off;
+    access_log /var/log/nginx/access.log combined;
+    client_max_body_size 64k;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Real-IP $remote_addr;
+    # optional allow-list:  allow 203.0.113.0/24; deny all;
+    location /admin/ { limit_req zone=sso_admin_ui burst=60 nodelay; proxy_pass http://sso_web; }
+    location /static/ { proxy_pass http://sso_web; }
+    location / { return 404; }
+}

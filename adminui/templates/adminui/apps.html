@@ -1,0 +1,8 @@
+{% extends "adminui/base.html" %}{% block title %}Applications{% endblock %}
+{% block content %}
+<h1>Applications</h1>
+<p><a class="button" href="{{ ui }}apps/import/">Import / update permissions</a></p>
+<table><thead><tr><th scope="col">App</th><th scope="col">Name</th><th scope="col">Version</th><th scope="col">Permissions</th><th scope="col">Deprecated</th></tr></thead><tbody>
+{% for a in apps %}<tr><td><a href="{{ ui }}apps/{{ a.app_codename }}/">{{ a.app_codename }}</a></td><td>{{ a.name }}</td><td>{{ a.version }}</td><td>{{ a.permission_count }}</td><td>{{ a.deprecated_count }}</td></tr>{% empty %}<tr><td colspan="5">No applications imported yet.</td></tr>{% endfor %}
+</tbody></table>
+{% endblock %}

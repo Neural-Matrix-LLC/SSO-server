@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block title %}SSO admin{% endblock %} · SSO admin</title>
+{% load static %}<link rel="stylesheet" href="{% static 'adminui/admin.css' %}">
+<script src="{% static 'adminui/admin.js' %}" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+{% if user.is_authenticated %}
+<header class="top">
+  <a class="brand" href="{{ ui }}">SSO admin</a>
+  <nav aria-label="Main">
+    <a href="{{ ui }}users/">Users</a><a href="{{ ui }}groups/">Groups</a><a href="{{ ui }}permissions/">Permissions</a>
+    <a href="{{ ui }}apps/">Applications</a><a href="{{ ui }}services/">Services</a><a href="{{ ui }}devices/">Devices</a>
+    <a href="{{ ui }}webhooks/">Webhooks</a><a href="{{ ui }}audit/">Audit log</a>
+  </nav>
+  <div class="who"><a href="{{ ui }}me/">{{ user.username }}</a>
+    <form method="post" action="{{ ui }}logout/" class="inline">{% csrf_token %}<button type="submit" class="link">Log out</button></form>
+  </div>
+</header>
+{% if elevated_until %}
+<div class="elevated" role="status">Elevated (password confirmed) until {{ elevated_until|date:"H:i" }} ({{ tz }}).
+  <form method="post" action="{{ ui }}reauth/drop/" class="inline">{% csrf_token %}<input type="hidden" name="back" value="{{ request.get_full_path }}"><button type="submit" class="link">Drop now</button></form>
+</div>
+{% endif %}
+{% endif %}
+<main id="main">
+{% if messages %}<ul class="messages" role="status">{% for m in messages %}<li class="msg-{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>{% endif %}
+{% if error %}<p class="error" role="alert" id="form-error">{{ error }}</p>{% endif %}
+{% block content %}{% endblock %}
+</main>
+<footer><small>Times in {{ tz }}.</small></footer>
+</body>
+</html>

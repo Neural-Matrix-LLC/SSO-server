@@ -1,0 +1,16 @@
+{% extends "adminui/base.html" %}{% block title %}Audit log{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+<form method="get" class="filters" role="search">
+<label for="a">Actor</label><input id="a" name="actor" value="{{ f.actor|default:'' }}" size="8">
+<label for="ac">Action</label><input id="ac" name="action" value="{{ f.action|default:'' }}" size="14">
+<label for="tt">Target type</label><input id="tt" name="target_type" value="{{ f.target_type|default:'' }}" size="8">
+<label for="ti">Target id</label><input id="ti" name="target_id" value="{{ f.target_id|default:'' }}" size="8">
+<label for="ch">Channel</label><select id="ch" name="channel"><option value="">any</option>{% for c in channels %}<option{% if f.channel == c %} selected{% endif %}>{{ c }}</option>{% endfor %}</select>
+<label for="r">Result</label><select id="r" name="result"><option value="">any</option><option{% if f.result == "ok" %} selected{% endif %}>ok</option><option{% if f.result == "denied" %} selected{% endif %}>denied</option></select>
+<label for="si">Since (ISO 8601)</label><input id="si" name="since" value="{{ f.since|default:'' }}" size="20">
+<button type="submit">Filter</button></form>
+<p><a href="{{ ui }}audit/export.csv{% if qs %}?{{ qs }}{% endif %}">Export CSV</a></p>
+{% include "adminui/audit_table.html" with rows=page %}
+{% include "adminui/pager.html" %}
+{% endblock %}

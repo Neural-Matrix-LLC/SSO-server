@@ -1,0 +1,13 @@
+[run]
+source =
+    sso
+    application
+omit =
+    sso/tests/*
+    sso/migrations/*
+    application/migrations/*
+branch = False
+
+[report]
+show_missing = True
+skip_covered = False

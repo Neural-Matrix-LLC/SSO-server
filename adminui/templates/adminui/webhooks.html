@@ -1,0 +1,10 @@
+{% extends "adminui/base.html" %}{% block title %}Webhooks{% endblock %}
+{% block content %}
+<h1>Webhook events</h1>
+<p><a href="{{ ui }}webhooks/deliveries/">Deliveries</a> · <a href="{{ ui }}webhooks/deliveries/?status=failed">Failed deliveries</a></p>
+<form method="get" class="filters"><label for="t">Type</label><select id="t" name="type"><option value="">any</option>{% for e in event_types %}<option{% if f.type == e %} selected{% endif %}>{{ e }}</option>{% endfor %}</select><button type="submit">Filter</button></form>
+<table><thead><tr><th scope="col">#</th><th scope="col">Type</th><th scope="col">Time</th><th scope="col">Data</th></tr></thead><tbody>
+{% for e in page %}<tr><td><a href="{{ ui }}webhooks/deliveries/?event={{ e.pk }}">{{ e.pk }}</a></td><td>{{ e.type }}</td><td>{{ e.created|date:"Y-m-d H:i:s" }}</td><td><code>{{ e.data }}</code></td></tr>{% empty %}<tr><td colspan="4">None.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+{% endblock %}

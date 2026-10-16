@@ -1,0 +1,12 @@
+{% extends "adminui/base.html" %}{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<ul class="effects">{% for e in effect %}<li>{{ e }}</li>{% endfor %}</ul>
+<form method="post" action="{{ action_url }}" class="narrow">{% csrf_token %}
+  <input type="hidden" name="back" value="{{ action_url }}">
+  {% if target_name %}<label for="id_confirm">Type <strong>{{ target_name }}</strong> to confirm</label>
+  <input id="id_confirm" name="confirm" required autocomplete="off" data-must-equal="{{ target_name }}">{% endif %}
+  {% if "revoke_all" in extra %}<label class="check"><input type="checkbox" name="revoke_all"> Revoke from everyone who still has it</label>{% endif %}
+  <button type="submit" class="{% if danger %}danger{% endif %}">{{ button }}</button> <a href="{{ back }}">Cancel</a>
+</form>
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends "adminui/base.html" %}{% block title %}Groups{% endblock %}
+{% block content %}
+<h1>Groups</h1>
+<form method="post" action="{{ ui }}groups/new/" class="inline">{% csrf_token %}<label for="gn">New group</label><input id="gn" name="name" required maxlength="150"><button type="submit">Create</button></form>
+<form method="get" class="filters" role="search"><label for="q">Search</label><input id="q" name="q" value="{{ f.q|default:'' }}"><button type="submit">Filter</button></form>
+<table><thead><tr><th scope="col">Name</th><th scope="col">Members</th></tr></thead><tbody>
+{% for g in page %}<tr><td><a href="{{ ui }}groups/{{ g.pk }}/">{{ g.name }}</a></td><td>{{ g.user_set.count }}</td></tr>{% empty %}<tr><td colspan="2">No groups.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+{% endblock %}

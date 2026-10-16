@@ -1,0 +1,17 @@
+{% extends "adminui/base.html" %}{% block title %}Users{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<p><a class="button" href="{{ ui }}users/new/">Create user</a> <a href="{{ ui }}users/export.csv{% if qs %}?{{ qs }}{% endif %}">Export CSV</a></p>
+<form method="get" class="filters" role="search">
+  <label for="q">Search</label><input id="q" name="q" value="{{ f.q|default:'' }}">
+  <label for="active">Status</label><select id="active" name="active"><option value="">any</option><option value="true"{% if f.active == "true" %} selected{% endif %}>active</option><option value="false"{% if f.active == "false" %} selected{% endif %}>suspended</option></select>
+  <label for="staff">Staff</label><select id="staff" name="staff"><option value="">any</option><option value="true"{% if f.staff == "true" %} selected{% endif %}>staff</option><option value="false"{% if f.staff == "false" %} selected{% endif %}>not staff</option></select>
+  <label for="group">Group</label><select id="group" name="group"><option value="">any</option>{% for g in groups %}<option{% if f.group == g.name %} selected{% endif %}>{{ g.name }}</option>{% endfor %}</select>
+  <button type="submit">Filter</button>
+</form>
+<table><thead><tr><th scope="col">Username</th><th scope="col">Name</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Groups</th><th scope="col">Last login</th></tr></thead><tbody>
+{% for x in page %}<tr><td><a href="{{ ui }}users/{{ x.pk }}/">{{ x.username }}</a>{% if x.is_staff %} <span class="tag">staff</span>{% endif %}{% if x.is_superuser %} <span class="tag">superuser</span>{% endif %}</td><td>{{ x.first_name }} {{ x.last_name }}</td><td>{{ x.email }}</td><td>{% if x.is_active %}Active{% else %}<span class="bad">Suspended</span>{% endif %}</td><td>{% for g in x.groups.all %}{{ g.name }}{% if not forloop.last %}, {% endif %}{% endfor %}</td><td>{{ x.last_login|date:"Y-m-d H:i"|default:"never" }}</td></tr>
+{% empty %}<tr><td colspan="6">No users.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+{% endblock %}

@@ -1,0 +1,13 @@
+{% extends "adminui/base.html" %}{% block title %}Import preview{% endblock %}
+{% block content %}
+<h1>Preview: {{ app }} version {{ r.version }}</h1>
+<dl class="kv">
+<dt>Created</dt><dd>{% for c in r.created %}<code>{{ c }}</code> {% empty %}none{% endfor %}</dd>
+<dt>Updated</dt><dd>{% for c in r.updated %}<code>{{ c }}</code> {% empty %}none{% endfor %}</dd>
+<dt>Deprecated (kept, still work)</dt><dd>{% for c in r.deprecated %}<code class="bad">{{ c }}</code> {% empty %}none{% endfor %}</dd>
+<dt>Unchanged</dt><dd>{{ r.unchanged|length }}</dd></dl>
+<form method="post" action="{{ ui }}apps/import/apply">{% csrf_token %}
+<input type="hidden" name="payload" value="{{ payload }}"><input type="hidden" name="digest" value="{{ digest }}"><input type="hidden" name="force" value="{% if force %}1{% else %}0{% endif %}">
+<input type="hidden" name="back" value="{{ ui }}apps/import/">
+<button type="submit">Apply</button> <a href="{{ ui }}apps/import/">Cancel</a></form>
+{% endblock %}

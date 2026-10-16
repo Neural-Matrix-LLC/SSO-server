@@ -1,0 +1,8 @@
+{% extends "adminui/base.html" %}{% block title %}{{ d.client_id }}{% endblock %}
+{% block content %}
+<h1>Device {{ d.client_id }}</h1>
+<dl class="kv"><dt>Name</dt><dd>{{ d.device_name }}</dd><dt>Owner</dt><dd>{% if owner %}<a href="{{ ui }}users/{{ owner.pk }}/">{{ owner.username }}</a>{% endif %}</dd>
+<dt>App</dt><dd>{{ d.app_codename|default:"" }}</dd><dt>Created</dt><dd>{{ d.created }}</dd><dt>Last used</dt><dd>{{ d.last_used|default:"never" }}</dd>
+<dt>Key fingerprint</dt><dd><code>{{ d.public_key_fingerprint }}</code></dd></dl>
+<a class="button danger" href="{{ ui }}devices/{{ d.client_id }}/revoke">Revoke device</a>
+{% endblock %}

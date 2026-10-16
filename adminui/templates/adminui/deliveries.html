@@ -1,0 +1,8 @@
+{% extends "adminui/base.html" %}{% block title %}Deliveries{% endblock %}
+{% block content %}
+<h1>Webhook deliveries</h1>
+<form method="get" class="filters"><label for="s">Status</label><select id="s" name="status"><option value="">any</option>{% for s in statuses %}<option{% if f.status == s %} selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+<label for="c">Service</label><input id="c" name="client_id" value="{{ f.client_id|default:'' }}"><button type="submit">Filter</button></form>
+{% include "adminui/delivery_table.html" with rows=page %}
+{% include "adminui/pager.html" %}
+{% endblock %}

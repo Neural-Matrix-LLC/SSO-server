@@ -1,0 +1,79 @@
+# LOCAL DEV overlay (deployment plan R24): self-signed TLS, a local MySQL (MYSQL_IMAGE, default mysql:8.0 like
+# production today; mysql:8.4 also supported, use a fresh volume: SSO_DEV_MYSQL_VOLUME) standing in for
+# dcWebUsers (same accounts as prod: sso_app = DML, sso_migrator = DDL), the examples/ demo page and
+# the verifier. Never use on a server. Order follows deployment plan §2.1:
+#
+#   scripts/dev_setup.sh                       # keys, self-signed cert, .env and .env.test
+#   alias dc='docker compose -f docker-compose.yml -f docker-compose.dev.yml'
+#   dc up -d --build db redis
+#   # 1. built-in apps only (recreates what myFinance has in prod), as sso_migrator:
+#   for app in contenttypes auth admin sessions; do dc run --rm -e SSO_DBUSER=sso_migrator \
+#       -e SSO_DBPWD="$SSO_TEST_MIGRATOR_PASSWORD" web python manage.py migrate $app; done
+#   # 2. optional QA seed (qa/tests/fixtures/seed_test_data.py), 3. migrate --plan, then migrate:
+#   dc run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD="$SSO_TEST_MIGRATOR_PASSWORD" web python manage.py migrate --plan
+#   dc run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD="$SSO_TEST_MIGRATOR_PASSWORD" web python manage.py migrate
+#   dc up -d --build
+#   open https://localhost:${SSO_HTTPS_PORT}/demo/
+# (the SSO_TEST_* passwords are in .env.test; dev_setup.sh also copies them into .env for interpolation)
+#
+# cp docker-compose.dev.yml docker-compose.override.yml makes a plain "docker compose up" use it;
+# the override file is gitignored so it can never reach a server checkout.
+services:
+  web:
+    environment:
+      SSO_DB_ENGINE: mysql
+      SSO_DBHOST: db
+      SSO_DBPORT: "3306"
+      SSO_DBNAME: dcWebUsers
+      SSO_DBUSER: sso_app
+      SSO_DBPWD: ${SSO_TEST_APP_PASSWORD:?run scripts/dev_setup.sh}
+      GUNICORN_WORKERS: "2"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: ${MYSQL_IMAGE:-mysql:${QA_MYSQL_TAG:-8.0}}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${SSO_TEST_MYSQL_ROOT_PASSWORD:?run scripts/dev_setup.sh}
+      MYSQL_DATABASE: dcWebUsers
+      SSO_TEST_APP_PASSWORD: ${SSO_TEST_APP_PASSWORD}
+      SSO_TEST_MIGRATOR_PASSWORD: ${SSO_TEST_MIGRATOR_PASSWORD:?run scripts/dev_setup.sh}
+    volumes:
+      - sso-dev-mysql:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - edge
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  verifier:
+    build:
+      context: ./examples/verifier
+    environment:
+      SSO_ISSUER: ${SSO_ISSUER}
+      SSO_AUDIENCE: ${SSO_AUDIENCE:-myfin-services}
+      # internal fetch; the dev .env allows Host "web" and disables the SSL redirect
+      SSO_JWKS_URL: http://web:8000/.well-known/jwks.json
+    networks:
+      - edge
+    depends_on:
+      web:
+        condition: service_healthy
+
+  nginx:
+    volumes:
+      - ./docker/nginx-dev.d:/etc/nginx/sso.d:ro
+      - ./examples/frontend:/usr/share/nginx/demo:ro
+    depends_on:
+      verifier:
+        condition: service_started
+
+volumes:
+  sso-dev-mysql:
+    # one volume per MySQL version (8.0 cannot open an 8.4 data dir)
+    name: ${SSO_DEV_MYSQL_VOLUME:-sso-dev-mysql-8.0}

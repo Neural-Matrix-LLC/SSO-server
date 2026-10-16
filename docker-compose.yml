@@ -1,0 +1,171 @@
+# Production / staging stack (spec §9.5, deployment plan §3 and §15 R18-R23).
+# Validate without printing secrets:  docker compose config --quiet
+# No DB service: MySQL dcWebUsers is remote. Migrations are operator-run, never automatic:
+#   docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate --plan
+#   (review: only application + sso + token_blacklist; README "Docker quick start" step 6 / §5)
+# All host names, ports and paths come from .env (see .env.example); nothing is hard-coded here.
+name: sso
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  web:
+    # Docker Hub name. DOCKER_USER / IMAGE_TAG come from .env; a shell export of the same name wins over .env.
+    image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      args:
+        SSO_UID: ${SSO_UID:-10001}
+        SSO_GID: ${SSO_GID:-10001}
+    # non-root (R2). Must equal the build args: the image's files and the host key files are owned for it.
+    user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
+    env_file: .env
+    environment:
+      GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
+      # nginx (the only proxy) lives on the edge network: trust forwarded headers only from it.
+      # Overridable from .env (add a host nginx/LB address when one sits in front; README §7).
+      SSO_TRUSTED_PROXIES: ${SSO_TRUSTED_PROXIES:-${SSO_EDGE_SUBNET:-172.31.250.0/24}}
+      # gunicorn trusts X-Forwarded-Proto only from the edge network, where nginx lives
+      SSO_FORWARDED_ALLOW_IPS: ${SSO_FORWARDED_ALLOW_IPS:-${SSO_EDGE_SUBNET:-172.31.250.0/24}}
+      # shared throttle cache; settings refuse a per-process cache when SSO_DEBUG=False (QA defect 5)
+      SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
+      # JWT keys: SSO_JWT_PRIVATE_KEY / SSO_JWT_PUBLIC_KEYS are file NAMES resolved in this directory.
+      # Pinned here (not overridable from .env): env_file also passes the HOST path SSO_KEYS_DIR into the
+      # container, and settings' precedence is SSO_JWT_KEYS_MOUNT > SSO_KEYS_DIR > /run/keys.
+      SSO_JWT_KEYS_MOUNT: /run/keys
+    volumes:
+      # SSO_KEYS_DIR: the single host folder with the key pair(s), mounted read-only at the fixed /run/keys
+      - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
+      # optional MySQL server CA for verified DB TLS (SSO_DB_SSL_CA=/run/mysql-ca/ca.pem, R20/R28)
+      - ${SSO_MYSQL_CA_DIR:-./mysql-ca}:/run/mysql-ca:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # no "ports:": only nginx is published. Shared-nginx variant: "127.0.0.1:${SSO_WEB_LOCAL_PORT:-8001}:8000".
+    # SSO_DBHOST=host.docker.internal reaches a MySQL on the Docker host, also with Docker Engine on Linux/WSL
+    # (Docker Desktop defines the name itself; host-gateway = the host's address on the default bridge).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge
+      - backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  webhooks:
+    # v1.3c webhook worker (docs/DESIGN-v1.3c-webhooks.md §6): same image, no HTTP port, outbound HTTPS only.
+    # One or several replicas: rows are claimed with SELECT ... FOR UPDATE SKIP LOCKED.
+    image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
+    user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
+    command: ["python", "manage.py", "run_webhook_worker"]
+    env_file: .env
+    environment:
+      SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
+      SSO_JWT_KEYS_MOUNT: /run/keys
+    volumes:
+      - ${SSO_KEYS_DIR:-./keys}:/run/keys:ro
+      - ${SSO_MYSQL_CA_DIR:-./mysql-ca}:/run/mysql-ca:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - edge      # egress to the services' notify_url endpoints
+      - backend
+    depends_on:
+      redis:
+        condition: service_healthy
+    # no HTTP port: the image's /healthz probe would always fail here; check the worker's heartbeat file instead
+    healthcheck:
+      test: ["CMD", "python", "/app/docker/healthcheck.py", "--worker"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+    logging: *default-logging
+
+  redis:
+    # Redis 7.2 is the last BSD-licensed line (deployment plan §5 / Q14: Valkey 8 is a drop-in alternative).
+    image: redis:7.2.5-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "64mb",
+              "--maxmemory-policy", "allkeys-lru"]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+
+  nginx:
+    image: nginx:1.28-alpine
+    ports:
+      - "${SSO_HTTP_PORT:-80}:80"
+      - "${SSO_HTTPS_PORT:-443}:443"
+    environment:
+      NGINX_ENVSUBST_FILTER: "^SSO_"
+      SSO_HOSTNAME: ${SSO_HOSTNAME:?set SSO_HOSTNAME in .env}
+      SSO_HTTPS_PORT: ${SSO_HTTPS_PORT:-443}
+      SSO_ADMIN_PATH: ${SSO_ADMIN_PATH:-sso-admin/}
+      SSO_ADMIN_UI_PATH: ${SSO_ADMIN_UI_PATH:-admin/}
+      SSO_ADMIN_UI_HOSTNAME: ${SSO_ADMIN_UI_HOSTNAME:-}
+      SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
+      SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ${SSO_CERTS_DIR:-./docker/certs}:/etc/nginx/certs:ro
+      - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme:ro
+      # optional admin IP allow-list snippets (empty dir = no restriction)
+      - ${SSO_ADMIN_ALLOW_DIR:-./docker/nginx-admin.d}:/etc/nginx/sso-admin.d:ro
+      # v1.3d admin UI: optional IP allow-list snippets, and optional extra server blocks (separate hostname)
+      - ${SSO_ADMIN_UI_ALLOW_DIR:-./docker/nginx-admin-ui.d}:/etc/nginx/sso-admin-ui.d:ro
+      - ${SSO_ADMIN_UI_HOST_DIR:-./docker/nginx-admin-host.d}:/etc/nginx/sso-admin-host.d:ro
+    networks:
+      - edge
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    logging: *default-logging
+
+networks:
+  edge:               # nginx <-> web; web also reaches the remote MySQL through it
+    ipam:
+      config:
+        # fixed so gunicorn can trust exactly this network; change if it collides on the host
+        - subnet: ${SSO_EDGE_SUBNET:-172.31.250.0/24}
+  backend:
+    internal: true    # redis is never reachable from outside

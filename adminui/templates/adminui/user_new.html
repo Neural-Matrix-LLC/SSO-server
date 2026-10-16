@@ -1,0 +1,15 @@
+{% extends "adminui/base.html" %}{% block title %}Create user{% endblock %}
+{% block content %}
+<h1>Create user</h1>
+<form method="post" class="narrow">{% csrf_token %}
+  <label for="u">Username</label><input id="u" name="username" required maxlength="150" value="{{ f.username|default:'' }}">
+  <label for="e">Email</label><input id="e" name="email" type="email" maxlength="254" value="{{ f.email|default:'' }}">
+  <label for="fn">First name</label><input id="fn" name="first_name" maxlength="150" value="{{ f.first_name|default:'' }}">
+  <label for="ln">Last name</label><input id="ln" name="last_name" maxlength="150" value="{{ f.last_name|default:'' }}">
+  <label for="p1">Initial password (optional; empty = cannot log in until set)</label><input id="p1" name="password" type="password" autocomplete="new-password">
+  <label for="p2">Repeat password</label><input id="p2" name="password2" type="password" autocomplete="new-password">
+  <fieldset><legend>Groups</legend>{% for g in groups %}<label class="check"><input type="checkbox" name="groups" value="{{ g.name }}"> {{ g.name }}</label>{% empty %}<p class="muted">No groups.</p>{% endfor %}</fieldset>
+  {% if user.is_superuser %}<label class="check"><input type="checkbox" name="is_staff"> Staff (needed for admin access)</label>{% endif %}
+  <button type="submit">Create</button> <a href="{{ ui }}users/">Cancel</a>
+</form>
+{% endblock %}

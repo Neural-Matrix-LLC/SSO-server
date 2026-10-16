@@ -1,0 +1,9 @@
+{% extends "adminui/base.html" %}{% block title %}Services{% endblock %}
+{% block content %}
+<h1>Service clients</h1>
+<p><a class="button" href="{{ ui }}services/new/">Register service</a></p>
+<table><thead><tr><th scope="col">client_id</th><th scope="col">Name</th><th scope="col">App</th><th scope="col">Webhook</th><th scope="col">Status</th></tr></thead><tbody>
+{% for c in page %}<tr><td><a href="{{ ui }}services/{{ c.client_id }}/">{{ c.client_id }}</a></td><td>{{ c.name }}</td><td>{{ c.app_codename|default:"" }}</td><td>{{ c.notify_url|default:"" }}</td><td>{% if c.is_active %}active{% else %}<span class="bad">inactive</span>{% endif %}</td></tr>{% empty %}<tr><td colspan="5">None.</td></tr>{% endfor %}
+</tbody></table>
+{% include "adminui/pager.html" %}
+{% endblock %}

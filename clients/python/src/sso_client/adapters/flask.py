@@ -1,0 +1,68 @@
+"""Flask adapter.
+
+    sso = SSO(app)                       # SSOClient from SSO_* env (or SSO(app, client=...))
+
+    @app.get("/report")
+    @sso.require_permission("application.app2")
+    def report(): return {"user": g.sso.user.username}
+
+The peer is ``request.environ["REMOTE_ADDR"]``; do not wrap the app in Werkzeug ``ProxyFix`` (or configure it
+for exactly the same proxies).
+"""
+from __future__ import annotations
+
+import functools
+
+from flask import g, jsonify, request
+
+from ..client import SSOClient, resolve_request
+from ..config import SSOConfig
+from ..errors import NotAuthenticated, SSOError
+from ..ip import get_client_ip
+from ..responses import error_response
+
+
+class SSO:
+    def __init__(self, app=None, *, client: SSOClient | None = None):
+        self.client = client
+        if app is not None:
+            self.init_app(app)
+
+    def init_app(self, app) -> None:
+        if self.client is None:
+            self.client = SSOClient(SSOConfig.from_env())
+        app.extensions["sso_client"] = self
+        app.before_request(self._set_ip)
+        app.register_error_handler(SSOError, self._error)
+
+    def _set_ip(self):
+        cfg = self.client.config
+        g.client_ip = get_client_ip(request.environ.get("REMOTE_ADDR"), request.headers, cfg.trusted_proxies,
+                                    cfg.client_ip_header)
+
+    @staticmethod
+    def _error(exc: SSOError):
+        status, body, headers = error_response(exc)
+        resp = jsonify(body)
+        resp.status_code = status
+        resp.headers.update(headers)
+        return resp
+
+    def check(self, require=()):
+        if "client_ip" not in g:
+            self._set_ip()
+        token, ip, actor = resolve_request(request.headers.get("Authorization"), request.headers, g.client_ip)
+        if token is None:
+            raise NotAuthenticated("no bearer token")
+        return self.client.check(token, ip, require, actor_token=actor)
+
+    def require_permission(self, *perms: str):
+        def deco(view):
+            @functools.wraps(view)
+            def wrapper(*args, **kwargs):
+                g.sso = self.check(perms)
+                return view(*args, **kwargs)
+
+            return wrapper
+
+        return deco

@@ -1,0 +1,9 @@
+{% extends "adminui/base.html" %}{% block title %}My session{% endblock %}
+{% block content %}
+<h1>My session</h1>
+<dl class="kv"><dt>User</dt><dd><a href="{{ ui }}users/{{ user.pk }}/">{{ user.username }}</a></dd>
+<dt>Signed in</dt><dd>{{ login_at|date:"Y-m-d H:i" }}</dd>
+<dt>Elevated until</dt><dd>{% if elevated_until %}{{ elevated_until|date:"H:i:s" }}{% else %}not elevated{% endif %}</dd></dl>
+<form method="post" action="{{ ui }}logout/" class="inline">{% csrf_token %}<button type="submit">Log out</button></form>
+<form method="post" action="{{ ui }}logout-everywhere/" class="inline">{% csrf_token %}<button type="submit" class="danger">Log out everywhere (all my tokens and admin sessions)</button></form>
+{% endblock %}

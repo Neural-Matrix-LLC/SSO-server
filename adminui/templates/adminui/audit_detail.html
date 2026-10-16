@@ -1,0 +1,9 @@
+{% extends "adminui/base.html" %}{% block title %}Audit #{{ a.pk }}{% endblock %}
+{% block content %}
+<h1>Audit #{{ a.pk }}: {{ a.action }}</h1>
+<dl class="kv"><dt>Time</dt><dd>{{ a.ts|date:"Y-m-d H:i:s" }}</dd><dt>Actor</dt><dd>{{ a.actor_type }}:{{ a.actor_id }} from {{ a.actor_ip }}</dd>
+<dt>Target</dt><dd>{{ a.target_type }} {{ a.target_id }}</dd><dt>Result</dt><dd>{{ a.result }}{% if a.stepup %} (step-up){% endif %}</dd>
+<dt>Channel</dt><dd>{{ a.channel }}</dd><dt>Request id</dt><dd><code>{{ a.request_id }}</code></dd></dl>
+<div class="diff"><section><h2>Before</h2><pre>{{ pretty.before }}</pre></section><section><h2>After</h2><pre>{{ pretty.after }}</pre></section></div>
+<p><a href="{{ ui }}audit/">Back to the audit log</a></p>
+{% endblock %}

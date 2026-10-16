@@ -1,0 +1,17 @@
+{% extends "adminui/base.html" %}{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<ul class="cards">
+<li><a href="{{ ui }}users/?active=true"><strong>{{ users_active }}</strong> active users</a></li>
+<li><a href="{{ ui }}users/?active=false"><strong>{{ users_suspended }}</strong> suspended</a></li>
+<li><strong>{{ admins }}</strong> SSO admins</li>
+<li><a href="{{ ui }}services/"><strong>{{ services }}</strong> services</a></li>
+<li><a href="{{ ui }}devices/"><strong>{{ devices }}</strong> devices</a></li>
+<li><a href="{{ ui }}webhooks/deliveries/?status=failed"><strong>{{ failed_24h }}</strong> failed webhook deliveries (24 h)</a></li>
+</ul>
+<h2>Signing keys</h2>
+<p>Active kid <code>{{ signing_kid }}</code>; published: {% for k in published_kids %}<code>{{ k }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}.</p>
+<h2>Recent admin activity</h2>
+{% include "adminui/audit_table.html" with rows=audit %}
+<p><a href="{{ ui }}audit/">Full audit log</a></p>
+{% endblock %}

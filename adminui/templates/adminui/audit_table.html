@@ -1,0 +1,4 @@
+<table><thead><tr><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Action</th><th scope="col">Target</th><th scope="col">Result</th><th scope="col">Channel</th></tr></thead><tbody>
+{% for a in rows %}<tr><td><a href="{{ ui }}audit/{{ a.pk }}/">{{ a.ts|date:"Y-m-d H:i:s" }}</a></td><td>{{ a.actor_type }}:{{ a.actor_id }}</td><td>{{ a.action }}{% if a.stepup %} <span class="tag">step-up</span>{% endif %}</td><td>{{ a.target_type }} {{ a.target_id }}</td><td>{% if a.result == "ok" %}ok{% else %}<span class="bad">{{ a.result }}</span>{% endif %}</td><td>{{ a.channel }}</td></tr>
+{% empty %}<tr><td colspan="6">No rows.</td></tr>{% endfor %}
+</tbody></table>

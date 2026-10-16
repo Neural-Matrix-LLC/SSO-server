@@ -1,0 +1,4 @@
+Optional nginx snippets included inside the v1.3d admin UI locations (/${SSO_ADMIN_UI_PATH}), e.g. "allow.conf":
+    allow 203.0.113.0/24;
+    deny all;
+Only *.conf files are included; this README is ignored. Empty = UI reachable from anywhere (still login-protected).
