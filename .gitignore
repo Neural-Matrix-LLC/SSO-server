@@ -19,6 +19,16 @@ keys/*
 *.key
 docker/certs*/*
 !docker/certs/.gitkeep
+docker/prod-certs/
+# per-host nginx allow-lists / admin-host blocks (only README and *.sample are tracked)
+docker/nginx-admin.d/*.conf
+docker/nginx-admin-ui.d/*.conf
+docker/nginx-admin-host.d/*.conf
+# ACME challenge files written by certbot
+docker/acme/*
+!docker/acme/.gitkeep
+# certbot service state (account key, certs, private keys)
+letsencrypt/
 
 # Local data
 db.sqlite3

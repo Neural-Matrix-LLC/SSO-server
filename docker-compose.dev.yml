@@ -67,6 +67,8 @@ services:
 
   nginx:
     volumes:
+      # the template is baked into sso-nginx; mounting it here applies nginx.conf edits without a rebuild
+      - ./docker/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ./docker/nginx-dev.d:/etc/nginx/sso.d:ro
       - ./examples/frontend:/usr/share/nginx/demo:ro
     depends_on:

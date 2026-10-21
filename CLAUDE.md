@@ -10,7 +10,8 @@ myFinance and related apps and runs against the **shared, existing `dcWebUsers` 
 `auth_user`). Specs that the code follows (and that comments cite by section, e.g. "spec §8.2",
 "addendum B.12", "design v1.2"): `docs/SSO-server.md` (v1.0), `docs/DESIGN-ADDENDUM-v1.1.md`,
 `docs/sso-integration-design.md` (app permissions / ServiceClient delegation), `devops/DEPLOYMENT-PLAN.md`
-(R-numbers, §-numbers). `README.md` is the authoritative operator guide.
+(R-numbers, §-numbers). `README.md` is a short quick reference that links out: `docs/SSO-Setup.md` is the setup
+manual, `docs/API-REFERENCE-MANUAL.md` the API, `docs/ARCHITECTURE.md` the architecture (§10 = every env var).
 
 ## Commands
 
@@ -45,7 +46,7 @@ map to `qa/TEST-PLAN.md`): see `qa/tests/README.md`. Repo-only checks need no se
 round on dedicated ports (never 8000).
 
 Local server without Docker: README §2 (SQLite, `SSO_CACHE_URL=filecache:///...`, gunicorn). Docker: README
-quick start / §7 (`docker-compose.yml` prod, `docker-compose.dev.yml` overlay).
+quick start / §7 (`docker-compose.yml` prod, `docker-compose.dev.yml` overlay); full steps in `docs/SSO-Setup.md`.
 
 ## Architecture
 
@@ -90,8 +91,8 @@ permissions (`app1`) and logs ERROR for lost ones; `create_app_permission` adds 
 - Legacy Django 4.1 PBKDF2 hashes (`pbkdf2_sha256$390000$…`) must keep working; corrupt stored hashes must
   give 401, not 500.
 - Never log tokens or passwords (`sso/logs.py` emits one structured JSON line per login attempt).
-- Env var changes must be reflected in `.env.example` (and `.env.dev.example` / `.env.test.example` and the
-  README §3 table where relevant); QA's `test_deploy_files.py` statically checks deployment files.
+- Env var changes must be reflected in `.env.example` (and `.env.dev.example` / `.env.test.example`, the
+  `docs/ARCHITECTURE.md` §10 table, and the README §3 table if the variable is required); QA's `test_deploy_files.py` statically checks deployment files.
 
 ## Repo conventions
 

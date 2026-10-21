@@ -357,3 +357,58 @@ def test_DEPLOY_20b_root_guard_wired_into_settings_and_checks(repo):
     assert "geteuid" in runtime
     # images never start as root: final USER is the non-root uid (DEPLOY-16) and the test image too
     assert re.search(r"^USER\s+10001:10001\s*$", _read(repo, "docker/Dockerfile.test"), re.M)
+
+
+def test_DEPLOY_22_image_only_vps(repo):
+    """VPS without a repo checkout: nginx.conf baked into sso-nginx, operator tools + deploy kit in sso-server."""
+    ngx = _read(repo, "docker/Dockerfile.nginx")
+    assert re.search(r"^FROM\s+\$\{NGINX_IMAGE\}", ngx, re.M) and "ARG NGINX_IMAGE=nginx:1.28-alpine" in ngx
+    assert re.search(r"^COPY\b.*docker/nginx\.conf /etc/nginx/templates/default\.conf\.template$", ngx, re.M)
+    assert re.search(r"^ENV\s+NGINX_ENVSUBST_FILTER=\^SSO_\s*$", ngx, re.M)
+    # templates/ must exist before COPY --chmod (else it is created 0644 and not traversable)
+    assert ngx.index("/etc/nginx/templates /etc/nginx/certs") < re.search(r"^COPY ", ngx, re.M).start()
+    ignore = _read(repo, "docker/Dockerfile.nginx.dockerignore").split()
+    assert ignore[-2:] == ["*", "!docker/nginx.conf"] or ("*" in ignore and "!docker/nginx.conf" in ignore)
+    nginx = _service_block(_read(repo, "docker-compose.yml"), "nginx")
+    assert _interpolate(_yaml_value(nginx, "image"), {}) == "thomaschoi/sso-nginx:latest"
+    assert "dockerfile: docker/Dockerfile.nginx" in nginx
+    assert "/etc/nginx/templates" not in nginx, "the template is baked into the image, not mounted"
+    df = _runtime_stage(_read(repo, "Dockerfile"))
+    for line in ("scripts/gen_keys.sh scripts/gen_selfsigned_cert.sh scripts/init_secrets.sh ./scripts/",
+                 "docker-compose.yml ./deploy/", ".env.example ./deploy/env.example",
+                 "scripts/upgrade_db.sh scripts/deploy.sh scripts/deploy_check.sh ./deploy/scripts/"):
+        assert re.search(rf"^COPY --chown=root:root .*{re.escape(line)}$", df, re.M), line
+    di = _read(repo, ".dockerignore")
+    assert "!.env.example" in di and di.index(".env.*") < di.index("!.env.example")
+    assert re.search(r"^\.env$", di, re.M), ".env must stay excluded"
+    assert "! -f Dockerfile" in _read(repo, "scripts/upgrade_db.sh"), "image-only install must skip the build"
+
+
+def test_DEPLOY_23_auto_init_and_deploy_check(repo):
+    """Automated deploy: one-shot "init" service (keys + bootstrap cert when empty), locked down and run before
+    web/webhooks/nginx; deploy.sh + deploy_check.sh ship in the deploy kit, deploy_check.py in the image."""
+    compose = _read(repo, "docker-compose.yml")
+    init = _service_block(compose, "init")
+    assert _interpolate(_yaml_value(init, "image"), {}) == "thomaschoi/sso-server:latest"
+    assert '"/app/scripts/init_secrets.sh"' in init
+    assert re.search(r"^\s+network_mode:\s*none\s*$", init, re.M), "init needs no network"
+    assert not re.search(r"^\s+env_file:", init, re.M), "init must not see .env secrets"
+    assert re.search(r"^\s+read_only:\s*true\s*$", init, re.M) and "no-new-privileges:true" in init
+    caps = re.search(r"cap_add:\n((?:\s+- \w+\n)+)", init).group(1).split()
+    assert sorted(c for c in caps if c != "-") == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    assert re.search(r"^\s+- ALL\s*$", init.split("cap_drop:")[1], re.M)
+    assert "${SSO_KEYS_DIR:-./keys}:/init/keys\n" in init and "${SSO_CERTS_DIR:-./docker/certs}:/init/certs\n" in init
+    assert re.search(r'restart:\s*"no"', init)
+    for svc in ("web", "webhooks", "nginx"):
+        block = _service_block(compose, svc)
+        assert re.search(r"depends_on:\n(?:\s+.*\n)*?\s+init:\n\s+condition: service_completed_successfully", block), svc
+    df = _runtime_stage(_read(repo, "Dockerfile"))
+    assert re.search(r"^COPY --chown=root:root .*docker/deploy_check\.py \./docker/$", df, re.M)
+    for rel in ("scripts/init_secrets.sh", "scripts/deploy.sh", "scripts/deploy_check.sh"):
+        assert os.access(os.path.join(repo, rel), os.X_OK), f"{rel} must be executable"
+    deploy = _read(repo, "scripts/deploy.sh")
+    assert "--wait" in deploy and "deploy_check.sh" in deploy
+    # schema gate before "up" (migration runs beforehand on the migration server); deploy.sh never migrates
+    assert deploy.index("sso_schema_check") < deploy.index("up -d --no-build --wait")
+    assert "upgrade_db.sh --" not in deploy and "manage.py migrate" not in deploy
+    assert re.search(r"^#?\s*SSO_AUTO_INIT=", _read(repo, ".env.example"), re.M)

@@ -30,7 +30,8 @@
 #   --mysql-image IMG    client image for --dump-with docker (default mysql:8.4; dumps 8.0 and 8.4)
 #   --db-host H --db-port P   address mysqldump uses (default: SSO_DBHOST/SSO_DBPORT; in compose mode the dump
 #                        container runs on the compose edge network, so host.docker.internal works as in .env)
-#   --no-build           compose: do not rebuild the web image first
+#   --no-build           compose: do not rebuild the web image first (automatic when there is no Dockerfile,
+#                        i.e. a VPS installed from images: the kit from /app/deploy, README §7; it uses IMAGE_TAG)
 #   --allow-shared-apps  allow a plan that also creates Django's shared apps (auth, admin, ...): ONLY for an empty
 #                        local/test database, never for the shared production dcWebUsers
 #   -y, --yes            do not ask before migrating
@@ -87,6 +88,9 @@ envval() {
 
 if [[ -z "$RUNNER" ]]; then
   if [[ -f docker-compose.yml ]] && $DOCKER compose version >/dev/null 2>&1; then RUNNER=compose; else RUNNER=venv; fi
+fi
+if [[ "$RUNNER" == compose && ! -f Dockerfile ]]; then
+  BUILD=0   # image-only install: nothing to build, "docker compose pull" fetched IMAGE_TAG
 fi
 export SSO_DBUSER="${SSO_DBUSER:-sso_migrator}"
 if [[ -z "${SSO_DBPWD:-}" ]]; then

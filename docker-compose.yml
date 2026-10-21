@@ -4,6 +4,8 @@
 #   docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate --plan
 #   (review: only application + sso + token_blacklist; README "Docker quick start" step 6 / §5)
 # All host names, ports and paths come from .env (see .env.example); nothing is hard-coded here.
+# Images: ${DOCKER_USER}/sso-server and ${DOCKER_USER}/sso-nginx, same IMAGE_TAG. A VPS needs no repo checkout:
+# this file, the env template and scripts/upgrade_db.sh ship in the sso-server image under /app/deploy (README §7).
 name: sso
 
 x-logging: &default-logging
@@ -13,6 +15,42 @@ x-logging: &default-logging
     max-file: "5"
 
 services:
+  init:
+    # One-shot, runs on every "up" before web/webhooks/nginx (scripts/init_secrets.sh): generates the JWT key pair
+    # and a self-signed bootstrap TLS cert when their folders are empty, checks the configured files otherwise and
+    # sets key ownership to SSO_UID:SSO_GID. Root only to create/chown the bind-mounted host folders; no network,
+    # no env_file (it never sees .env secrets), minimal capabilities. SSO_AUTO_INIT=false: check only.
+    image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
+    user: "0:0"
+    entrypoint: ["/app/scripts/init_secrets.sh"]
+    environment:
+      SSO_UID: ${SSO_UID:-10001}
+      SSO_GID: ${SSO_GID:-10001}
+      SSO_HOSTNAME: ${SSO_HOSTNAME:?set SSO_HOSTNAME in .env}
+      SSO_JWT_PRIVATE_KEY: ${SSO_JWT_PRIVATE_KEY:-}
+      SSO_JWT_PUBLIC_KEYS: ${SSO_JWT_PUBLIC_KEYS:-}
+      SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
+      SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
+      SSO_TLS_REJECT_UNKNOWN_SNI: ${SSO_TLS_REJECT_UNKNOWN_SNI:-on}
+      SSO_AUTO_INIT: ${SSO_AUTO_INIT:-true}
+    volumes:
+      - ${SSO_KEYS_DIR:-./keys}:/init/keys
+      - ${SSO_CERTS_DIR:-./docker/certs}:/init/certs
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+    restart: "no"
+    logging: *default-logging
+
   web:
     # Docker Hub name. DOCKER_USER / IMAGE_TAG come from .env; a shell export of the same name wins over .env.
     image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
@@ -23,7 +61,8 @@ services:
         SSO_GID: ${SSO_GID:-10001}
     # non-root (R2). Must equal the build args: the image's files and the host key files are owned for it.
     user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
-    env_file: .env
+    env_file:
+      - .env
     environment:
       GUNICORN_WORKERS: ${GUNICORN_WORKERS:-3}
       # nginx (the only proxy) lives on the edge network: trust forwarded headers only from it.
@@ -58,6 +97,8 @@ services:
       - edge
       - backend
     depends_on:
+      init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     healthcheck:
@@ -75,7 +116,8 @@ services:
     image: ${DOCKER_USER:-thomaschoi}/sso-server:${IMAGE_TAG:-latest}
     user: "${SSO_UID:-10001}:${SSO_GID:-10001}"
     command: ["python", "manage.py", "run_webhook_worker"]
-    env_file: .env
+    env_file: 
+      - .env
     environment:
       SSO_CACHE_URL: ${SSO_CACHE_URL:-redis://redis:6379/0}
       SSO_JWT_KEYS_MOUNT: /run/keys
@@ -95,6 +137,8 @@ services:
       - edge      # egress to the services' notify_url endpoints
       - backend
     depends_on:
+      init:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     # no HTTP port: the image's /healthz probe would always fail here; check the worker's heartbeat file instead
@@ -126,12 +170,15 @@ services:
     logging: *default-logging
 
   nginx:
-    image: nginx:1.28-alpine
+    # nginx:1.28-alpine with docker/nginx.conf baked in as its template (docker/Dockerfile.nginx); same tag as web
+    image: ${DOCKER_USER:-thomaschoi}/sso-nginx:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.nginx
     ports:
       - "${SSO_HTTP_PORT:-80}:80"
       - "${SSO_HTTPS_PORT:-443}:443"
     environment:
-      NGINX_ENVSUBST_FILTER: "^SSO_"
       SSO_HOSTNAME: ${SSO_HOSTNAME:?set SSO_HOSTNAME in .env}
       SSO_HTTPS_PORT: ${SSO_HTTPS_PORT:-443}
       SSO_ADMIN_PATH: ${SSO_ADMIN_PATH:-sso-admin/}
@@ -139,8 +186,10 @@ services:
       SSO_ADMIN_UI_HOSTNAME: ${SSO_ADMIN_UI_HOSTNAME:-}
       SSO_TLS_CERT_FILE: ${SSO_TLS_CERT_FILE:-fullchain.pem}
       SSO_TLS_KEY_FILE: ${SSO_TLS_KEY_FILE:-privkey.pem}
+      SSO_TLS_REJECT_UNKNOWN_SNI: ${SSO_TLS_REJECT_UNKNOWN_SNI:-on}
     volumes:
-      - ./docker/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      # TLS cert + key (SSO_TLS_CERT_FILE / SSO_TLS_KEY_FILE are relative to this directory). With the certbot
+      # service below: SSO_CERTS_DIR=${SSO_LETSENCRYPT_DIR}, SSO_TLS_CERT_FILE=live/<SSO_HOSTNAME>/fullchain.pem
       - ${SSO_CERTS_DIR:-./docker/certs}:/etc/nginx/certs:ro
       - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme:ro
       # optional admin IP allow-list snippets (empty dir = no restriction)
@@ -151,6 +200,8 @@ services:
     networks:
       - edge
     depends_on:
+      init:
+        condition: service_completed_successfully
       web:
         condition: service_healthy
     healthcheck:
@@ -159,6 +210,20 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    logging: *default-logging
+
+  certbot:
+    # Let's Encrypt HTTP-01 via the ACME webroot nginx serves (deployment plan §3.2 A). On demand only (profile):
+    # never started by "up". README §7 "VPS from images only":
+    #   docker compose run --rm certbot certonly --webroot -w /var/www/acme -d "$SSO_HOSTNAME" -m <email> --agree-tos
+    #   renew (host cron): docker compose run --rm certbot renew && docker compose exec -T nginx nginx -s reload
+    image: certbot/certbot:v5.1.0
+    profiles: ["certbot"]
+    volumes:
+      - ${SSO_LETSENCRYPT_DIR:-./letsencrypt}:/etc/letsencrypt
+      - ${SSO_ACME_WEBROOT:-./docker/acme}:/var/www/acme
+    networks:
+      - edge      # egress to Let's Encrypt
     logging: *default-logging
 
 networks:

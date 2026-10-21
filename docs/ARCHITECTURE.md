@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Status | Describes the code on branch `feat/app-permissions` at `0a1a462` (SSO server) and `feat/sso-login` (llm-wiki-svc consumer) |
+| Status | Describes the code on `main` at `b749fae` (v1.3d merged: v1.0 core, v1.2a/b, v1.3a admin API, v1.3b devices, v1.3c webhooks, v1.3d admin UI) plus the deploy tooling (`init` service, `deploy.sh`, `deploy_check.sh`). Sections 5–9 describe the v1.0–v1.2 core in depth; the v1.3 features are summarised in §3.2, §4 and §8.10 and specified in their design docs and the [API Reference Manual](API-REFERENCE-MANUAL.md) §8–11. Consumer: llm-wiki-svc `feat/sso-login` |
 | Audience | Developers building or integrating with the SSO server, reviewers, operators |
 | Supersedes | Nothing. `docs/SSO-server.md` (v1.0 spec), `docs/DESIGN-ADDENDUM-v1.1.md` and `docs/sso-integration-design.md` stay the design history. Where they disagree with this file, the **code** wins and this file describes the code (see §12 for the differences found) |
 
@@ -24,11 +24,11 @@ Labels used in this document:
 5. Data model and dataflow
 6. Workflows (sequence diagrams)
 7. Event and failure handling (state and event diagrams)
-8. API reference
+8. API reference (v1.0–v1.2 core; v1.3 endpoints in the API manual)
 9. Token and claims reference
-10. Configuration reference
-11. Security model, deployment view, consumer integration
-12. Open items, not implemented, and doc/code discrepancies
+10. Configuration reference (every environment variable)
+11. Security model, deployment view, consumer integration, design decisions
+12. Open items, not implemented, doc/code discrepancies, open questions
 
 ---
 
@@ -270,11 +270,18 @@ flowchart TB
   CHK -.-> L3
 ```
 
-v1.2b (implemented on `feat/v1.2b`) adds the introspect/permission query with client-IP binding
+v1.2b adds the introspect/permission query with client-IP binding
 (`sso/ipbinding.py`, `sso/clientip.py`) and the `sso-client` library (`clients/python/`) on the **service** side
 (each FUND agent, llm-wiki-svc and SGMCP runs it as middleware between its web framework and its handlers).
-v1.3a (branch `feat/v1.3a`, [design](DESIGN-v1.3a-admin-api.md)) adds `sso/admin_api` (DRF views under `/api/v1/admin/`, permission `application.sso_admin`, writes
-`sso_adminauditlog`) next to the Django admin. See [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
+v1.3a ([design](DESIGN-v1.3a-admin-api.md)) adds `sso/admin_api.py` (DRF views under `/api/v1/admin/`, permission
+`application.sso_admin`, step-up `sso/stepup.py`, writes `sso_adminauditlog` via `sso/audit.py`) next to the Django
+admin, plus service tokens and the inactive-users feed (`sso/service_auth.py`). See
+[ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §7.
+v1.3b ([design](DESIGN-v1.3b-devices-on-behalf-of.md)) adds device clients (`sso/devices.py`, Ed25519
+`private_key_jwt`) and on-behalf-of introspection (`sso/onbehalf.py`).
+v1.3c ([design](DESIGN-v1.3c-webhooks.md)) adds signed webhooks: a database outbox written in the same transaction
+as the change (`sso/webhooks.py`), delivered by the separate compose service `webhooks`
+(`manage.py run_webhook_worker`), with `notify_secret` encrypted at rest (`sso/webhook_secrets.py`).
 v1.3d ([design](DESIGN-v1.3d-admin-ui.md)) adds the **admin web UI**: Django app `adminui`
 (server-rendered templates, `AdminUIGuardMiddleware`, CSP headers) at `/<SSO_ADMIN_UI_PATH>` (default
 `/admin/`), and moves the admin business rules from `sso/admin_api.py` into a shared domain layer `sso/admin_ops.py`
@@ -300,7 +307,7 @@ flowchart TB
 
 | Component | File(s) | Responsibility |
 |---|---|---|
-| nginx | `docker/nginx.conf` | TLS termination, redirect HTTP to HTTPS (except ACME), reject unknown host names (444), optional `limit_req` (30 r/min, burst 10) on `/api/v1/auth/login`, optional admin IP allow-list (`/etc/nginx/sso-admin.d/*.conf`), overwrite `X-Forwarded-For` with the peer address, set `X-Forwarded-Proto` |
+| nginx | `docker/nginx.conf` | TLS termination, redirect HTTP to HTTPS (except ACME), reject unknown host names (444), optional `limit_req` (30 r/min, burst 10) on `/api/v1/auth/login`, optional admin IP allow-lists (`/etc/nginx/sso-admin.d/*.conf` for Django admin, `sso-admin-ui.d` for the v1.3d UI, optional admin host include), overwrite `X-Forwarded-For` with the peer address, set `X-Forwarded-Proto` |
 | gunicorn | `Dockerfile` CMD | WSGI server, `GUNICORN_WORKERS` (3) sync workers, trusts forwarded headers only from `SSO_FORWARDED_ALLOW_IPS` |
 | Settings | `ssoproject/settings.py` | All config from env / `.env`. Fails fast in non-debug mode: empty `SSO_SECRET_KEY`, empty `SSO_ISSUER`, missing key files, missing or per-process cache, running as root |
 | Views | `sso/views.py` | The REST API (§8) |
@@ -313,10 +320,18 @@ flowchart TB
 | Logs | `sso/logs.py` | One JSON line per login attempt and per token event on logger `sso.auth`. Never tokens or passwords |
 | Signals | `sso/signals.py` | A real password change saved through this project sets the revocation epoch |
 | Checks | `sso/checks.py`, `sso/runtime.py` | `sso.E001` per-process cache, `sso.E002` root, `sso.W001` deprecated key variables |
-| Models | `sso/models.py` | `ServiceClient`, `UserTokenRevocation`, `AuthorizationCode` (phase 5, unused) |
+| Models | `sso/models.py` | `ServiceClient` (also devices since v1.3b, `kind`), `UserTokenRevocation`, `RevokedSession` (v1.2a), `AdminReauth`, `AdminAuditLog`, `UserTombstone` (v1.3a), `WebhookEvent`, `WebhookDelivery` (v1.3c), `AuthorizationCode` (phase 5, unused) |
+| Revocation | `sso/revocation.py` | Revoke a user (marker + blacklist) or one session (`sid` family) |
+| Admin REST API | `sso/admin_api.py`, `sso/admin_ops.py`, `sso/stepup.py`, `sso/audit.py` | v1.3a `/api/v1/admin/*`; business rules (guards, last-admin check, step-up, audit) live in `admin_ops` and are shared with the admin UI |
+| Service credentials | `sso/service_auth.py` | v1.3a `POST /api/v1/auth/service-token` (client credentials) and `GET /api/v1/service/users/inactive` |
+| Devices, on-behalf-of | `sso/devices.py`, `sso/onbehalf.py` | v1.3b device registration (`/api/v1/devices`), `private_key_jwt` device tokens, `actor_token` on introspect |
+| Webhooks | `sso/webhooks.py`, `sso/webhook_secrets.py`, `run_webhook_worker` | v1.3c outbox, HMAC-signed delivery with retries, SSRF policy, Fernet-encrypted `notify_secret`; worker heartbeat read by `docker/healthcheck.py --worker` |
+| Admin web UI | `adminui/` | v1.3d server-rendered pages at `SSO_ADMIN_UI_PATH`, own session cookie, `AdminUIGuardMiddleware`, CSP |
+| DB and deploy checks | `sso/dbcheck.py`, `sso_schema_check`, `sso/deploycheck.py` | Start-up and `/healthz` DB check with pending-migration warning; schema check used by `upgrade_db.sh` and the `deploy.sh` schema gate; post-start checks behind `scripts/deploy_check.sh` |
+| Init service | `scripts/init_secrets.sh` | Compose one-shot before every `up`: generates missing JWT keys and a bootstrap certificate in empty folders, checks configured names, fixes the key owner |
 | Application permissions | `application/*` | Anchor model `ApplicationAccess` (table `sso_application_access`, no rows) whose content type carries `application.*` permissions. Registry `ApplicationPermissionRecord`. `user_app_perms()` builds the `perms` claim. Post-migrate sync recreates `app1` and reports lost permissions. `create_app_permission` command. Read-only admin list |
 | Admin | `sso/admin.py`, `application/admin.py` | Stock Django admin plus ServiceClient (secret shown once), UserTokenRevocation, application permissions |
-| Redis | `docker-compose.yml` | Throttle counters only (no persistence, 64 MB LRU, `backend` network is internal) |
+| Redis | `docker-compose.yml` | Shared Django cache: throttle counters, revoked-session lookups (v1.2b), worker heartbeat; no persistence, 64 MB LRU, `backend` network is internal |
 | MySQL | external | `dcWebUsers`. No DB container in production compose. Migrations are operator-run |
 
 ## 5. Data model and dataflow
@@ -405,6 +420,14 @@ erDiagram
 
 `sso_application_access` exists only to anchor the content type and never has rows. `ApplicationPermission` is a
 proxy model over `auth_permission` for the admin (no table).
+
+The diagram shows the v1.0–v1.2 core. v1.3 adds only tables and nullable/defaulted columns (migrations
+`sso.0003`–`0007`, `application.0002`): `sso_adminreauth`, `sso_adminauditlog` (+ `channel`, v1.3d),
+`sso_usertombstone`, `sso_serviceclient_permissions`, `sso_application`, `sso_webhookevent`, `sso_webhookdelivery`;
+new `sso_serviceclient` columns `secret_rotated_at`, `kind`, `owner_id`, `device_name`, `public_key`,
+`public_key_fingerprint`, `last_used`, `can_delegate`, `can_register_devices`, `notify_events`, `notify_secret_enc`;
+new `sso_application_permission_record` columns `app_codename`, `deprecated_at`, `description`. The per-migration
+list is in [SSO-Setup.md §11](SSO-Setup.md#11-upgrading-the-database-later) and `sso_schema_check` (`EXPECTED`).
 
 > Warning (implemented safeguard, not a prevention): `remove_stale_contenttypes` run in **myFinance** would delete
 > the `application.applicationaccess` content type and cascade-delete every `application.*` grant. After the next
@@ -1453,12 +1476,18 @@ full OIDC provider: there are no ID tokens.
 ### 8.9 GET /healthz
 
 200 `{"status": "ok"}` with `Cache-Control: no-store` after `SELECT 1` on the DB. 503
-`{"error": "unhealthy", "detail": "database"}` on `DatabaseError`. Exempt from the HTTPS redirect. The container
+`{"error": "unhealthy", "detail": "database"}` on `DatabaseError`. Unapplied SSO migrations give 200
+`{"status": "ok", "warning": "database migrations pending"}` plus an ERROR log at most every 5 min
+(`sso/dbcheck.py`), so nginx and the admin stay reachable during an upgrade. Exempt from the HTTPS redirect. The container
 healthcheck (`docker/healthcheck.py`) sends the right `Host` and `X-Forwarded-Proto: https`.
 
 ### 8.10 Admin
 
-Django admin at `/<SSO_ADMIN_PATH>` (default `sso-admin/`; README advises a non-default value). Staff session login,
+**v1.3a–c endpoints** (admin REST API `/api/v1/admin/*`, `POST /api/v1/auth/service-token`,
+`GET /api/v1/service/users/inactive`, `/api/v1/devices`, webhook admin endpoints) are specified in the
+[API Reference Manual](API-REFERENCE-MANUAL.md) §8–10; this document does not repeat them.
+
+Django admin at `/<SSO_ADMIN_PATH>` (default `sso-admin/`; a non-default value is advised). Staff session login,
 Django CSRF applies. nginx can restrict it by IP via `SSO_ADMIN_ALLOW_DIR` snippets. Registered: stock Users and
 Groups with v1.2a actions (Users: *Suspend*, *Unsuspend*, *Grant / Revoke app access…*; Groups: *Grant / Revoke
 app access…*), `ServiceClient` (secret generated and shown once on create or "regenerate secret"; `app_codename`,
@@ -1559,9 +1588,9 @@ From `ssoproject/settings.py` (env or `.env`; `SSO_ENV_FILE` chooses the file, d
 | `SSO_DB_SSL_MODE` | empty | `DISABLED`, `PREFERRED`, `REQUIRED`, `VERIFY_CA`, `VERIFY_IDENTITY` |
 | `SSO_TEST_DBNAME` | `test_dcWebUsers` | Test DB name |
 | `SSO_CACHE_URL` | empty, fatal (debug: LocMem); compose `redis://redis:6379/0` | Shared throttle cache; LocMem/dummy fatal. Key prefix `sso` |
-| `SSO_TRUSTED_PROXIES` | empty | v1.2b: comma list of proxy IPs/CIDRs whose `X-Forwarded-For` is trusted (right-to-left walk). `/0` is fatal. When set, `SSO_NUM_PROXIES` is ignored |
+| `SSO_TRUSTED_PROXIES` | empty (compose: `SSO_EDGE_SUBNET`) | v1.2b: comma list of proxy IPs/CIDRs whose `X-Forwarded-For` is trusted (right-to-left walk). `/0` is fatal. When set, `SSO_NUM_PROXIES` is ignored |
 | `SSO_CLIENT_IP_HEADER` | empty | v1.2b: optional client-IP header set by a trusted proxy (`cf-connecting-ip`, `x-real-ip`); preferred over XFF when the peer is trusted and it holds a valid IP. Needs `SSO_TRUSTED_PROXIES` (fatal otherwise) |
-| `SSO_NUM_PROXIES` | `0` (compose `1`) | **Deprecated** (v1.2b, warning `sso.W002`): trusted proxy hops for `X-Forwarded-For`, used only while `SSO_TRUSTED_PROXIES` is empty |
+| `SSO_NUM_PROXIES` | `0` | **Deprecated** (v1.2b, warning `sso.W002`): trusted proxy hops for `X-Forwarded-For`, used only while `SSO_TRUSTED_PROXIES` is empty |
 | `SSO_IP_BINDING_MODE` | `NOIP` | v1.2b: `NOIP`, `WARNING` or `ENFORCE` (other values fatal) |
 | `SSO_IP_BINDING_KEY` | derived from `SSO_SECRET_KEY` | v1.2b: HMAC key for `cip`; changing it (or the secret key) makes every bound token mismatch |
 | `SSO_REVOKED_SESSION_CACHE_SECONDS` | `10` | v1.2b: how long "session not revoked" is cached; `0` = always ask the DB |
@@ -1582,16 +1611,52 @@ From `ssoproject/settings.py` (env or `.env`; `SSO_ENV_FILE` chooses the file, d
 | `SSO_HSTS_SECONDS` | debug 0, else 31536000 | HSTS |
 | `SSO_HSTS_INCLUDE_SUBDOMAINS` | `true` | |
 | `SSO_HSTS_PRELOAD` | `false` | |
-| `SSO_ADMIN_PATH` | `sso-admin/` | Admin URL prefix |
+| `SSO_ADMIN_PATH` | `sso-admin/` | Django admin URL prefix (break-glass) |
 | `SSO_LOG_LEVEL` | `INFO` | Root log level |
+| `SSO_DB_CONNECT_TIMEOUT` / `SSO_DB_READ_TIMEOUT` / `SSO_DB_WRITE_TIMEOUT` | `3` / `15` / `15` | MySQL socket timeouts (s); an unreachable DB gives `/healthz` 503 within the gunicorn timeout |
+| `SSO_CACHE_CONNECT_TIMEOUT` / `SSO_CACHE_SOCKET_TIMEOUT` | `3` / `3` | Redis socket timeouts (s) |
+| `SSO_ADMIN_REAUTH_SECONDS` | `300` | v1.3a: step-up token lifetime |
+| `SSO_SERVICE_TOKEN_TTL_SECONDS` | `300` | v1.3a: service token lifetime |
+| `SSO_THROTTLE_ADMIN` / `SSO_THROTTLE_ADMIN_REAUTH` / `SSO_THROTTLE_SERVICE_TOKEN` | `120/min` / `5/min` / `60/min` | v1.3a: per user (admin), per client (service token) |
+| `SSO_DEVICE_MAX_PER_USER` / `SSO_DEVICE_ASSERTION_MAX_AGE` | `10` / `300` | v1.3b: devices per user; max age (s) of a device `private_key_jwt` assertion |
+| `SSO_WEBHOOK_SECRET_KEY` | derived from `SSO_SECRET_KEY` | v1.3c: Fernet key encrypting `notify_secret` at rest. Set it in production: without it, rotating `SSO_SECRET_KEY` makes stored webhook secrets unreadable |
+| `SSO_WEBHOOK_TIMEOUT` / `SSO_WEBHOOK_MAX_AGE_HOURS` / `SSO_WEBHOOK_POLL_SECONDS` / `SSO_WEBHOOK_RETENTION_DAYS` | `5` / `24` / `2` / `30` | v1.3c: delivery timeout, retry window, worker poll interval, outbox retention |
+| `SSO_WEBHOOK_ALLOW_LOOPBACK` / `SSO_WEBHOOK_CA_FILE` | `false` / empty | v1.3c: allow loopback/private targets (tests only); extra CA bundle for receivers |
+| `SSO_ADMIN_UI_ENABLED` / `SSO_ADMIN_UI_PATH` | `true` / `admin/` | v1.3d admin web UI; the path must differ from `SSO_ADMIN_PATH` and the API prefixes (fatal) |
+| `SSO_ADMIN_UI_HOSTNAME` | empty | v1.3d: serve the UI only on this Host (must be in `SSO_ALLOWED_HOSTS`, fatal otherwise) |
+| `SSO_ADMIN_UI_IDLE_SECONDS` / `SSO_ADMIN_UI_MAX_AGE_SECONDS` | `1800` / `28800` | v1.3d session idle and absolute limits (idle ≥ 60 and ≤ max age, fatal otherwise) |
+| `SSO_ADMIN_UI_IP_BINDING` | `SSO_IP_BINDING_MODE` | v1.3d: `NOIP`, `WARNING`, `ENFORCE` for the UI session |
+| `SSO_ADMIN_UI_TIME_ZONE` | `UTC` | v1.3d: display time zone |
+| `SSO_THROTTLE_ADMIN_UI_LOGIN_IP` / `SSO_THROTTLE_ADMIN_UI_LOGIN_USER` | `10/min` / `5/min` | v1.3d UI login throttles |
 
 Fixed (not configurable): cookie name `sso_refresh`, cookie path `/api/v1/auth/`, algorithm RS256, leeway 30 s,
 rotation and blacklist on.
 
-Compose / runtime only: `GUNICORN_WORKERS` (3), `SSO_FORWARDED_ALLOW_IPS` (edge subnet), `SSO_UID`/`SSO_GID`
-(10001), `SSO_HOSTNAME` (required), `SSO_HTTP_PORT`/`SSO_HTTPS_PORT` (80/443), `SSO_CERTS_DIR`,
-`SSO_TLS_CERT_FILE`/`SSO_TLS_KEY_FILE`, `SSO_ACME_WEBROOT`, `SSO_MYSQL_CA_DIR`, `SSO_ADMIN_ALLOW_DIR`,
-`SSO_EDGE_SUBNET` (172.31.250.0/24), `DOCKER_USER`, `IMAGE_TAG`.
+With `SSO_DEBUG=False` the settings refuse to load (`ImproperlyConfigured`) when `SSO_SECRET_KEY` or `SSO_ISSUER`
+is empty, a key file is missing, unreadable, not RSA or under 2048 bits, the cache is missing or per-process, the
+process runs as uid 0, or the DB TLS config is inconsistent. With `SSO_DEBUG=True` the server starts without key
+files on an **ephemeral** in-memory key (tokens die on restart).
+
+Compose / runtime only (read by `docker-compose.yml`, nginx, the `init` service or the healthcheck, not by Django):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DOCKER_USER` / `IMAGE_TAG` | `thomaschoi` / `latest` | Image names `${DOCKER_USER}/sso-server` and `/sso-nginx`. Pin `IMAGE_TAG` on servers. An exported shell variable wins over `.env` (`docker compose config --images` shows the result) |
+| `SSO_UID` / `SSO_GID` | `10001` | Container user; also image build args (rebuild after a change; 0 refused) |
+| `GUNICORN_WORKERS` | `3` | gunicorn sync workers |
+| `SSO_FORWARDED_ALLOW_IPS` | `127.0.0.1` (image), edge subnet (compose) | gunicorn `--forwarded-allow-ips`; never `*` |
+| `SSO_EDGE_SUBNET` | `172.31.250.0/24` | Fixed nginx↔web subnet; MySQL account hosts and ufw rules refer to it |
+| `SSO_HOSTNAME` | required | The only Host nginx answers (others: 444) |
+| `SSO_DOMAIN` | | Deployment parameter only (deployment plan §0), read by nothing; the values derived from it (`SSO_ISSUER`, origins, cookie domain) are written out in `.env` |
+| `SSO_HTTP_PORT` / `SSO_HTTPS_PORT` | `80` / `443` | Published nginx ports |
+| `SSO_CERTS_DIR`, `SSO_TLS_CERT_FILE`, `SSO_TLS_KEY_FILE` | `./docker/certs`, `fullchain.pem`, `privkey.pem` | nginx certificate (self-signed bootstrap: `selfsigned.crt` / `selfsigned.key`) |
+| `SSO_TLS_REJECT_UNKNOWN_SNI` | `on` | `off` when `SSO_HOSTNAME` is an IP address (clients then send no SNI) |
+| `SSO_LETSENCRYPT_DIR`, `SSO_ACME_WEBROOT` | `./letsencrypt`, `./docker/acme` | certbot state (secret) and ACME webroot |
+| `SSO_AUTO_INIT` | `true` | `init` service generates missing keys / bootstrap cert in empty folders; `false` = check only |
+| `SSO_MYSQL_CA_DIR` | `./mysql-ca` | Mounted at `/run/mysql-ca` (for `SSO_DB_SSL_CA`) |
+| `SSO_ADMIN_ALLOW_DIR`, `SSO_ADMIN_UI_ALLOW_DIR`, `SSO_ADMIN_UI_HOST_DIR` | `./docker/nginx-admin.d`, `./docker/nginx-admin-ui.d`, `./docker/nginx-admin-host.d` | nginx allow-list snippets (Django admin, admin UI) and the optional admin-host server block |
+| `SSO_HEALTHCHECK_MAX_AGE` | `300` | `webhooks` healthcheck: max age (s) of the worker's last successful loop |
+| `MYSQL_IMAGE`, `SSO_TEST_MYSQL_VOLUME`, `SSO_DEV_MYSQL_VOLUME` | `mysql:8.0` | Test/dev MySQL container and its data volume (one per version) |
 
 ## 11. Security model, deployment and integration
 
@@ -1627,34 +1692,67 @@ idempotent; `--dry-run` lists what it would revoke.
 ```mermaid
 flowchart TB
   subgraph Host["Docker host"]
-    subgraph Edge["network edge, 172.31.250.0/24"]
-      NG["nginx - ports 80 and 443 published"]
+    INIT["init - one-shot before every up: missing keys / bootstrap cert, key owner"]
+    subgraph Edge["network edge, SSO_EDGE_SUBNET 172.31.250.0/24"]
+      NG["nginx - sso-nginx image, ports 80 and 443 published"]
       WEB["web - gunicorn, no published port, uid 10001, read_only, tmpfs /tmp"]
+      WH["webhooks - run_webhook_worker, same image, heartbeat healthcheck"]
+      CB["certbot - profile, on demand"]
     end
     subgraph Back["network backend, internal"]
       RE["redis 7.2.5 - no persistence, 64 MB LRU"]
     end
     V1["SSO_KEYS_DIR to /run/keys ro"]
     V2["SSO_MYSQL_CA_DIR to /run/mysql-ca ro"]
-    V3["docker/nginx.conf template, SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, SSO_ADMIN_UI_ALLOW_DIR + SSO_ADMIN_UI_HOST_DIR (v1.3d), all ro"]
+    V3["SSO_CERTS_DIR, SSO_ACME_WEBROOT, SSO_ADMIN_ALLOW_DIR, SSO_ADMIN_UI_ALLOW_DIR, SSO_ADMIN_UI_HOST_DIR, all ro"]
     ENV[".env via env_file"]
   end
   DB[("MySQL dcWebUsers - remote or host.docker.internal")]
+  INIT -.-> V1
   NG -- "http web:8000" --> WEB
   WEB --- RE
+  WH --- RE
   WEB -.- V1 & V2 & ENV
   NG -.- V3
   WEB -- "3306" --> DB
+  WH -- "3306" --> DB
 ```
 
-- `web` is on both networks; `redis` only on `backend` (internal); `nginx` only on `edge`.
-- Start order: `redis` healthy → `web` healthy (`/healthz`) → `nginx`.
+- `web` and `webhooks` are on both networks; `redis` only on `backend` (internal); `nginx` and `certbot` only on
+  `edge`. `docker/nginx.conf` is baked into the `sso-nginx` image (`docker/Dockerfile.nginx`): rebuild after editing it.
+- Start order: `init` completed and `redis` healthy → `web` and `webhooks`; `web` healthy (`/healthz`) → `nginx`.
 - `web` sets `extra_hosts: host.docker.internal:host-gateway`.
-- No automatic `migrate`, `createsuperuser` or `flushexpiredtokens` at start (Dockerfile R5/R6). Migrations:
-  `docker compose run --rm -e SSO_DBUSER=sso_migrator -e SSO_DBPWD web python manage.py migrate --plan` then
-  `migrate`. The plan should list only `application`, `sso` and `token_blacklist`.
-- Overlays: `docker-compose.dev.yml` (MySQL container `db`, demo page and verifier), `docker-compose.test.yml`.
+- No automatic `migrate`, `createsuperuser` or `flushexpiredtokens` at start (Dockerfile R5/R6). Every schema change
+  goes through `scripts/upgrade_db.sh` as `sso_migrator` (plan must list only `application`, `sso`,
+  `token_blacklist`). In production a separate migration server runs it; `scripts/deploy.sh` on the VPS only
+  checks the schema (gate, exit 3) before `up --wait`, then runs `scripts/deploy_check.sh`
+  ([SSO-Setup.md §12](SSO-Setup.md#12-deploy-to-a-vps-from-the-docker-images-only)).
+- The `sso-server` image carries a deploy kit in `/app/deploy` (`docker-compose.yml`, `env.example`,
+  `upgrade_db.sh`, `deploy.sh`, `deploy_check.sh`) and the generators in `/app/scripts`; no secret is in any image.
+- Overlays: `docker-compose.dev.yml` (MySQL container `db`, demo page and verifier; an overlay, never an
+  auto-loaded override, so a server checkout cannot pick it up, deployment plan R24), `docker-compose.test.yml`.
 - Logs: json-file driver, 10 MB × 5.
+
+Operational notes:
+
+- **Image.** `python:3.13.x-slim-trixie`, because its `libmariadb3` ships the `caching_sha2_password` client plugin
+  (default for new accounts on MySQL 8.0 and 8.4); the build fails if it is missing. Multi-stage, app files
+  root-owned and read-only.
+- **Container user.** `SSO_UID:SSO_GID` (default `10001:10001`) are both build args and compose `user:`. The build
+  refuses 0 and a uid that exists in the base image. There is no root entrypoint: the container starts unprivileged.
+  With `SSO_DEBUG=False` settings refuse uid 0 (also check `sso.E002`), so run commands through
+  `docker compose run/exec web …`. Pre-built images have 10001; keep the key files readable by that uid
+  (the `init` service fixes the owner).
+- **Proxy trust.** Compose sets `SSO_TRUSTED_PROXIES` to the edge subnet and nginx **overwrites**
+  `X-Forwarded-For` with the peer address. A host-level nginx or load balancer in front must also overwrite it
+  (`proxy_set_header X-Forwarded-For $remote_addr;`), never append (`$proxy_add_x_forwarded_for`), and its address
+  must be added to `SSO_TRUSTED_PROXIES` (and `SSO_FORWARDED_ALLOW_IPS` if it talks to gunicorn directly);
+  otherwise clients choose their own IP and bypass the per-IP throttle.
+- **Throttle counters are not atomic.** DRF reads then writes the cache entry, so a parallel burst across workers
+  can let roughly one extra request per worker through. nginx `limit_req` on the login locations (30 r/min per IP,
+  burst 10) is the hard bound; deployments without this nginx need an equivalent limit.
+- **Cron** (host): `flushexpiredtokens` daily, `revoke_inactive_users` hourly (§11.1), certbot renewal
+  ([SSO-Setup.md §12.8](SSO-Setup.md#128-lets-encrypt-certificate)).
 
 ### 11.3 Consumer integration reference
 
@@ -1692,6 +1790,34 @@ llm-wiki-svc refreshes server-side when the access token expires within 60 s (`R
 HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `WWW-Authenticate: Bearer` or 403
 `permission_denied`.
 
+### 11.4 Design decisions and deviations from the spec
+
+* **Inactive users** are authenticated with `AllowAllUsersModelBackend`. Exactly one hash runs in every case. The
+  403 `account_inactive` answer is given **only when the password is correct**; a wrong password gives 401.
+* **Revocation granularity**: `iat` is in whole seconds. A token counts as revoked if `iat < ceil(revoked_at)`. A
+  login in the same second as a revocation waits under 1 s, so its new tokens are valid.
+* **Revocation at the SSO server itself**: `/me` and `/logout-all` reject access tokens issued before a revocation.
+  Other services still see such tokens as valid until they expire (≤ 15 min) unless they introspect.
+* **Refresh issues a fresh pair from the DB**, so group and permission changes take effect at the next refresh.
+  The blacklist write is the race guard: if two refreshes use the same token at once, only one succeeds.
+* **Superusers get no automatic app access**: `perms` comes from real permission rows (user + groups, filtered to
+  `application.*`), never `has_perm()`. `SSO_SUPERUSER_ALL_APPS=true` restores the all-apps rule.
+* **Introspect** returns current DB values for username, email, groups and is_staff, plus `iat`, `exp`, `iss`,
+  `aud` and `client_id`.
+* **Corrupt stored hashes** (e.g. `pbkdf2_sha256$notanumber$…`, or a missing digest) make Django's hasher raise.
+  Login treats that as a wrong password: one dummy hash, 401 `invalid_credentials`, an extra `sso.auth` log line
+  `result=stored_hash_invalid` (no hash, no password), and the row is left unchanged.
+* **Logout** in cookie mode with no cookie returns 204. With an invalid token it returns 401 `token_invalid` and
+  still clears the cookie.
+* **JSON-only parser** (no form or multipart), so a cross-site form POST cannot reach the API. Form posts get 415.
+* **Admin paths**: Django admin is moved to `SSO_ADMIN_PATH` (default `sso-admin/`, break-glass); `/admin/` is the
+  v1.3d admin web UI (`SSO_ADMIN_UI_PATH`).
+* **HSTS preload** deploy-check warning (`security.W021`) is silenced. Preloading binds the whole domain, so the
+  domain owner should decide it.
+* **WhiteNoise** serves the admin static files (collected at image build).
+* **Extra error codes** beyond spec §6.0: see §8.11 and the API manual §6.
+* **Webhook queue is a DB outbox**, not Redis (v1.3c): the event is written in the same transaction as the change.
+
 ## 12. Open items, not implemented, and discrepancies
 
 ### 12.1 Not implemented
@@ -1709,7 +1835,8 @@ HTTP timeout (`SSO_TIMEOUT_S`). `/mcp` requires a Bearer in sso/both: 401 with `
 | Automatic `flushexpiredtokens` | Not run by the image; operator cron (deployment plan) |
 | Cross-tab refresh coordination in `auth.js` | Not implemented (recommendation §7.3) |
 | Hot key reload | Keys read at start; rotation needs a restart |
-| Admin web UI `/admin` (v1.3d) | Implemented (app `adminui`, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)); domain layer `sso/admin_ops.py` shared with the admin REST API |
+| Admin REST API, service tokens, devices, webhooks (v1.3a–c) | **Implemented**; [API Reference Manual](API-REFERENCE-MANUAL.md) §8–10 |
+| Admin web UI `/admin` (v1.3d) | **Implemented** (app `adminui`, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)); domain layer `sso/admin_ops.py` shared with the admin REST API |
 | MFA for admins | Not implemented; in TODOS (open question in DESIGN-v1.3d §18) |
 
 ### 12.2 Discrepancies found between existing docs and the code
@@ -1724,9 +1851,33 @@ Found while writing this document. None of them changes behaviour; they are docu
 | D4 | `docs/SSO-server.md` §6.6 | Introspect returns `active, sub, username, groups, perms, exp` | Also `email, is_staff, token_type, iat, iss, aud, client_id`, with `Cache-Control: no-store` |
 | D5 | `docs/SSO-server.md` §6.7 / `sso/errors.py` docstring | `/healthz` failure implied as `503 service_unavailable` in the error list | `/healthz` answers `503 {"error":"unhealthy","detail":"database"}`; `service_unavailable` is never raised |
 | D6 | `docs/SSO-server.md` §6.8, §10 | Hosted login / PKCE is "phase 2" | Code, `urls.py` and the addendum call it phase 5 (spec §10 table lists it as row 5 too, the §6.8 heading still says phase 2) |
-| D7 | `README.md` §6a "Grant" bullet (line ~424) | "superusers have every `application.*` permission" | Default `SSO_SUPERUSER_ALL_APPS=false`: superusers get only explicit grants (`user_app_perms`). README's own env table (line ~247) and §6a later text say the correct thing |
+| D7 (fixed) | `README.md` §6a "Grant" bullet (old README) | "superusers have every `application.*` permission" | Default `SSO_SUPERUSER_ALL_APPS=false`: superusers get only explicit grants (`user_app_perms`). README's own env table (line ~247) and §6a later text say the correct thing |
 | D8 | `docs/DESIGN-ADDENDUM-v1.1.md` B.11 | The only migrations SSO owns are `sso` and `token_blacklist` | Also `application` (0001_initial); the compose header and README already say so |
 | D9 | `docs/sso-integration-design.md` v1.1 item 4 | "Without valid Basic auth the `client_ip` field is ignored" | Since v1.2 (C-19): a Basic header that fails is 401 `invalid_client`; only a request with **no** Basic header ignores `client_ip` (`sso/delegation.py`). The doc's later v1.2 section has it right, item 4 was not amended |
 | D10 | `docs/SSO-server.md` §6.3 | Logout "clears the cookie", 204 | 204 only for a valid token or no cookie; an invalid/blacklisted token gives 401 `token_invalid` (cookie still cleared in cookie mode) |
 | D11 (fix planned with the sso-client migration) | llm-wiki-svc `auth/client.py` vs design v1.1 item 4 | Server-side calls pass the browser IP | `logout()` sends Basic but **no** `client_ip`, so all llm-wiki logouts count against the llm-wiki server's own IP in the SSO `refresh` throttle (60/min shared with refresh). Low impact; worth passing `client_ip` there too |
 | D12 (fixed v1.2a) | `sso/admin.py` docstring | "read-only revocation markers" | `UserTokenRevocationAdmin` has no read-only override; rows can be added and edited in the admin (useful as a manual revoke, but the docstring is wrong) |
+
+### 12.3 Open questions
+
+1. ~~MySQL version of production `dcWebUsers`~~ **Answered: MySQL 8.0 now, 8.4 later** (team lead, 2026-10-10).
+   Code, init script and settings support both; the test compose defaults to `mysql:8.0`. MySQL 8.0 reached end of
+   life in April 2026, so the 8.4 upgrade should not wait long. Django 5.2 only is shipped (`requirements.lock`);
+   the suite also passes on 4.2 as a portability check. Still to confirm: prod's exact 8.0 patch level (≥ 8.0.11)
+   and that `auth_user` is InnoDB.
+2. Public host name, domain, ports and DB host/port are set only through env (deployment plan §0). Changing the
+   issuer after go-live invalidates every token.
+3. DB TLS: `SSO_DB_SSL_MODE` / `SSO_DB_SSL_CA` exist (R28); the local MySQL accounts do not use `REQUIRE SSL`
+   (self-signed container certificates). Production accounts should (deployment plan §6.2), with the CA provided.
+4. Password changes made **in myFinance** do not set `UserTokenRevocation` (other process). Options: myFinance
+   writes the revocation row, or introspect compares a password-hash fingerprint (careful: the login rehash changes
+   the hash). `revoke_inactive_users` bounds the window for suspensions.
+5. Should `/healthz` also check Redis and the keys (deployment plan Q16)? Should throttling fail open when Redis is
+   down? Currently it fails closed (500).
+6. Is HSTS preload wanted for the domain?
+7. Should `ServiceClient.allowed_origins` feed CORS dynamically, or stay env-only (`SSO_CORS_ALLOWED_ORIGINS`)?
+8. Redis 7.2 (BSD) vs Valkey 8 for the cache (deployment plan Q14).
+9. Should the cookie-mode `Origin` check also cover `/login` (login-CSRF hardening)? Not required by the addendum,
+   not implemented.
+10. v1.3d admin UI: MFA for admins, path and separate admin hostname
+    ([design §18](DESIGN-v1.3d-admin-ui.md#18-open-questions)).

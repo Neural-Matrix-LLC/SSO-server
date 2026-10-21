@@ -1,8 +1,8 @@
 # SSO-server design v1.2: company-wide auth server requirements
 
-Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). **v1.2a is implemented** on
-branch `feat/v1.2a` (see §10 for the as-built notes and the decisions taken during implementation); **v1.2b is
-implemented** on branch `feat/v1.2b` (§11; llm-wiki-svc migration still open); v1.3c is design only. Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
+Status: **design agreed** — Thomas's decisions of 2026-10-13 are applied (see §9). **v1.2a and v1.2b are
+implemented** and merged to `main` (§10 and §11 hold the as-built notes; llm-wiki-svc migration to `sso-client`
+still open). The webhooks of §6 were built as v1.3c ([DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md), DB outbox instead of Redis). Nothing else here is implemented unless the traceability table says "implemented". Baseline: branch `feat/app-permissions` @ `ea115b6`, see
 [ARCHITECTURE.md](ARCHITECTURE.md) for the as-built system and [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md)
 for the developer manual.
 

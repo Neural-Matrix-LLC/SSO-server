@@ -13,10 +13,13 @@ keys
 **/*.crt
 .env
 .env.*
+# the placeholder template ships in the image as /app/deploy/env.example (no values)
+!.env.example
 *.sql
 *.sql.gz
 *.sqlite3
 docker/certs
+letsencrypt
 qa
 examples
 devops

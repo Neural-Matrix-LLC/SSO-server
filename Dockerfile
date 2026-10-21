@@ -50,7 +50,17 @@ COPY --chown=root:root ssoproject ./ssoproject
 COPY --chown=root:root sso ./sso
 COPY --chown=root:root application ./application
 COPY --chown=root:root adminui ./adminui
-COPY --chown=root:root docker/healthcheck.py docker/dbcheck.py ./docker/
+COPY --chown=root:root docker/healthcheck.py docker/dbcheck.py docker/deploy_check.py ./docker/
+# Operator tools for a VPS without a repo checkout (README §7 "VPS from images only"). Nothing secret:
+# the generators write keys/certs into a host directory mounted at run time, never into the image.
+#   docker run --rm -v /opt/sso/keys:/out -e HOST_KEYS_DIR=/opt/sso/keys <image> /app/scripts/gen_keys.sh /out
+# init_secrets.sh is the compose "init" service: runs both generators when the host folders are empty.
+COPY --chown=root:root --chmod=0755 scripts/gen_keys.sh scripts/gen_selfsigned_cert.sh scripts/init_secrets.sh ./scripts/
+# Host-side deploy kit (compose file, env template, DB upgrade, deploy + post-start check), extracted with:
+#   docker run --rm <image> tar -C /app/deploy -cf - . | sudo tar -xf - --no-same-owner -C /opt/sso
+COPY --chown=root:root docker-compose.yml ./deploy/
+COPY --chown=root:root .env.example ./deploy/env.example
+COPY --chown=root:root --chmod=0755 scripts/upgrade_db.sh scripts/deploy.sh scripts/deploy_check.sh ./deploy/scripts/
 # Admin static files are collected at build time and served by WhiteNoise (R4). A throw-away DEBUG
 # config is used only for this step (ephemeral key in memory, nothing written but staticfiles/).
 RUN SSO_ENV_FILE= SSO_DEBUG=True SSO_DB_ENGINE=sqlite SSO_SQLITE_PATH=/tmp/build.sqlite3 \

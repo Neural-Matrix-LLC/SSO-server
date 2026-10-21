@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+# nginx for the SSO stack with docker/nginx.conf baked in as the envsubst template, so a VPS runs the stack
+# from images only (README §7). Site-specific parts stay mounted by compose: certs, ACME webroot and the
+# allow-list / extra-host snippet directories.
+#   docker build -f docker/Dockerfile.nginx -t <docker-user>/sso-nginx:<tag> .     (or: docker compose build nginx)
+# Same tag as sso-server: both images are built and published from the same commit.
+ARG NGINX_IMAGE=nginx:1.28-alpine
+FROM ${NGINX_IMAGE}
+# envsubst only the SSO_* variables, so nginx's own $host, $remote_addr ... stay as they are
+ENV NGINX_ENVSUBST_FILTER=^SSO_
+# mount points (the snippet dirs stay empty unless compose mounts host dirs over them), and templates/ made here:
+# COPY --chmod would create it with the file's mode 0644 (no x bit, not traversable for non-root)
+RUN mkdir -p /etc/nginx/templates /etc/nginx/certs /var/www/acme /etc/nginx/sso.d \
+             /etc/nginx/sso-admin.d /etc/nginx/sso-admin-ui.d /etc/nginx/sso-admin-host.d
+COPY --chmod=0644 docker/nginx.conf /etc/nginx/templates/default.conf.template

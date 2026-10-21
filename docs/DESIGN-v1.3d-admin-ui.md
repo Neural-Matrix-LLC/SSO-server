@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Design for review** (no code yet). Branch `docs/sso-admin-ui` |
+| Status | **Implemented** (app `adminui`), merged to `main` at `b749fae`; QA: `qa/RESULTS-v1.3d.md`. The [Decision]/[Proposal] labels record the state at design time; where the text and the code differ, the code and [API-REFERENCE-MANUAL.md §11](API-REFERENCE-MANUAL.md#11-admin-web-ui-v13d) win |
 | Date | 2026-10-15 |
 | Phase | Fourth and last **SSO-server completion** phase (v1.3a → v1.3b → v1.3c → **v1.3d**), before SGMCP v1.4. See [ECOSYSTEM-INTEGRATION.md §9.1](ECOSYSTEM-INTEGRATION.md#91-phasing-updated-2026-10-15-component-order) |
 | Base | `feat/sso-v1.3` @ `bc721e5` |

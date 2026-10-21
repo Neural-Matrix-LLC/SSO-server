@@ -1,0 +1,3 @@
+# docker/Dockerfile.nginx needs only the template: nothing else reaches its build context.
+*
+!docker/nginx.conf

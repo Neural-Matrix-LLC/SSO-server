@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Design for review, implemented on branch `feat/v1.3a` (local, not pushed)** |
+| Status | **Implemented**, merged to `main` (as-built API: [API-REFERENCE-MANUAL.md §8](API-REFERENCE-MANUAL.md#8-admin-rest-api-v13a)) |
 | Date | 2026-10-15 |
 | Phase | First of the three **SSO-server completion** phases (v1.3a → v1.3b → v1.3c), see [ECOSYSTEM-INTEGRATION.md §9.1](ECOSYSTEM-INTEGRATION.md#91-phasing-updated-2026-10-15-component-order) |
 | Base | `feat/v1.2b` @ `68fd31f` |

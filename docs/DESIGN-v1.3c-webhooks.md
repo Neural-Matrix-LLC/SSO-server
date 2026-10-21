@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Design for review, implemented on branch `feat/sso-v1.3` (local, not pushed)** |
+| Status | **Implemented**, merged to `main` (as-built API: [API-REFERENCE-MANUAL.md §10](API-REFERENCE-MANUAL.md#10-signed-webhooks-v13c)) |
 | Date | 2026-10-15 |
 | Phase | Last SSO-server completion phase (moved from the old v1.4, decision 2026-10-15). After v1.3c the SSO server is **complete** for SGMCP (v1.4) and FUND (v1.5) |
 | Based on | [DESIGN-v1.2-requirements.md §6](DESIGN-v1.2-requirements.md) (decision 7: one mechanism, signed webhooks to services; clients learn by rejection) |

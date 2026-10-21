@@ -1,10 +1,10 @@
 # SSO-server API Reference Manual
 
 For developers of **clients** (browser SPAs, native apps, scripts, MCP clients, server-side "BFF" apps) and
-**services** (back-ends that accept SSO tokens). As-built reference: branch `feat/app-permissions`; every
-implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `application/*.py` and matches
-[ARCHITECTURE.md](ARCHITECTURE.md) §8–9. Items marked **Planned v1.2a/b** or **v1.3c** are designs from
-[DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md) and do **not** exist yet.
+**services** (back-ends that accept SSO tokens). As-built reference for `main` (v1.3d): every fact here comes from
+`ssoproject/urls.py`, `sso/*.py`, `application/*.py` and `adminui/` and matches [ARCHITECTURE.md](ARCHITECTURE.md)
+§8–9. Everything described is implemented except the items listed as future in [TODOS.md](../TODOS.md) (sign-up,
+password reset, hosted login / PKCE).
 
 ## Contents
 
@@ -14,7 +14,7 @@ implemented fact here comes from `ssoproject/urls.py`, `sso/*.py` and `applicati
 - [4. Endpoint reference](#4-endpoint-reference)
 - [5. Token claims](#5-token-claims)
 - [6. Error codes](#6-error-codes)
-- [7. Planned v1.2 features](#7-planned-v12-features)
+- [7. Feature history (v1.2–v1.3)](#7-feature-history-v12v13)
 - [8. Admin REST API (v1.3a)](#8-admin-rest-api-v13a)
 - [9. Devices and on-behalf-of (v1.3b)](#9-devices-and-on-behalf-of-v13b)
 - [10. Signed webhooks (v1.3c)](#10-signed-webhooks-v13c)
@@ -402,6 +402,10 @@ def introspect(token: str, client_ip: str) -> dict:
 | GET | `/.well-known/jwks.json` | none | none |
 | GET | `/.well-known/openid-configuration` | none | none |
 | GET | `/healthz` | none | none |
+| POST | `/api/v1/auth/service-token` | ServiceClient Basic, or a device `client_assertion` | `service_token` (§8.2, §9) |
+| GET | `/api/v1/service/users/inactive` | ServiceClient Basic or service token | none (§8.2) |
+| GET, POST, DELETE | `/api/v1/devices[/{client_id}]` | service token + user token, or user token | none (§9) |
+| various | `/api/v1/admin/*` | admin Bearer (+ `X-SSO-Reauth` for 🔒) | `admin`, `admin_reauth` (§8–10) |
 
 ### login — `POST /api/v1/auth/login`
 
@@ -468,7 +472,8 @@ realm="sso-introspect"`), 429 `rate_limited`.
 
 ### healthz — `GET /healthz`
 
-200 `{"status":"ok"}` or 503 `{"error":"unhealthy","detail":"database"}`.
+200 `{"status":"ok"}`; 200 `{"status":"ok","warning":"database migrations pending"}` when the SSO schema is older
+than the code; 503 `{"error":"unhealthy","detail":"database"}`.
 
 ## 5. Token claims
 
@@ -507,9 +512,9 @@ have no `sid`; refreshing one starts a new session. Treat `sid` as opaque.
 | 500 | `server_error` | unhandled error |
 | 503 | `unhealthy` | `/healthz` only |
 
-## 7. Planned v1.2 features
+## 7. Feature history (v1.2–v1.3)
 
-Rows marked **Planned** do not exist yet; do not code against them until they are released. Agreed design (decisions of
+All rows are implemented. Agreed design (decisions of
 2026-10-13): [DESIGN-v1.2-requirements.md](DESIGN-v1.2-requirements.md). Later ideas: [TODOS.md](../TODOS.md).
 
 | Feature | Sketch |
@@ -518,14 +523,14 @@ Rows marked **Planned** do not exist yet; do not code against them until they ar
 | **Done in v1.2a** `register_service`, admin actions, `sid`, refresh-reuse session revocation | see §3.1, §4 refresh, §5 |
 | **Done in v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
 | **Done in v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
-| **Planned v1.3c** Signed webhooks to services | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
+| **Done in v1.3c** Signed webhooks to services (§10) | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
 change/reset are future items in TODOS.md.
 
 ## 8. Admin REST API (v1.3a)
 
-**Status:** implemented on branch `feat/v1.3a` (not released until merged). Design and rationale:
+**Status:** implemented (v1.3a). Design and rationale:
 [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md). Django admin stays as the break-glass tool.
 
 ### 8.1 Basics
@@ -664,7 +669,7 @@ Payload `{"app_name","description"?,"version","permissions":[{"codename","name",
 
 ## 9. Devices and on-behalf-of (v1.3b)
 
-Design: [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md). Implemented on `feat/sso-v1.3`.
+Design: [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md). Implemented (v1.3b).
 
 | Method + path | Auth | Request | Response / errors |
 |---|---|---|---|
@@ -694,7 +699,7 @@ curl -s $SVC_B/api/thing -H "Authorization: Bearer $SERVICE_TOKEN_OF_A" \
 
 ## 10. Signed webhooks (v1.3c)
 
-Design: [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md). Implemented on `feat/sso-v1.3`. The compose service
+Design: [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md). Implemented (v1.3c). The compose service
 `webhooks` runs `manage.py run_webhook_worker`.
 
 | Method + path | Auth | Request | Response / errors |
@@ -741,8 +746,8 @@ admin UI is hosted by the SSO server (FUND has none).
   redirects (Post/Redirect/Get), and is usually behind an nginx IP allow-list or a separate admin hostname.
 - Who: active + `is_staff` + `application.sso_admin` (or superuser), checked on every request.
 - Step-up: the same actions as §8 (🔒) require a password confirmation page; window `SSO_ADMIN_REAUTH_SECONDS`.
-- Audit: rows in `sso_adminauditlog` get `channel = "ui"`; since v1.3d the `channel` field to the audit row shape of
-  `GET /api/v1/admin/audit` (`"api"`, `"ui"`, `"django_admin"`, `"system"`) and an optional `?channel=` filter (plus `?result=`). The UI audit page can filter by channel and export CSV.
+- Audit: rows in `sso_adminauditlog` get `channel = "ui"`; since v1.3d the audit row shape of
+  `GET /api/v1/admin/audit` has a `channel` field (`"api"`, `"ui"`, `"django_admin"`, `"system"`) and an optional `?channel=` filter (plus `?result=`). The UI audit page can filter by channel and export CSV.
 
 | Area | Routes (relative to `/<SSO_ADMIN_UI_PATH>`) |
 |---|---|

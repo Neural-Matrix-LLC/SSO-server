@@ -12,6 +12,9 @@
 ## Changelog
 | Version | Date | Change |
 |---|---|---|
+| v1.8 | 2026-10-20 | **Migration from a separate migration server** (Thomas 2026-10-20: the DB migration is done from another server, then Ops starts the containers, whose `init` creates keys/certs). `sso_migrator` is granted from `<migration_host_ip>` only; its password never reaches the VPS (§4.1, §6.2). `scripts/upgrade_db.sh` runs on the migration server with the same deploy kit and `.env` (its `init` makes a throw-away key pair there that nothing trusts). `scripts/deploy.sh` on the VPS gains a **schema gate** before `up`: a one-off `web` container checks as `sso_app` that the DB is reachable and `manage.py sso_schema_check` passes, else exit 3 with nothing restarted. Updated §4.1, §6.2, §12.2 P4/P6/P7 and later releases. |
+| v1.7 | 2026-10-19 | **Automated deploy** (Thomas 2026-10-19: generating keys/certs by hand on the host is too complicated). New one-shot compose service `init` (`scripts/init_secrets.sh`, same `sso-server` image) runs before web/webhooks/nginx on every `up`. When `SSO_KEYS_DIR` has no `*.pem` it generates the pair named in `.env`. When the cert pair is missing (plain names) it generates a self-signed bootstrap cert for `SSO_HOSTNAME`. Otherwise it only checks, and it sets the key owner to `SSO_UID:SSO_GID`. It runs as root with only CHOWN/DAC_OVERRIDE/FOWNER, no network and no `.env` secrets. Still generated on the VPS, never in CI or an image (§4.2 rule 4). `SSO_AUTO_INIT=false` = check only. New `scripts/deploy.sh` (pull, `up --wait`) and `scripts/deploy_check.sh` (post-start check of the docs/SSO-Setup.md Troubleshooting rows; in-container part `docker/deploy_check.py`), both in the deploy kit. |
+| v1.6 | 2026-10-18 | **VPS from images only** (Thomas 2026-10-18: deploy the containers, not the repo). Second image `${DOCKER_USER}/sso-nginx:${IMAGE_TAG}` (`docker/Dockerfile.nginx`, `docker/nginx.conf` baked in as the template; same tag as `sso-server`). `sso-server` also carries the generators (`/app/scripts/gen_keys.sh`, `gen_selfsigned_cert.sh`) and a deploy kit (`/app/deploy/`: compose file, `env.example`, `scripts/upgrade_db.sh`). Keys and certs are still generated **on the VPS**, by running the image with a host dir mounted; nothing secret enters an image. New on-demand `certbot` compose service (profile) for §3.2 A, no host package. CI builds, checks and secret-scans both images (matrix) and pushes both. Updated §3.2, §7, §12.2 P1-P3. |
 | v1.5 | 2026-10-11 | Key env vars updated to match branch `feat/app-permissions` (verified in `sso/keys.py`, `sso/checks.py`, `docker-compose.yml`). `SSO_KEYS_DIR` = host folder, mounted read-only at `/run/keys`. `SSO_JWT_PRIVATE_KEY` = signing-key **file name**. `SSO_JWT_PUBLIC_KEYS` = **comma-separated file names**. Names resolve in `SSO_JWT_KEYS_MOUNT` > `SSO_KEYS_DIR` > `/run/keys`, and compose pins `SSO_JWT_KEYS_MOUNT=/run/keys` for `web`. `SSO_JWT_PRIVATE_KEY_PATH` / `SSO_JWT_PUBLIC_KEY_PATHS` / `SSO_JWT_PUBLIC_KEY_PATH` are deprecated (still read, warning `sso.W001`; setting old + new together is fatal). Updated §1, §4, §11 rotation runbook (edit the file list / file name), §12 P3, §13.5 (rollback across the rename), R10, R20, R26 and the CI env. New §4.3 on the deprecated vars. |
 | v1.4 | 2026-10-10 | Local/QA/CI MySQL default aligned to **`mysql:8.0`** (prod runs 8.0 today; 8.4 supported) through the Developer's `MYSQL_IMAGE` variable (falls back to `QA_MYSQL_TAG`), in §2, §2.1, §6.4 and R29. New §15.1 **Accepted deviations (Developer)**: R19 (`IMAGE_TAG=latest` default + `build:` in compose, dev/local only; prod pins `sha-*`/`vX.Y.Z` and verifies the digest; CI never pushes `latest`), R2 (configurable `SSO_UID`/`SSO_GID`, default 10001; host key ownership must match), R29 (`MYSQL_IMAGE` default `mysql:8.0`). R2/R19/R29 and §4.2 point to them. |
 | v1.3 | 2026-10-10 | Q23 closed: Docker Hub repo `thomaschoi/sso-server` is **PUBLIC** (Thomas). The private-repo pull-token path is removed. The VPS pulls anonymously (rate-limited; an optional read-only token raises the limit), and the image is world-readable. New **hard CI secret gate** `image-secret-scan` (§7.1): trufflehog + Trivy secret scanner over the saved image, a per-layer file-name check (catches files deleted in later layers), and checks on `docker history` / config Env / Labels. Publish now depends on it. New pre-publish manual checklist (§7.2) and leaked-secret response (§7.3). Developer requirements R3 tightened; R30–R32 added (no build-time secrets via ARG/ENV, multi-stage with explicit final-stage COPY). |
@@ -52,7 +55,7 @@ Consequences of the choices:
   port 80). Use DNS-01 or another cert source (§3.2).
 - **Changing `SSO_HOSTNAME`/issuer after go-live invalidates every issued token and requires every service to
   reconfigure.** Decide before go-live (pre-go-live gate G1, §12).
-- Plan-wide placeholders used below: `<db_host>`, `<sso_vps_ip>` (egress IP of the VPS), `<app_origin>`.
+- Plan-wide placeholders used below: `<db_host>`, `<sso_vps_ip>` (egress IP of the VPS), `<migration_host_ip>` (egress IP of the migration server, §12.2 P6), `<app_origin>`.
 
 ## 1. Architecture summary
 
@@ -166,7 +169,7 @@ Bringing the schema to a "looks like myFinance's `dcWebUsers`" state:
    deny. The mitigation is §15 R21: only nginx publishes ports, and anything else is bound to `127.0.0.1`. Optional
    extra filtering goes in the `DOCKER-USER` iptables chain. After go-live, verify from **outside** with
    `nmap -Pn -p 1-65535 <vps_ip>`.
-   Outbound: the VPS must reach `<db_host>:3306` (and the DB firewall must allow `<sso_vps_ip>` only: Q5).
+   Outbound: the VPS must reach `<db_host>:3306` (and the DB firewall must allow `<sso_vps_ip>` and `<migration_host_ip>` only: Q5).
 4. **Unattended upgrades**
    ```bash
    sudo apt-get install -y unattended-upgrades apt-listchanges
@@ -196,7 +199,7 @@ SSO becomes a `server` block in that nginx instead, proxying to `127.0.0.1:8001`
 ### 3.2 TLS certificate source (pick one; Q4)
 | Option | Works when | Notes |
 |---|---|---|
-| **A. Let's Encrypt HTTP-01 (certbot webroot)**, default | `SSO_HTTP_PORT=80` and port 80 reachable from the internet | Free. Shared webroot volume for `/.well-known/acme-challenge/`. Renewal via certbot's systemd timer (Ubuntu package `certbot`) with deploy hook `docker compose -f /opt/sso/docker-compose.yml exec -T nginx nginx -s reload`. |
+| **A. Let's Encrypt HTTP-01 (certbot webroot)**, default | `SSO_HTTP_PORT=80` and port 80 reachable from the internet | Free. Shared webroot volume for `/.well-known/acme-challenge/`. v1.6: the compose `certbot` service (profile, `certbot/certbot:v5.1.0`, state in `SSO_LETSENCRYPT_DIR`) issues it; nginx mounts that dir as `SSO_CERTS_DIR` with `SSO_TLS_CERT_FILE=live/<host>/fullchain.pem`. Renewal by root cron: `docker compose run --rm certbot renew -q && docker compose exec -T nginx nginx -s reload` (README §7). |
 | B. Let's Encrypt DNS-01 | Any port; needed if `SSO_HTTP_PORT` ≠ 80. Also wildcards. | Needs a DNS-provider API token, stored like §4. |
 | C. Existing cert covering `${SSO_HOSTNAME}` (e.g. a wildcard for `${SSO_DOMAIN}`) | One already exists | Renewal tied to its owner's process. |
 | D. CDN (e.g. Cloudflare) origin cert + proxy | Domain is behind a CDN | No caching of `/api/*`. The real client IP header changes, so `SSO_NUM_PROXIES` changes (§5). |
@@ -229,7 +232,7 @@ Certs are mounted read-only into nginx, never baked into an image.
 |---|---|---|
 | `SSO_SECRET_KEY` (50+ random chars, unique per env, not myFinance's: spec §4.8) | `/opt/sso/.env` | env |
 | `SSO_DBUSER`/`SSO_DBPWD` (`sso_app`) | `/opt/sso/.env` | env |
-| `sso_migrator` password | `/opt/sso/migrate.env`, present **only during a migration window** | env for one-off `run` |
+| `sso_migrator` password | **Not on the VPS.** Migration server only (`SSO_DBPWD` typed in for `scripts/upgrade_db.sh`), during a migration window | env for one-off `run` on the migration server |
 | MySQL server CA cert (if verifying DB TLS, §6.0) | `/opt/sso/mysql-ca/ca.pem` (not secret, but integrity matters) | file mount |
 | JWT private key(s) | `SSO_KEYS_DIR` = `/opt/sso/keys/`, e.g. `sso-2026-10.private.pem` | mounted at `/run/keys:ro`; `SSO_JWT_PRIVATE_KEY=<file name>` |
 | JWT public key(s) | `SSO_KEYS_DIR` = `/opt/sso/keys/` | mounted at `/run/keys:ro`; `SSO_JWT_PUBLIC_KEYS=<name>[,<name>…]` |
@@ -265,7 +268,8 @@ The master copy of secrets lives in Thomas's password manager **[ASSUMPTION; Q10
    container. **Don't override `SSO_JWT_KEYS_MOUNT` in `.env`.** A value containing `/` is treated as a path, not a
    name, so use bare file names in prod. The signing key's own public key is always published, even if it isn't
    listed in `SSO_JWT_PUBLIC_KEYS`.
-4. Generate keys **on the VPS**, never in CI. RSA 3072 recommended (spec allows 2048/3072; Q10). Name them by month:
+4. Generate keys **on the VPS**, never in CI. Since v1.7 the compose `init` service does this on the first `up`
+   (`scripts/gen_keys.sh`, RSA 3072, names from `.env`). RSA 3072 recommended (spec allows 2048/3072; Q10). Name them by month:
    ```bash
    umask 077
    openssl genrsa -out /opt/sso/keys/sso-2026-10.private.pem 3072
@@ -380,22 +384,23 @@ CREATE USER 'sso_app'@'<sso_vps_ip>'
   REQUIRE SSL;
 GRANT SELECT, INSERT, UPDATE, DELETE ON dcWebUsers.* TO 'sso_app'@'<sso_vps_ip>';
 
--- Migration account (one-off migrate runs only; locked otherwise)
-CREATE USER 'sso_migrator'@'<sso_vps_ip>'
+-- Migration account (one-off migrate runs only; locked otherwise). Granted from the migration server only, never
+-- from the VPS: the DB team migrates there first, then Ops deploys on the VPS (§12.2 P6/P7)
+CREATE USER 'sso_migrator'@'<migration_host_ip>'
   IDENTIFIED WITH caching_sha2_password BY '<generated-32+char-password>'
   REQUIRE SSL ACCOUNT LOCK;
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
-  ON dcWebUsers.* TO 'sso_migrator'@'<sso_vps_ip>';
+  ON dcWebUsers.* TO 'sso_migrator'@'<migration_host_ip>';
 -- DROP only temporarily, for a migration rollback (§13.3):
---   GRANT DROP ON dcWebUsers.* TO 'sso_migrator'@'<sso_vps_ip>'; … REVOKE DROP ON dcWebUsers.* FROM 'sso_migrator'@'<sso_vps_ip>';
+--   GRANT DROP ON dcWebUsers.* TO 'sso_migrator'@'<migration_host_ip>'; … REVOKE DROP ON dcWebUsers.* FROM 'sso_migrator'@'<migration_host_ip>';
 
 -- Migration window
-ALTER USER 'sso_migrator'@'<sso_vps_ip>' ACCOUNT UNLOCK;
+ALTER USER 'sso_migrator'@'<migration_host_ip>' ACCOUNT UNLOCK;
 --   … §12 P6 …
-ALTER USER 'sso_migrator'@'<sso_vps_ip>' ACCOUNT LOCK;
+ALTER USER 'sso_migrator'@'<migration_host_ip>' ACCOUNT LOCK;
 
 SHOW GRANTS FOR 'sso_app'@'<sso_vps_ip>';
-SHOW GRANTS FOR 'sso_migrator'@'<sso_vps_ip>';
+SHOW GRANTS FOR 'sso_migrator'@'<migration_host_ip>';
 SELECT user, host, plugin, ssl_type, account_locked FROM mysql.user WHERE user LIKE 'sso\_%';
                                -- plugin must read caching_sha2_password for both
 ```
@@ -509,6 +514,10 @@ Thomas 2026-10-10: images are published to **Docker Hub** as **`${DOCKER_USER}/s
 - Until a GitHub repo and the CI Docker Hub token exist (addendum D), the interim option is to build on the VPS from a tagged
   checkout with the same name: `docker build -t thomaschoi/sso-server:<tag> .`
 - Django 5.2 only: `requirements-django42.txt` is no longer needed (Developer may delete it, §15 R9).
+- v1.6: **two images per release, same tag**: `sso-server` and `sso-nginx` (nginx.conf baked in). The VPS gets no
+  repo checkout. Its non-secret host files come out of `sso-server`'s deploy kit:
+  `docker run --rm <sso-server> tar -C /app/deploy -cf - . | sudo tar -xf - --no-same-owner -C /opt/sso`.
+  Both images pass the §7.1 gate.
 
 ### 7.1 Hard secret gate before publishing (CI job `image-secret-scan`)
 Publish **depends on** this job. Any finding fails the build. Allowlist entries are reviewed in PRs and live in the
@@ -707,11 +716,14 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
 - [ ] **G7 Decisions**: cert source, monitoring tool and alert channel, DB TLS/CA (Q4, Q5, Q9).
 
 ### 12.2 Production
-- **P1 VPS baseline** per §3.0 (Docker, ufw, unattended-upgrades, cron, time sync). Create `/opt/sso` and fill `.env`
-  from `.env.example` with the §0 derived values.
-- **P2 DNS + TLS**: A/AAAA record for `${SSO_HOSTNAME}` → VPS. Obtain the cert (§3.2). Check with
+- **P1 VPS baseline** per §3.0 (Docker, ufw, unattended-upgrades, cron, time sync). Create `/opt/sso`, extract the
+  deploy kit from the `sso-server` image (§7, README §7 "VPS from images only") and fill `.env` from `env.example`
+  with the §0 derived values.
+- **P2 DNS + TLS**: A/AAAA record for `${SSO_HOSTNAME}` → VPS. Bootstrap cert with the image's
+  `/app/scripts/gen_selfsigned_cert.sh`, start nginx, then obtain the real cert (§3.2; `docker compose run --rm certbot ...`). Check with
   `openssl s_client -connect ${SSO_HOSTNAME}:${SSO_HTTPS_PORT} -servername ${SSO_HOSTNAME}`.
-- **P3 Keys** (§4.2): generate into `/opt/sso/keys`. In `.env`, set `SSO_KEYS_DIR=/opt/sso/keys`,
+- **P3 Keys** (§4.2): generate into `/opt/sso/keys`, with the image's tool:
+  `docker run --rm -v /opt/sso/keys:/out <sso-server> /app/scripts/gen_keys.sh /out sso-YYYY-MM` (files owned by 10001). In `.env`, set `SSO_KEYS_DIR=/opt/sso/keys`,
   `SSO_JWT_PRIVATE_KEY=<name>.private.pem` and `SSO_JWT_PUBLIC_KEYS=<name>.public.pem`. No deprecated `*_PATH(S)` vars.
 - **P3b Image**: `docker compose pull web` for `${DOCKER_USER}/sso-server:${IMAGE_TAG}`. The public repo pulls
   anonymously, subject to anonymous rate limits; an optional read-only token login is described in §7. Or build
@@ -720,19 +732,21 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
   `docker compose run --rm web python manage.py check --database default`.
   This also proves `caching_sha2_password` + TLS from the image.
 - **P5 Backup** (§6.3), verify and encrypt it. Record the `auth_user` count baseline.
-- **P6 Migrate** (operator-run):
+- **P6 Migrate** (DB team, **on the migration server**, before P7; same deploy kit and `.env` as the VPS;
+  `scripts/upgrade_db.sh` wraps the steps below with a backup and `sso_schema_check`, docs/SSO-Setup.md §12.6):
   ```bash
-  cd /opt/sso
-  # DBA: ALTER USER 'sso_migrator'@'<sso_vps_ip>' ACCOUNT UNLOCK;
+  cd /opt/sso                                      # on the migration server
+  # DBA: ALTER USER 'sso_migrator'@'<migration_host_ip>' ACCOUNT UNLOCK;
   set -a; . ./migrate.env; set +a                 # SSO_DBUSER=sso_migrator SSO_DBPWD=…
   docker compose run --rm -e SSO_DBUSER -e SSO_DBPWD web python manage.py showmigrations
   docker compose run --rm -e SSO_DBUSER -e SSO_DBPWD web python manage.py migrate --plan
   #   STOP unless the plan lists ONLY `sso` and `token_blacklist`
   docker compose run --rm -e SSO_DBUSER -e SSO_DBPWD web python manage.py migrate
   unset SSO_DBUSER SSO_DBPWD; shred -u migrate.env
-  # DBA: ALTER USER 'sso_migrator'@'<sso_vps_ip>' ACCOUNT LOCK;
+  # DBA: ALTER USER 'sso_migrator'@'<migration_host_ip>' ACCOUNT LOCK;
   ```
-- **P7 Start**: `docker compose up -d`. All services healthy.
+- **P7 Start** (Ops, on the VPS, after P6): `scripts/deploy.sh` (init creates keys/certs, schema gate as `sso_app`
+  stops with exit 3 if P6 is missing, `up --wait`, `deploy_check.sh`). All services healthy.
 - **P8 Smoke tests** (spec §11), all against `${SSO_ISSUER}`:
   - `/healthz` returns 200. JWKS has one key with the expected kid.
   - Discovery: `token_endpoint` = `/api/v1/auth/login`, with no `authorization_endpoint` (addendum B.2).
@@ -745,9 +759,10 @@ Rollback before step 9: revert the `.env` line(s) and recreate. Both keys are st
 - **P10 Operate**: install the cron (§10), enable monitors (§9), write `DEPLOYED`, publish
   `SSO_ISSUER`/`SSO_JWKS_URL` to service developers. Drop or retain the staging copy as decided (Q6).
 
-Later releases: tag → local/QA → staging → backup if there are migrations → `migrate --plan` review → migrate →
-set `IMAGE_TAG=<new>` (`sha-*`/`vX.Y.Z`) in `.env` → `docker compose pull web` → verify the digest equals the one that
-passed §7.1 → `docker compose up -d` → P8 subset. Migrations must be backward-compatible with the previous
+Later releases: tag → local/QA → staging → on the migration server: backup if there are migrations → `migrate --plan`
+review → migrate (`scripts/upgrade_db.sh`) → on the VPS: set `IMAGE_TAG=<new>` (`sha-*`/`vX.Y.Z`) in `.env` →
+`docker compose pull web` → verify the digest equals the one that passed §7.1 → `scripts/deploy.sh` (schema gate,
+`up --wait`, check) → P8 subset. Migrations must be backward-compatible with the previous
 image (expand-only). With a single `web` container, `up -d` causes a few seconds of 502s (Q13).
 
 ## 13. Rollback steps (use the lowest level that works)

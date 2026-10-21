@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | **Design for review, implemented on branch `feat/sso-v1.3` (local, not pushed)** |
+| Status | **Implemented**, merged to `main` (as-built API: [API-REFERENCE-MANUAL.md §9](API-REFERENCE-MANUAL.md#9-devices-and-on-behalf-of-v13b)) |
 | Date | 2026-10-15 |
 | Phase | Second SSO-server completion phase ([ECOSYSTEM-INTEGRATION.md §9.1](ECOSYSTEM-INTEGRATION.md)); needed by SGMCP (v1.4) |
 | Builds on | v1.3a ([DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md)): service tokens, admin API, audit, step-up |
