@@ -3,6 +3,15 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-10-29 — docs: manual curl health and login check in SSO-Setup
+
+**Goal.** Record the curl commands that were verified against the test server at 192.168.0.213 (IP address,
+self-signed certificate) so health and login can be checked by hand from another machine.
+
+**Docs.** docs/SSO-Setup.md §9.1 (new): `/healthz`, native login, login + `/auth/me` with the access token, JWKS
+and discovery, with the expected status codes (200/401/403/429) and the usual by-IP pitfalls (SNI, allowed hosts).
+No code change.
+
 ## 2026-10-21 — docs: required network ports in SSO-Setup
 
 **Goal.** First production deploy (0.1.3, Hostinger VPS) failed: `sso-nginx-1` could not bind `0.0.0.0:80`

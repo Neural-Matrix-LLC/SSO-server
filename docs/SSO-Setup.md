@@ -294,6 +294,43 @@ scripts/sso_login_check.py <username>       # URL from SSO_ISSUER in .env; pins 
 `perms` must contain `application.app1` after the grant. Exit code 1 means the login was refused (wrong password,
 inactive account, throttled); see `--help` for `--url` / `--cacert`.
 
+### 9.1 Manual check with curl (from another machine)
+
+The same checks by hand, e.g. from a laptop against a test server reached by IP address (here
+`SSO_HOSTNAME=192.168.0.213`, `SSO_TLS_REJECT_UNKNOWN_SNI=off`, step 1). `-k` skips certificate verification for the
+self-signed bootstrap certificate; use `--cacert docker/certs/selfsigned.crt` instead to also check the name (step 3).
+Always `https://`: plain `http://` only redirects.
+
+```bash
+SSO=https://192.168.0.213
+
+# health
+curl -sk $SSO/healthz                               # {"status":"ok"}
+
+# login (native client: refresh token in the body)
+curl -sk $SSO/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"YOUR_USER","password":"YOUR_PASSWORD","client":"native"}'
+
+# login, keep the access token, then ask who it belongs to (needs jq)
+TOKEN=$(curl -sk $SSO/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"YOUR_USER","password":"YOUR_PASSWORD","client":"native"}' | jq -r .access_token)
+curl -sk $SSO/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
+
+# published keys and discovery
+curl -sk $SSO/.well-known/jwks.json
+curl -sk $SSO/.well-known/openid-configuration
+```
+
+- Login 200 returns `access_token`, `refresh_token`, `expires_in` (900) and `user` (with `groups` and `perms`).
+- 401 = wrong user or password; 403 `account_inactive` = correct password, inactive account; 429 = throttled
+  (`SSO_THROTTLE_LOGIN` 10/min per IP, `SSO_THROTTLE_LOGIN_USER` 5/min per user, see `Retry-After`).
+- TLS handshake error by IP = `SSO_TLS_REJECT_UNKNOWN_SNI` still `on`; Django 400 "Bad Request" = the address is
+  not in `SSO_ALLOWED_HOSTS`. See [Troubleshooting](#troubleshooting).
+- Commands typed into a shell end up in its history; prefer `scripts/sso_login_check.py` (prompts for the
+  password) for real accounts.
+
 ## 10. Admin web UI
 
 The admin UI (v1.3d, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)) is enabled by default at
