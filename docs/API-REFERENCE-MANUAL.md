@@ -1,7 +1,7 @@
 # SSO-server API Reference Manual
 
 For developers of **clients** (browser SPAs, native apps, scripts, MCP clients, server-side "BFF" apps) and
-**services** (back-ends that accept SSO tokens). As-built reference for `main` (v1.3d): every fact here comes from
+**services** (back-ends that accept SSO tokens). As-built reference for `main` (v1.3e): every fact here comes from
 `ssoproject/urls.py`, `sso/*.py`, `application/*.py` and `adminui/` and matches [ARCHITECTURE.md](ARCHITECTURE.md)
 §8–9. Everything described is implemented except the items listed as future in [TODOS.md](../TODOS.md) (sign-up,
 password reset, hosted login / PKCE).
@@ -188,9 +188,15 @@ curl -sS -X POST https://sso.example.com/api/v1/auth/logout-all -H "Authorizatio
 ```
 
 Browser: `fetch(SSO + "/api/v1/auth/logout", {method:"POST", credentials:"include", headers:{"Content-Type":
-"application/json"}, body:"{}"})`; the cookie is cleared. Then drop the in-memory access token. Logout does not
-invalidate access tokens already issued (they live until `exp`, ≤ 15 min) except for services that introspect;
-`logout-all` makes them fail at `/me`, `/refresh` and introspect.
+"application/json"}, body:"{}"})`; the cookie is cleared. Then drop the in-memory access token. Since v1.3e logout
+ends the whole session: its access tokens fail at once at `/me` and introspect (local JWKS verifiers still accept
+them until `exp`, ≤ 15 min), and services stop the long-running jobs started from this session
+([DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md)). `logout-all` and a password change do the same for every
+session of the user.
+
+**Long-running jobs (v1.3e):** jobs you start (strategies, subscriptions, scheduled work) run only while the
+session that started them is alive. Keep the app signed in and refreshing (at least once per refresh lifetime,
+default 7 days); logging out, logging out everywhere or changing the password stops them.
 
 ### 2.7 Error handling and retry
 
@@ -329,7 +335,7 @@ export async function verify(authHeader, required = "application.app2") {
 
 ### 3.3 Introspection (revocation-aware)
 
-Local verification cannot see logout-all, suspension, password change or a permission removal before `exp`
+Local verification cannot see logout, logout-all, suspension, password change or a permission removal before `exp`
 (≤ 15 min). For sensitive operations call introspect:
 
 ```bash
@@ -404,6 +410,7 @@ def introspect(token: str, client_ip: str) -> dict:
 | GET | `/healthz` | none | none |
 | POST | `/api/v1/auth/service-token` | ServiceClient Basic, or a device `client_assertion` | `service_token` (§8.2, §9) |
 | GET | `/api/v1/service/users/inactive` | ServiceClient Basic or service token | none (§8.2) |
+| POST | `/api/v1/service/sessions/status` | ServiceClient Basic or service token | none (§8.2, v1.3e) |
 | GET, POST, DELETE | `/api/v1/devices[/{client_id}]` | service token + user token, or user token | none (§9) |
 | various | `/api/v1/admin/*` | admin Bearer (+ `X-SSO-Reauth` for 🔒) | `admin`, `admin_reauth` (§8–10) |
 
@@ -443,8 +450,10 @@ successful one.
 
 ### logout — `POST /api/v1/auth/logout`
 
-Input as refresh. 204 (token blacklisted, cookie cleared; also cookie mode without a cookie). 401 `token_invalid`
-for an invalid/already-used token (cookie still cleared), 400, 401 `invalid_client`, 403 `origin_not_allowed`, 429.
+Input as refresh. 204 (token blacklisted, cookie cleared; also cookie mode without a cookie). Since v1.3e the whole
+session (`sid`) ends: its access tokens are rejected by `/me` and introspect, and `token.revoked {sub, sid,
+reason: "logout"}` is sent to subscribed services (§10). 401 `token_invalid` for an invalid/already-used token
+(cookie still cleared), 400, 401 `invalid_client`, 403 `origin_not_allowed`, 429.
 
 ### logout-all — `POST /api/v1/auth/logout-all`
 
@@ -523,6 +532,7 @@ All rows are implemented. Agreed design (decisions of
 | **Done in v1.2a** `register_service`, admin actions, `sid`, refresh-reuse session revocation | see §3.1, §4 refresh, §5 |
 | **Done in v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
 | **Done in v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
+| **Done in v1.3e** Session-bound long-running jobs | logout ends the whole session and emits `token.revoked {sub, sid, reason:"logout"}`; password change / logout-all emit `token.revoked` without `sid`; services stop the jobs of the ended session(s); `POST /api/v1/service/sessions/status` backstop sweep (§8.2). [DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md) |
 | **Done in v1.3c** Signed webhooks to services (§10) | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
@@ -615,6 +625,7 @@ Service-side endpoints (not under `/admin`):
 |---|---|---|---|
 | `POST /api/v1/auth/service-token` | Basic `client_id:client_secret` | `{"grant_type":"client_credentials"}` | 200 `{"access_token","token_type":"Bearer","expires_in":300}`; bad client 401 `invalid_client`; other grant 400 `unsupported_grant_type` |
 | `GET /api/v1/service/users/inactive` | Basic ServiceClient or Bearer service token | `since` (ISO 8601, required) | 200 `{"users":[{"id","username","event","at"}],"next_since"}` (max 500, oldest first) |
+| `POST /api/v1/service/sessions/status` (v1.3e) | Basic ServiceClient or Bearer service token | `{"sessions":[{"sub":"42","sid":"…"}]}` (1–100) | 200 `{"sessions":[{"sub","sid","active":true}` or `{…,"active":false,"reason"}]}` in request order; reasons `logout`, `refresh_reuse`, `ip_mismatch`, `revoked` (logout-all, password change, admin), `expired`, `user_inactive`, `user_deleted`; 400 `invalid_request`. Backstop sweep for session-bound jobs ([DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md)) |
 | `POST /api/v1/auth/introspect` | Basic ServiceClient | `{"token"}` (service token) | 200 `{"active":true,"token_type":"service","sub":"svc:<id>","subject_client_id","app","perms","iat","exp", …}` or `{"active":false}` |
 
 ### 8.3 Shapes
@@ -713,7 +724,7 @@ Design: [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md). Implemented (v1.3c
 
 Events: `user.suspended {sub}`, `user.reactivated {sub}`, `user.deleted {sub, username}`,
 `token.revoked {sub, reason[, sid]}` (reasons `logout_all`, `password_change`, `suspended`, `admin`, `inactive`,
-`revoked`; with `sid`: `refresh_reuse`, `ip_mismatch`), `permission.changed` (direct grant `{sub, perm, granted}`,
+`revoked`; with `sid`: `logout` (v1.3e), `refresh_reuse`, `ip_mismatch`; one event per session end), `permission.changed` (direct grant `{sub, perm, granted}`,
 group grant `{group, perm, granted}`, membership `{sub, group, granted}`, import `{app, created, updated, deprecated}`),
 `keys.rotated {kids}`.
 

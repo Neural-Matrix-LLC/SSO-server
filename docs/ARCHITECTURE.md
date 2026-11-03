@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Status | Describes the code on `main` at `b749fae` (v1.3d merged: v1.0 core, v1.2a/b, v1.3a admin API, v1.3b devices, v1.3c webhooks, v1.3d admin UI) plus the deploy tooling (`init` service, `deploy.sh`, `deploy_check.sh`). Sections 5–9 describe the v1.0–v1.2 core in depth; the v1.3 features are summarised in §3.2, §4 and §8.10 and specified in their design docs and the [API Reference Manual](API-REFERENCE-MANUAL.md) §8–11. Consumer: llm-wiki-svc `feat/sso-login` |
+| Status | Describes the code on `main` at `b749fae` (v1.3d merged: v1.0 core, v1.2a/b, v1.3a admin API, v1.3b devices, v1.3c webhooks, v1.3d admin UI; v1.3e session-bound jobs, 2026-11-03) plus the deploy tooling (`init` service, `deploy.sh`, `deploy_check.sh`). Sections 5–9 describe the v1.0–v1.2 core in depth; the v1.3 features are summarised in §3.2, §4 and §8.10 and specified in their design docs and the [API Reference Manual](API-REFERENCE-MANUAL.md) §8–11. Consumer: llm-wiki-svc `feat/sso-login` |
 | Audience | Developers building or integrating with the SSO server, reviewers, operators |
 | Supersedes | Nothing. `docs/SSO-server.md` (v1.0 spec), `docs/DESIGN-ADDENDUM-v1.1.md` and `docs/sso-integration-design.md` stay the design history. Where they disagree with this file, the **code** wins and this file describes the code (see §12 for the differences found) |
 
@@ -323,7 +323,7 @@ flowchart TB
 | Models | `sso/models.py` | `ServiceClient` (also devices since v1.3b, `kind`), `UserTokenRevocation`, `RevokedSession` (v1.2a), `AdminReauth`, `AdminAuditLog`, `UserTombstone` (v1.3a), `WebhookEvent`, `WebhookDelivery` (v1.3c), `AuthorizationCode` (phase 5, unused) |
 | Revocation | `sso/revocation.py` | Revoke a user (marker + blacklist) or one session (`sid` family) |
 | Admin REST API | `sso/admin_api.py`, `sso/admin_ops.py`, `sso/stepup.py`, `sso/audit.py` | v1.3a `/api/v1/admin/*`; business rules (guards, last-admin check, step-up, audit) live in `admin_ops` and are shared with the admin UI |
-| Service credentials | `sso/service_auth.py` | v1.3a `POST /api/v1/auth/service-token` (client credentials) and `GET /api/v1/service/users/inactive` |
+| Service credentials | `sso/service_auth.py` | v1.3a `POST /api/v1/auth/service-token` (client credentials) and `GET /api/v1/service/users/inactive`; v1.3e `POST /api/v1/service/sessions/status` (session-bound jobs sweep) |
 | Devices, on-behalf-of | `sso/devices.py`, `sso/onbehalf.py` | v1.3b device registration (`/api/v1/devices`), `private_key_jwt` device tokens, `actor_token` on introspect |
 | Webhooks | `sso/webhooks.py`, `sso/webhook_secrets.py`, `run_webhook_worker` | v1.3c outbox, HMAC-signed delivery with retries, SSRF policy, Fernet-encrypted `notify_secret`; worker heartbeat read by `docker/healthcheck.py --worker` |
 | Admin web UI | `adminui/` | v1.3d server-rendered pages at `SSO_ADMIN_UI_PATH`, own session cookie, `AdminUIGuardMiddleware`, CSP |
@@ -691,9 +691,11 @@ sequenceDiagram
     end
   else valid
     S->>S: blacklist the refresh token
+    S->>S: v1.3e: revoke the session sid (RevokedSession logout, family blacklisted), outbox token.revoked sub, sid, reason logout
     S-->>C: 204, cookie cleared in cookie mode
   end
-  Note over C,S: already issued access tokens stay valid until exp, at most 15 min
+  Note over C,S: v1.3e: the session's access tokens fail at /me and introspect at once; local JWKS verifiers accept them until exp, at most 15 min
+  Note over C,S: services stop the long-running jobs started from that sid (DESIGN-v1.3e-session-bound-jobs.md)
 ```
 
 ### 6.7 Logout everywhere and revocation
@@ -862,7 +864,7 @@ stateDiagram-v2
   }
   Active --> Rotated: refresh succeeds, old refresh blacklisted
   Rotated --> [*]
-  Active --> Blacklisted: logout or logout-all
+  Active --> Blacklisted: logout (v1.3e also ends the session) or logout-all
   Active --> Revoked: logout-all or password change sets revoked_at
   Active --> Expired: refresh token exp passed, 7 days
   Active --> Rejected: user set inactive
@@ -876,7 +878,7 @@ stateDiagram-v2
 |---|---|---|---|
 | Active | accepted | accepted | accepted, rotates |
 | Rotated | accepted until `exp` | accepted until `exp` | 401 `token_invalid` (blacklisted) |
-| Blacklisted (logout) | accepted until `exp` | accepted until `exp` | 401 `token_invalid` |
+| Blacklisted (logout) | accepted until `exp` | 401 / `active:false` (v1.3e: the session is revoked) | 401 `token_invalid` |
 | Revoked (`revoked_at`) | **accepted until `exp`** (verifiers do not know `revoked_at`) | 401 / `active:false` | 401 `token_invalid` |
 | User inactive | accepted until `exp` | 403 `account_inactive` / `active:false` | 403 `account_inactive` |
 | Expired | 401 | 401 / `active:false` | 401 `token_invalid` |
@@ -1395,7 +1397,11 @@ Same input as refresh.
 | 403 | `origin_not_allowed` | cookie mode, bad `Origin` |
 | 429 | `rate_limited` | scope `refresh` |
 
-Logout does not check `is_active` or `revoked_at`. Access tokens are not affected.
+Logout does not check `is_active` or `revoked_at`. Since v1.3e a token with a `sid` ends the whole session
+(`revoke_session(user, sid, "logout")`): `RevokedSession` row, the session's refresh tokens blacklisted, its access
+tokens rejected by `/me` and introspect, step-up tokens dropped, and `token.revoked {sub, sid, reason: "logout"}`
+in the outbox (same transaction). A token without `sid` is only blacklisted. Services stop the jobs started from
+that session ([DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md)).
 
 ### 8.4 POST /api/v1/auth/logout-all
 
@@ -1484,7 +1490,7 @@ healthcheck (`docker/healthcheck.py`) sends the right `Host` and `X-Forwarded-Pr
 ### 8.10 Admin
 
 **v1.3a–c endpoints** (admin REST API `/api/v1/admin/*`, `POST /api/v1/auth/service-token`,
-`GET /api/v1/service/users/inactive`, `/api/v1/devices`, webhook admin endpoints) are specified in the
+`GET /api/v1/service/users/inactive`, `POST /api/v1/service/sessions/status` (v1.3e), `/api/v1/devices`, webhook admin endpoints) are specified in the
 [API Reference Manual](API-REFERENCE-MANUAL.md) §8–10; this document does not repeat them.
 
 Django admin at `/<SSO_ADMIN_PATH>` (default `sso-admin/`; a non-default value is advised). Staff session login,
@@ -1674,7 +1680,7 @@ Compose / runtime only (read by `docker-compose.yml`, nginx, the `init` service 
 | Throttle bypass / IP spoofing via headers | XFF read only from `SSO_TRUSTED_PROXIES` peers (v1.2b; deprecated `NUM_PROXIES` default 0), nginx overwrites XFF, `client_ip` only from authenticated ServiceClients | `clientip.py`, `settings.py`, `delegation.py` |
 | Copied token replayed from another host | v1.2b `cip` IP binding (`WARNING` logs, `ENFORCE` revokes the session); limits in design §4.3 (NAT, mobile, spoofing on the same network) | `ipbinding.py`, `views.py` |
 | User enumeration | same 401 for unknown user, one hash on every path, dummy hash for unknown ServiceClients | `serializers.check_credentials`, `authentication._dummy_check` |
-| Session after compromise | `logout-all`, password change and suspend set `revoked_at`; refresh-token reuse revokes the session (`sid`) | `views.LogoutAllView`, `signals.py`, `revocation.py`, `views.handle_refresh_reuse` |
+| Session after compromise | `logout-all`, password change and suspend set `revoked_at`; refresh-token reuse and (v1.3e) logout revoke the session (`sid`) | `views.LogoutAllView`, `signals.py`, `revocation.py`, `views.handle_refresh_reuse` |
 | Container compromise | non-root uid 10001 (fatal as root), read-only root fs, `cap_drop ALL`, `no-new-privileges`, keys mounted read-only, Redis on an internal network | `Dockerfile`, `docker-compose.yml` |
 | Secret leakage in logs | JSON log lines without tokens/passwords; key errors never print key contents | `sso/logs.py`, `sso/keys.py` |
 

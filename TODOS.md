@@ -12,6 +12,8 @@ Agreed scope for v1.2a / v1.2b / v1.3c is in [docs/DESIGN-v1.2-requirements.md](
 - [ ] **Hosted login page + authorization-code flow with PKCE** (uses `ServiceClient.redirect_uris`; adds `authorization_endpoint` to discovery).
 - [ ] **Client push notifications (SSE or WebSocket)** — only if clients need proactive "token expired/revoked" messages; today clients learn by rejection (401). Services already get signed webhooks (v1.3c).
 - [ ] **Cross-tab refresh coordination in the browser helper** (BroadcastChannel / Web Locks) so the losing tab is not logged out.
+- [ ] **Logout that keeps running jobs alive** (future SSO release, decided 2026-11-03) — today (v1.3e) logout stops the jobs started from that session, so users keep the front end signed in while jobs run. Option: `POST /auth/logout {"keep_jobs": true}` → `token.revoked` with `keep_jobs: true`, services detach the jobs from the session (still stopped by suspend / delete / password change); sketch in [DESIGN-v1.3e §6](docs/DESIGN-v1.3e-session-bound-jobs.md#6-future-option-log-out-and-keep-the-jobs-not-implemented).
+- [ ] **Password changes made in myFinance end SSO sessions and jobs** — the SSO cannot see them (other process; the hash also changes on every re-hash). Needs myFinance to call the SSO (e.g. an admin/service `logout-all` for the user) or the SSO password-change endpoint above to replace myFinance's form.
 - [ ] **Hosted self-service account page** (profile, active sessions list, "log out this session").
 - [ ] **Webhook admin tooling** — redeliver failed events, rotate `notify_secret` (API exists since v1.3c; UI in v1.3d).
 - [ ] **MFA for admin logins** (TOTP or WebAuthn) for the v1.3d admin UI — open question whether it is needed before go-live.

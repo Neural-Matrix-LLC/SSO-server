@@ -3,6 +3,46 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-11-03 — v1.3e: long-running jobs bound to the login session (logout / password change stop them)
+
+**Goal.** Decision (Thomas): a long-running job (SGMCP strategy, webhook subscription, auto-trade job) lives as long
+as the login session that started it. Logout stops the jobs of that session; logout-all and password change stop
+all the user's jobs. Until a future release offers "log out but keep my jobs", users keep the front end signed in.
+
+**Root cause (gap).** Services run such jobs under their own service token with `owner_sub` (ECOSYSTEM §4.1), and
+only suspend / delete ended them. A plain logout only blacklisted one refresh token: the session's access tokens
+stayed valid at introspect until `exp` and no webhook told services that the user had logged out.
+
+**Implementation.**
+- `LogoutView`: a token with `sid` now calls `revoke_session(user, sid, "logout")` (session revoked, family
+  blacklisted, step-up dropped, `token.revoked {sub, sid, reason: "logout"}` in the outbox). Access tokens of the
+  session fail at `/me` and introspect at once. Tokens without `sid` are only blacklisted, as before.
+- `revoke_session` emits only when it ends the session (a replay after logout keeps reason `logout`, no second
+  event); the `session_revoked` log line is INFO for `logout`, WARNING otherwise.
+- New `POST /api/v1/service/sessions/status` (ServiceClient Basic or service token, 1–100 `{sub, sid}`):
+  `active` or `reason` (`logout`, `refresh_reuse`, `ip_mismatch`, `revoked`, `expired`, `user_inactive`,
+  `user_deleted`); backstop sweep for lost webhooks and idle-expired sessions. `revocation.session_states()`.
+- Password change: no server change (already emits `token.revoked {sub, reason: password_change}` without `sid`);
+  now part of the contract. Known limit: changes written by myFinance are not seen (TODOS).
+- No migration, no new setting or env var.
+
+**Docs.** New `docs/DESIGN-v1.3e-session-bound-jobs.md`; ECOSYSTEM-INTEGRATION §4.1, §5.6, §8.2, §9.1, §10 round 7
+(decision 20); API manual §2.6, logout, §3.3, §7, §8.2, §4 table, §10; DESIGN-v1.3c event table; ARCHITECTURE §6.6,
+§7 token states, §8.3, components, status; README design-doc list, service endpoints, §9 test mapping; TODOS
+(keep-jobs logout option, myFinance password changes); `qa/TEST-PLAN.md` LOGOUT-03.
+
+**Files.** `sso/views.py`, `sso/revocation.py`, `sso/service_auth.py`, `ssoproject/urls.py`,
+`sso/tests/test_session_bound_jobs_v13e.py` (new), `sso/tests/test_admin_api_v13a.py`, `qa/tests/test_logout.py`.
+
+**Test coverage.** New `sso/tests/test_session_bound_jobs_v13e.py` (logout, password change, session status;
+list in the design doc §7). Changed expectations: `test_plain_logout_kills_reauth` (the access token itself is now
+`token_invalid` after logout) and black-box `test_LOGOUT_03` (`/me` after logout is 401, was 200).
+End to end: `sso/tests/dummy_job_service.py` (a "dummy job" service, reference implementation for SGMCP / FUND:
+introspect at start, `sso_client.WebhookReceiver`, status sweep) and `sso/tests/test_dummy_jobs_v13e.py` (18 cases:
+logout, cookie logout, refresh keeps jobs, password change, admin set-password, same password, logout-all, lost
+webhook + sweep, idle expiry, batching and SSO outage, suspend / reactivate, delete, duplicate and badly signed
+deliveries, refused starts, on-behalf-of). Mutation check: with the pre-v1.3e logout, the 8 logout cases fail.
+
 ## 2026-10-29 — docs: manual curl health and login check in SSO-Setup
 
 **Goal.** Record the curl commands that were verified against the test server at 192.168.0.213 (IP address,

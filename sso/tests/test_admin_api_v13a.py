@@ -372,7 +372,8 @@ def test_plain_logout_kills_reauth(api, admin_user, make_user):
     assert api.post("/api/v1/auth/logout", {"refresh_token": refresh}, format="json").status_code == 204
     assert not AdminReauth.objects.exists()
     v = make_user(username="v", email="v@x.org", groups=())
-    assert api.delete(f"{A}/users/{v.pk}", **H(t, rt)).json()["error"] == "reauth_required"
+    # v1.3e: logout ends the whole session, so the access token itself is dead now (was reauth_required)
+    assert api.delete(f"{A}/users/{v.pk}", **H(t, rt)).json()["error"] == "token_invalid"
 
 
 def test_logout_all_kills_reauth(api, at, reauth, admin_user):

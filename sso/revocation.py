@@ -1,4 +1,5 @@
-"""Revoking tokens: whole user (logout-all, suspend, password change) or one session (sid family).
+"""Revoking tokens: whole user (logout-all, suspend, password change) or one session (sid family: logout,
+refresh-token reuse, IP mismatch).
 
 * User: ``UserTokenRevocation`` marker (every token with an earlier ``iat`` is dead: access tokens at
   introspect / ``/me``, refresh tokens at ``/refresh``) plus all outstanding refresh tokens blacklisted.
@@ -113,18 +114,64 @@ def revoke_session(user, sid: str, reason: str) -> int:
         try:
             with transaction.atomic():
                 RevokedSession.objects.create(sid=sid, user=user, reason=reason)
+            new = True
         except IntegrityError:
-            pass  # already revoked
+            new = False  # already revoked (e.g. a token replayed after logout): keep the first reason
         family = [t for t in _live_outstanding(user) if token_sid(t.token) == sid]
         BlacklistedToken.objects.bulk_create([BlacklistedToken(token=t) for t in family], ignore_conflicts=True)
         drop_reauth(user, sid)
-        from .webhooks import emit
+        if new:  # v1.3e: one token.revoked per session end; services stop the session's jobs on it
+            from .webhooks import emit
 
-        emit("token.revoked", sub=str(user.pk), sid=sid, reason=reason)
+            emit("token.revoked", sub=str(user.pk), sid=sid, reason=reason)
     _cache_revoked(sid)
-    logger.warning(json.dumps({"event": "session_revoked", "reason": reason, "user_id": user.pk,
-                               "tokens_blacklisted": len(family)}, sort_keys=True))
+    # a user's own logout is routine (v1.3e); every other session revocation is a security signal
+    log = logger.info if reason in ROUTINE_SESSION_REASONS else logger.warning
+    log(json.dumps({"event": "session_revoked", "reason": reason, "user_id": user.pk,
+                    "tokens_blacklisted": len(family)}, sort_keys=True))
     return len(family)
+
+
+ROUTINE_SESSION_REASONS = frozenset({"logout"})
+
+
+def _claims(raw: str) -> dict:
+    try:
+        out = jwt.decode(raw, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
+def session_states(user, sids) -> dict[str, str | None]:
+    """v1.3e: state of each login session ``sid`` of ``user``. ``None`` = the session is alive; otherwise the
+    reason it ended: the ``RevokedSession`` reason (``logout``, ``refresh_reuse``, ``ip_mismatch``, …),
+    ``revoked`` (every token of the user revoked: logout-all, password change, admin), or ``expired`` (no live
+    refresh token left: idle past the refresh lifetime, or an unknown sid). The caller checks the user itself.
+
+    A session is alive while it has a refresh token that is unexpired, not blacklisted and issued after the
+    user's revocation epoch; refresh keeps the ``sid``, so a session lives as long as the client keeps refreshing.
+    """
+    from .tokens import revocation_epoch
+
+    wanted = set(sids)
+    out: dict[str, str | None] = dict.fromkeys(wanted, "expired")
+    revoked = dict(RevokedSession.objects.filter(user=user, sid__in=wanted).values_list("sid", "reason"))
+    epoch = revocation_epoch(user)
+    rows = (OutstandingToken.objects.filter(user=user, expires_at__gt=timezone.now())
+            .values_list("token", "blacklistedtoken__id"))
+    for raw, blacklisted in rows:
+        c = _claims(raw)
+        sid = c.get("sid")
+        if sid not in wanted or sid in revoked or out[sid] is None:
+            continue
+        iat = c.get("iat")
+        if epoch is not None and (not isinstance(iat, (int, float)) or iat < epoch):
+            out[sid] = "revoked"
+        elif not blacklisted:
+            out[sid] = None
+    out.update(revoked)
+    return out
 
 
 def drop_reauth(user, sid: str | None = None) -> int:

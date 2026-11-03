@@ -29,10 +29,12 @@ def test_LOGOUT_02_cookie_logout_clears_cookie_and_blacklists(sso, cfg, pool_use
     assert_error(sso.refresh_cookie(c.value, origin=cfg.allowed_origin), 401, "token_invalid")
 
 
-def test_LOGOUT_03_access_token_still_valid_after_logout(sso, native_session):
-    """Spec 6.3: issued access tokens stay valid until expiry (<= 15 min)."""
+def test_LOGOUT_03_access_token_rejected_after_logout(sso, native_session):
+    """v1.3e (DESIGN-v1.3e-session-bound-jobs.md, supersedes spec 6.3 "valid until expiry"): logout ends the whole
+    session, so the session's access tokens are rejected at once by /me and introspect. Local JWKS verifiers still
+    accept them until exp (<= 15 min)."""
     assert sso.logout_native(native_session["refresh_token"]).status_code == 204
-    assert sso.me(native_session["access_token"]).status_code == 200
+    assert_error(sso.me(native_session["access_token"]), 401, "token_invalid")
 
 
 def test_LOGOUT_04_access_token_rejected_at_logout(sso, native_session):

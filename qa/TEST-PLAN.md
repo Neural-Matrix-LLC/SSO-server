@@ -151,7 +151,7 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 |---|---|---|---|---|
 | LOGOUT-01 | native session | POST `{refresh_token}` | 204, empty body; that refresh token then gets 401 | A |
 | LOGOUT-02 | browser session | POST + cookie + allowed Origin | 204; Set-Cookie clears `sso_refresh` (empty value, Max-Age=0 or past Expires, same Path `/api/v1/auth/` and Domain); the old cookie then gets 401 | A |
-| LOGOUT-03 | | logout, then call `/me` with the access token | still 200 (access tokens stay valid until expiry) | A |
+| LOGOUT-03 | | logout, then call `/me` with the access token | 401 `token_invalid`: v1.3e logout ends the whole session (was: still 200 until expiry) | A |
 | LOGOUT-04 | | access token in body | 401 `token_invalid`; the real refresh token still works | A |
 | LOGOUT-05 | | cookie mode (allowed Origin), no token | 204, empty body, `sso_refresh` cleared (Max-Age=0, Path `/api/v1/auth/`). Q-05 resolved | A |
 | LOGOUT-05b | | cookie mode, no token, **no Origin** | 403 `origin_not_allowed` (Origin check still runs first) | A |

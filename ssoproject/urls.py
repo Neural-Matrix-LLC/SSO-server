@@ -19,6 +19,7 @@ urlpatterns = [
     # v1.3a (docs/DESIGN-v1.3a-admin-api.md)
     path("api/v1/auth/service-token", service_auth.ServiceTokenView.as_view(), name="sso-service-token"),
     path("api/v1/service/users/inactive", service_auth.InactiveUsersView.as_view(), name="sso-inactive-users"),
+    path("api/v1/service/sessions/status", service_auth.SessionStatusView.as_view(), name="sso-session-status"),
     path("api/v1/admin/reauth", adm.ReauthView.as_view(), name="sso-admin-reauth"),
     path("api/v1/admin/users", adm.UsersView.as_view(), name="sso-admin-users"),
     path("api/v1/admin/users/<int:pk>", adm.UserView.as_view(), name="sso-admin-user"),

@@ -156,3 +156,56 @@ class InactiveUsersView(APIView):
         next_since = _iso(events[-1]["at"]) if events else _iso(since)
         return Response({"users": [{**e, "at": _iso(e["at"])} for e in events], "next_since": next_since},
                         headers={"Cache-Control": "no-store"})
+
+
+SESSION_STATUS_LIMIT = 100
+
+
+class SessionStatusView(APIView):
+    """v1.3e: are these login sessions still alive? The backstop sweep for session-bound jobs
+    (DESIGN-v1.3e-session-bound-jobs.md): a service holding long-running jobs started from user sessions asks for
+    the ``(sub, sid)`` of each running job and stops the jobs whose session ended. Covers lost ``token.revoked``
+    webhooks and sessions that ended silently (idle past the refresh lifetime)."""
+
+    authentication_classes = [ServiceClientBasicAuthentication, ServiceTokenAuthentication]
+
+    def get_authenticate_header(self, request):
+        return 'Basic realm="sso-service"'
+
+    def post(self, request):
+        if not isinstance(request.user, ServicePrincipal):
+            raise InvalidClient()
+        items = request.data.get("sessions") if isinstance(request.data, dict) else None
+        if not isinstance(items, list) or not items:
+            raise InvalidRequest("sessions must be a non-empty list of {sub, sid}.")
+        if len(items) > SESSION_STATUS_LIMIT:
+            raise InvalidRequest(f"At most {SESSION_STATUS_LIMIT} sessions per request.")
+        wanted: list[tuple[str, str]] = []
+        for it in items:
+            sub, sid = (it.get("sub"), it.get("sid")) if isinstance(it, dict) else (None, None)
+            if not (isinstance(sub, str) and sub.isascii() and sub.isdigit() and len(sub) <= 20
+                    and isinstance(sid, str) and 0 < len(sid) <= 64):
+                raise InvalidRequest("Each session needs sub (numeric string) and sid (string, max 64).")
+            wanted.append((sub, sid))
+        from django.contrib.auth.models import User
+
+        from .revocation import session_states
+
+        by_user: dict[str, set[str]] = {}
+        for sub, sid in wanted:
+            by_user.setdefault(sub, set()).add(sid)
+        users = {str(u.pk): u for u in User.objects.select_related("sso_token_revocation")
+                 .filter(pk__in=[int(s) for s in by_user])}
+        state: dict[tuple[str, str], str | None] = {}
+        for sub, sids in by_user.items():
+            u = users.get(sub)
+            if u is None or not u.is_active:
+                reason = "user_inactive" if u is not None else "user_deleted"
+                state.update({(sub, sid): reason for sid in sids})
+                continue
+            state.update({(sub, sid): r for sid, r in session_states(u, sids).items()})
+        out = []
+        for sub, sid in wanted:
+            reason = state[(sub, sid)]
+            out.append({"sub": sub, "sid": sid, "active": reason is None, **({"reason": reason} if reason else {})})
+        return Response({"sessions": out}, headers={"Cache-Control": "no-store"})

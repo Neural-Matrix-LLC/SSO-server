@@ -6,7 +6,7 @@
 
 | | |
 |---|---|
-| Status | **Design.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10); phase order changed 2026-10-15 (§9.1: SSO complete → SGMCP → FUND); **admin UI moved from FUND to the SSO server** 2026-10-15 (§7, new phase v1.3d, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)). v1.3a/b/c designed in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md), [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md), [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md); v1.3d designed in [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md). **v1.3a–d are implemented and merged to `main`** (2026-10-16): the SSO-server completion phase is done; next are SGMCP v1.4 and FUND v1.5 |
+| Status | **Design.** Drafted 2026-10-13; Thomas's answers applied 2026-10-14 (§10); phase order changed 2026-10-15 (§9.1: SSO complete → SGMCP → FUND); **admin UI moved from FUND to the SSO server** 2026-10-15 (§7, new phase v1.3d, [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md)). v1.3a/b/c designed in [DESIGN-v1.3a-admin-api.md](DESIGN-v1.3a-admin-api.md), [DESIGN-v1.3b-devices-on-behalf-of.md](DESIGN-v1.3b-devices-on-behalf-of.md), [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md); v1.3d designed in [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md). **v1.3a–d are implemented and merged to `main`** (2026-10-16): the SSO-server completion phase is done; next are SGMCP v1.4 and FUND v1.5. **v1.3e** (2026-11-03): long-running jobs bound to the login session ([DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md)) |
 | Scope | How the SSO server, FUND-Financial-Research (frontend + backend services), Smart_Gateway_MCP (SGMCP) and llm-wiki-svc fit together |
 | Sources read | `Neural-Matrix-LLC/FUND-financial-Research` `main` @ `dfffe5e` (2026-09-02), `Neural-Matrix-LLC/Smart_Gateway_MCP` `main` @ `39b3acd` (2026-10-08), `llm-wiki-svc` `feat/sso-login`, this repo `feat/v1.2a` @ `107ae38` |
 
@@ -301,9 +301,15 @@ user token with `ip = X-SSO-Client-IP`; the SSO accepts that IP only because a s
 as today's `client_ip` from a ServiceClient). The effective principal is the **user**, recorded with `via=<client_id>`
 in logs. Services must not forward a user token they did not receive in the current request.
 
-**Long-running work** (a strategy running for days, a scheduled job) does not keep the user token: the service runs
-it under its own service identity and records the `owner_sub` of the user who started it. Suspend handling (§5.6)
-uses that owner. OAuth token exchange / delegated tokens (RFC 8693) are not planned (TODOS).
+**Long-running work** (a strategy running for days, a scheduled job, a webhook subscription) does not keep the user
+token: the service runs it under its own service identity and records the `owner_sub` **and the `sid`** (login
+session, from introspect) of the user who started it. **[Decision 2026-11-03, v1.3e]** The job lives as long as that
+session: on logout (`token.revoked {sub, sid, reason: logout}`) the service stops the jobs of that `sid`; on
+logout-all or a password change (`token.revoked` without `sid`) all the user's jobs; a 60 s
+`POST /api/v1/service/sessions/status` sweep catches lost webhooks and sessions that expired idle. Until the future
+"log out but keep my jobs" option exists, **users keep the front end signed in while their jobs run**. Suspend
+handling (§5.6) still stops and deletes. Details: [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md).
+OAuth token exchange / delegated tokens (RFC 8693) are not planned (TODOS).
 
 ```mermaid
 sequenceDiagram
@@ -319,8 +325,9 @@ sequenceDiagram
   GW->>GW: verify S locally (JWKS), S may delegate
   GW->>SSO: introspect U, ip 203.0.113.7, require gateway_trade
   SSO-->>GW: active, ip_match true, allowed
-  GW-->>AT: PENDING, owner_sub = user
+  GW-->>AT: PENDING, owner_sub = user, owner_sid = sid (v1.3e)
   Note over AT,GW: Monitor loop later: Bearer S only, no user token, read tools only
+  Note over GW,SSO: v1.3e: token.revoked for that sid (logout) or without sid (logout-all, password change) stops the strategy
 ```
 
 Docker note: `fund-frontend` publishes `3000:80` with Docker's default userland proxy, so nginx may see the Docker
@@ -607,6 +614,13 @@ If a PC is offline at suspend time, the open-order cancels cannot reach the brok
 `CANCEL_PENDING`, the strategies are still deleted (no further orders can be sent, the device can never reconnect), and
 the admin and user are told which orders may still be open at the broker.
 
+**Session end [Decision 2026-11-03, v1.3e].** Logout, logout-all and password change **stop** (not delete) the cloud
+strategies started from the ended session(s): open orders cancelled through the relay, **positions untouched**,
+history kept, state `STOPPED (session_ended)`, user notified; the user restarts them after signing in again. PCs and
+device credentials are not touched (the device is paired to the user, not to a session). Triggers: `token.revoked`
+(with `sid`: that session; without: all of the user's sessions) plus the 60 s session-status sweep
+([DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md) §5).
+
 ### 5.7 Trade and order history is always kept; FUND cloud is the system of record [Decisions 2026-10-14 rounds 3-4]
 
 All orders, fills/trades and their strategy context are kept for audit **no matter what**: suspend, strategy
@@ -854,8 +868,12 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-  L["User logout in FUND"] --> R1["SSO blacklists refresh token, clears cookie"]
-  R1 --> R2["Access token valid until exp (max 15 min) unless logout-all"]
+  L["User logout in FUND"] --> R1["SSO ends the session sid: refresh tokens blacklisted, cookie cleared, access tokens rejected by introspect (v1.3e)"]
+  R1 --> R2["Local JWKS checks still pass until exp (max 15 min)"]
+  R1 --> R3["v1.3e webhook token.revoked sub, sid, reason logout (+ 60 s session-status sweep)"]
+  R3 --> R4["Jobs started from that session stopped: strategies cancel open orders, positions untouched"]
+  P["Logout-all or password change"] --> P1["All sessions end, token.revoked without sid"]
+  P1 --> R4
   S["Admin suspend in SSO /admin (v1.3d) or admin API"] --> S1["SSO: is_active false, revoke all tokens and sessions"]
   S1 --> S2["Next introspect from any service: active false (cache max 30 s; trading calls uncached)"]
   S1 --> S3["v1.3c webhook user.suspended to registered services"]
@@ -867,8 +885,9 @@ flowchart LR
   S2 --> X
 ```
 
-Logout of one FUND tab logs out that browser session (refresh cookie gone); other devices stay logged in.
-"Log out everywhere" = `POST /auth/logout-all`.
+Logout of one FUND tab logs out that browser session (refresh cookie gone) and stops the jobs started from it;
+other devices and their jobs stay. "Log out everywhere" = `POST /auth/logout-all` (stops all the user's jobs).
+To keep jobs running, keep the front end signed in; "log out but keep my jobs" is a future option (TODOS).
 
 ---
 
@@ -913,6 +932,7 @@ flowchart LR
 | **v1.3b** | SSO, sso-client | **Device credentials** for the local broker gateway (`POST /api/v1/devices`, `kind=device`, owner, Ed25519 `private_key_jwt`, revoked on suspend, §5.2); **on-behalf-of** (`X-SSO-User-Token` + `X-SSO-Client-IP` with a service token, §4.1); `sso-client` 0.2 (service tokens, on-behalf-of) | v1.3a |
 | **v1.3c** | SSO, sso-client | **Signed webhooks** (`user.suspended`, `user.reactivated`, `user.deleted`, `token.revoked`, `permission.changed`, `keys.rotated`), `notify_secret` encrypted at rest, receiver helper in `sso-client` | v1.3a |
 | **v1.3d** | SSO | **Admin web UI at `/admin` on the SSO server** (decision 2026-10-15; moved from FUND v1.5b): server-rendered Django templates on a shared domain layer `sso/admin_ops.py`; session login (active + `is_staff` + `sso_admin`/superuser), CSRF, IP binding, step-up page; users, groups, permissions, apps + import (dry-run diff), services, devices, webhooks, audit; audit `channel` column; nginx allow-list + optional admin hostname; strict CSP. Design: [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md). **SSO server complete** | v1.3a–c |
+| **v1.3e** | SSO | **Session-bound long-running jobs** (decision 2026-11-03): logout ends the whole session and emits `token.revoked {sub, sid, reason: logout}`; password change / logout-all emit without `sid`; `POST /api/v1/service/sessions/status` sweep. Design: [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md). Implemented | v1.3c |
 | **v1.4** | SGMCP (+ relay) | **SGMCP and the local broker gateway on full SSO** (§5): SGMCP's `sso_permissions.py` imported; SGMCP API/MCP behind `sso-client` (user tokens for people, service tokens for agents); `gateway-relay` + pairing + device credentials + outbound WSS from the local broker gateway; one live connection per broker account (cold standby); `WAITING_GATEWAY`/halt + heartbeats; suspend (webhook + sweep) stops and deletes strategies, disconnects PCs, **positions untouched**; **`delete_strategy` soft delete, history always kept** (§5.7). Until FUND migrates, strategies are submitted through SGMCP's own API/MCP with an SSO token | v1.3a–d |
 | **v1.5a** | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4), start with `both`; agents on `sso-client`, one ServiceClient per service; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.3a–c, v1.4 |
 | **v1.5b** | FUND | FUND UI for cloud strategies (submit, broker pick, stay-on warnings, §5) | v1.5a |
@@ -921,7 +941,8 @@ flowchart LR
 
 Old → new labels (documents written before 2026-10-15 used the old ones): v1.3a (SSO) → v1.3a + v1.3b (devices,
 on-behalf-of); v1.3b (FUND auth) → v1.5a; v1.3c (FUND admin UI) → v1.5b; v1.3d (FUND + SGMCP) → v1.4 (SGMCP part) +
-v1.5b (FUND UI part); v1.3e → v1.5c; v1.4 (webhooks) → v1.3c. "Interim suspend calls from FUND `/admin`" are no longer
+v1.5b (FUND UI part); v1.3e → v1.5c; v1.4 (webhooks) → v1.3c. Since 2026-11-03 the label v1.3e names the
+session-bound jobs change of the SSO (above), not FUND's cutover. "Interim suspend calls from FUND `/admin`" are no longer
 needed: webhooks (v1.3c) exist before FUND migrates; the 60 s sweep stays as the safety net. **2026-10-15 (later):**
 the admin UI left v1.5b and became the SSO-side **v1.3d** (the label v1.3d is reused; the old "v1.3d (FUND + SGMCP)"
 mapping above refers to the pre-renumbering plan).
@@ -940,6 +961,13 @@ marked **[Proposal]** in this document (e.g. `WAITING_GATEWAY` timings, pairing 
 implementation defaults to be confirmed during review of each phase, not open design questions.
 
 ## 10. Decisions (2026-10-14)
+
+### Round 7 (2026-11-03)
+
+20. **Long-running jobs are bound to the login session that started them** (v1.3e, §4.1, §5.6, §8.2). Logout stops
+    the jobs of that session; logout-all and password change stop all the user's jobs (stop, not delete; positions
+    untouched). Until a future SSO release offers "log out but keep my jobs", users keep the front end signed in while
+    their jobs run. Supersedes the 2026-10-14 reading that only suspend ends long-running work.
 
 ### Round 6 (2026-10-15)
 

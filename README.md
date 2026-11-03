@@ -21,7 +21,7 @@ sign-up, password reset, admin MFA ([TODOS.md](TODOS.md)).
 | [docs/SSO-Setup.md](docs/SSO-Setup.md) | **Setup manual**: step by step on a Linux/WSL host, VPS from images only, DB upgrades, troubleshooting |
 | [docs/API-REFERENCE-MANUAL.md](docs/API-REFERENCE-MANUAL.md) | **API** for client and service developers: endpoints, claims, error codes, admin API, devices, webhooks |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **Architecture**: components, data model, workflows, failure handling, every environment variable (§10), security and deployment view, design decisions (§11.4), open questions (§12) |
-| Design docs | [v1.0 spec](docs/SSO-server.md), [addendum v1.1](docs/DESIGN-ADDENDUM-v1.1.md), [app permissions](docs/sso-integration-design.md), [v1.2](docs/DESIGN-v1.2-requirements.md), [v1.3a admin API](docs/DESIGN-v1.3a-admin-api.md), [v1.3b devices](docs/DESIGN-v1.3b-devices-on-behalf-of.md), [v1.3c webhooks](docs/DESIGN-v1.3c-webhooks.md), [v1.3d admin UI](docs/DESIGN-v1.3d-admin-ui.md), [sso-client library](docs/SSO-CLIENT-LIBRARY-DESIGN.md), [ecosystem integration](docs/ECOSYSTEM-INTEGRATION.md) |
+| Design docs | [v1.0 spec](docs/SSO-server.md), [addendum v1.1](docs/DESIGN-ADDENDUM-v1.1.md), [app permissions](docs/sso-integration-design.md), [v1.2](docs/DESIGN-v1.2-requirements.md), [v1.3a admin API](docs/DESIGN-v1.3a-admin-api.md), [v1.3b devices](docs/DESIGN-v1.3b-devices-on-behalf-of.md), [v1.3c webhooks](docs/DESIGN-v1.3c-webhooks.md), [v1.3d admin UI](docs/DESIGN-v1.3d-admin-ui.md), [v1.3e session-bound jobs](docs/DESIGN-v1.3e-session-bound-jobs.md), [sso-client library](docs/SSO-CLIENT-LIBRARY-DESIGN.md), [ecosystem integration](docs/ECOSYSTEM-INTEGRATION.md) |
 | [devops/DEPLOYMENT-PLAN.md](devops/DEPLOYMENT-PLAN.md) | Deployment plan: environments, secrets, rotation runbook, rollout and rollback |
 | [qa/TEST-PLAN.md](qa/TEST-PLAN.md), `qa/RESULTS-*.md` | Black-box test plan and results per release |
 | [HISTORY.md](HISTORY.md), [TODOS.md](TODOS.md) | Change log; future items |
@@ -194,7 +194,7 @@ Full reference: [API-REFERENCE-MANUAL.md](docs/API-REFERENCE-MANUAL.md). All JSO
 | Area | Endpoints |
 |---|---|
 | User auth | `POST /api/v1/auth/login`, `/refresh`, `/logout`, `/logout-all`; `GET /api/v1/auth/me` |
-| Services | `POST /api/v1/auth/introspect` (Basic), `POST /api/v1/auth/service-token`, `GET /api/v1/service/users/inactive` |
+| Services | `POST /api/v1/auth/introspect` (Basic), `POST /api/v1/auth/service-token`, `GET /api/v1/service/users/inactive`, `POST /api/v1/service/sessions/status` (v1.3e) |
 | Devices | `POST`/`GET /api/v1/devices`, `DELETE /api/v1/devices/{client_id}` |
 | Admin | `/api/v1/admin/*`: users, groups, permissions, services, apps import, devices, webhooks, audit, reauth |
 | Public | `GET /.well-known/jwks.json`, `/.well-known/openid-configuration`, `/healthz` |
@@ -209,6 +209,7 @@ Full reference: [API-REFERENCE-MANUAL.md](docs/API-REFERENCE-MANUAL.md). All JSO
 | throttling | `test_throttle_per_ip`, `test_throttle_per_username_across_ips`, `test_throttle_uses_x_forwarded_for_with_one_proxy`, `test_x_forwarded_for_ignored_with_zero_proxies`; fail-fast cache: `test_keys_settings.py::test_settings_fail_fast_without_shared_cache` |
 | refresh rotation (old token rejected on reuse) | `test_token_flow.py::test_refresh_rotation_old_token_rejected_on_reuse`, `test_cookie_mode.py::test_cookie_refresh_with_allowed_origin_rotates_cookie` |
 | logout blacklists | `test_logout_blacklists_refresh_token`, `test_cookie_logout_checks_origin_then_clears_cookie` |
+| v1.3e: logout / password change end the session and stop its jobs | `test_session_bound_jobs_v13e.py::test_logout_ends_the_session_but_not_other_sessions`, `test_logout_emits_token_revoked_with_sid_and_delivers_it`, `test_password_change_ends_every_session_and_emits_without_sid`, `test_status_*`; dummy-job end to end: `test_dummy_jobs_v13e.py` |
 | logout-all and introspect after revocation | `test_logout_all_blacklists_everything_and_revokes`, `test_introspect.py::test_introspect_inactive_after_logout_all` |
 | access token rejected at /refresh | `test_access_token_rejected_at_refresh` |
 | refresh token rejected by the §8.2 verifier | `test_verifier.py::test_verifier_rejects_refresh_token` |
