@@ -23,9 +23,11 @@ function accept(data) {
 
 export const login   = (username, password) => call("/api/v1/auth/login", { username, password, client: "browser" }).then(accept);
 export const refresh = () => call("/api/v1/auth/refresh").then(accept);
-export async function logout() {
+// keepJobs (v1.3f): "log out, keep my jobs running"; services detach the session's long-running jobs instead of
+// stopping them. Default: logout stops them (v1.3e).
+export async function logout({ keepJobs = false } = {}) {
   clearTimeout(refreshTimer); accessToken = null; user = null;
-  await call("/api/v1/auth/logout").catch(() => {});
+  await call("/api/v1/auth/logout", keepJobs ? { keep_jobs: true } : {}).catch(() => {});
 }
 export const currentUser = () => user;
 export const ssoBase = () => SSO;

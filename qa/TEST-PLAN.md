@@ -158,6 +158,8 @@ passwords or tokens (helper `assert_error`). TTL values default to 900 s (access
 | LOGOUT-06 | | garbage token | 401 `token_invalid` | A |
 | LOGOUT-07 | | logout twice with the same token | 204 or 401? (Q-06) | S |
 | LOGOUT-08 | 2 sessions of one user | log out session A | session B's refresh token still works | A |
+| LOGOUT-09 | native session | POST `{refresh_token, keep_jobs: true}` | 204; `/me` with the access token and `/refresh` both 401 `token_invalid` (the session ends; services detach its jobs, v1.3f) | A |
+| LOGOUT-10 | native session | `keep_jobs` = `"true"`, `1`, `null` | 400 `invalid_request`; the refresh token still works | A |
 
 ### 3.4 Logout-all — `POST /api/v1/auth/logout-all` (spec §6.4, §6.6, B8)
 | ID | Preconditions | Steps | Expected | Auto |
@@ -533,7 +535,7 @@ Runners:
 |---|---|
 | `test_login.py` | LOGIN-01..19 |
 | `test_refresh.py` | REFRESH-01..12 |
-| `test_logout.py` | LOGOUT-01..08 |
+| `test_logout.py` | LOGOUT-01..10 |
 | `test_logout_all.py` | LOGOUT-ALL-01..07 |
 | `test_me.py` | ME-01..07 |
 | `test_introspect.py` | INTRO-01..14 |

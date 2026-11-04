@@ -8,6 +8,17 @@ implementation for real job services: the event handling in ``_on_*`` and ``swee
 Transport is injected, so tests drive it in-process: ``sso(path, body) -> (status, json)`` calls the SSO with the
 service's Basic credentials; webhooks arrive through ``receive_webhook(raw_body, headers)`` (the SSO worker's real
 signed POST). The webhook check uses the shipped ``sso_client.WebhookReceiver`` (signature, timestamp, dedupe).
+
+v1.3f "log out, keep my jobs" (DESIGN-v1.3e §6): ``token.revoked`` with ``keep_jobs: true`` (or the sweep answering
+``detached``) does not stop the session's jobs; it *detaches* them: they keep running, still owned by the user, and are
+stopped by anything that ends every session of the user (``token.revoked`` without ``sid``, sweep ``revoked``) or by
+suspend / delete. A service that ignores ``keep_jobs`` stops the jobs, which is the safe v1.3e behaviour.
+
+Jobs are owned by the **user** (``owner_sub``); the session (``owner_sid``) is only what the job is bound to. When the
+user signs in again, any live session of the owner sees the user's jobs, detached ones included (``list_jobs``), can
+stop them (``stop_job``) and can re-attach them to the current session (``attach_job``: from then on the normal
+session rules apply again, so a plain logout of the new session stops them). Every control call is authorized by
+introspecting the caller's user token: only the owner's own live session may act.
 """
 from __future__ import annotations
 
@@ -43,6 +54,7 @@ class DummyJob:
     stop_reason: str | None = None  # SSO reason: logout, password_change, logout_all, expired, suspended, …
     stopped_by: str | None = None  # "webhook" or "sweep"
     ticks: int = 0  # units of work done; only grows while RUNNING
+    detached: bool = False  # v1.3f: the user logged out with keep_jobs; the job outlives its session
 
     def tick(self) -> None:
         if self.state == RUNNING:
@@ -87,6 +99,43 @@ class DummyJobService:
         self.jobs[job.id] = job
         return job  # the user token is NOT kept
 
+    # ------------------------------------------------------------------ user control (any live session of the owner)
+    def _caller(self, user_token: str, client_ip: str | None = None) -> tuple[str, str]:
+        body: dict = {"token": user_token}
+        if client_ip:
+            body["ip"] = client_ip
+        status, data = self.sso("/api/v1/auth/introspect", body)
+        if status != 200 or not data.get("active") or not data.get("sid"):
+            raise JobRefused("token_inactive")
+        return data["sub"], data["sid"]
+
+    def _owned(self, sub: str, job_id: int) -> DummyJob:
+        job = self.jobs.get(job_id)
+        if job is None or job.owner_sub != sub or job.state == DELETED:
+            raise JobRefused("not_found")  # another user's job looks the same as no job
+        return job
+
+    def list_jobs(self, user_token: str, *, client_ip: str | None = None) -> list[DummyJob]:
+        """The caller's jobs by user ID, whichever session started them (detached ones included)."""
+        sub, _ = self._caller(user_token, client_ip)
+        return [j for j in self.jobs.values() if j.owner_sub == sub and j.state != DELETED]
+
+    def stop_job(self, user_token: str, job_id: int, *, client_ip: str | None = None) -> DummyJob:
+        sub, _ = self._caller(user_token, client_ip)
+        job = self._owned(sub, job_id)
+        if job.state == RUNNING:
+            job.state, job.stop_reason, job.stopped_by = STOPPED, "user", "user"
+        return job
+
+    def attach_job(self, user_token: str, job_id: int, *, client_ip: str | None = None) -> DummyJob:
+        """Re-attach a detached job to the caller's current session (it is session-bound again)."""
+        sub, sid = self._caller(user_token, client_ip)
+        job = self._owned(sub, job_id)
+        if job.state != RUNNING:
+            raise JobRefused("not_running")
+        job.owner_sid, job.detached = sid, False
+        return job
+
     # ------------------------------------------------------------------ webhooks
     def receive_webhook(self, body: bytes, headers: dict) -> int:
         """The service's webhook endpoint: 2xx on success or duplicate, 401 on a bad signature (SSO retries)."""
@@ -100,8 +149,13 @@ class DummyJobService:
     def _on_token_revoked(self, ev: dict) -> None:
         sub, sid, reason = ev.get("sub"), ev.get("sid"), ev.get("reason", "revoked")
         for job in self._running(sub):
-            if sid is None or job.owner_sid == sid:  # no sid: every session of the user ended
+            if sid is None:  # every session of the user ended: stops detached jobs too
                 self._stop(job, reason, "webhook")
+            elif job.owner_sid == sid:
+                if ev.get("keep_jobs") is True:  # v1.3f: logout, keep my jobs
+                    self._detach(job)
+                else:
+                    self._stop(job, reason, "webhook")
 
     def _on_user_gone(self, ev: dict) -> None:
         reason = "suspended" if ev["type"] == "user.suspended" else "deleted"
@@ -128,7 +182,9 @@ class DummyJobService:
         stopped = []
         for job in running:
             reason = ended.get((job.owner_sub, job.owner_sid))
-            if reason:
+            if reason == "detached":  # v1.3f keep-jobs logout (its webhook may have been lost): keep running
+                self._detach(job)
+            elif reason:
                 self._stop(job, reason, "sweep")
                 stopped.append(job)
         return stopped
@@ -140,6 +196,11 @@ class DummyJobService:
 
     def _running(self, sub) -> list[DummyJob]:
         return [j for j in self.jobs.values() if j.owner_sub == sub and j.state == RUNNING]
+
+    def _detach(self, job: DummyJob) -> None:
+        if not job.detached:  # idempotent: webhook and sweep may both report it
+            job.detached = True
+            self.notifications.append((job.owner_sub, f"job {job.name} keeps running after logout"))
 
     def _stop(self, job: DummyJob, reason: str, by: str) -> None:
         job.state, job.stop_reason, job.stopped_by = STOPPED, reason, by

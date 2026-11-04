@@ -6,6 +6,9 @@ refresh-token reuse, IP mismatch).
 * Session (design §4.2): a login starts a session id ``sid`` carried by every token issued from it,
   through every refresh. Revoking it records ``RevokedSession`` (access tokens of the session fail at
   introspect / ``/me``) and blacklists the session's outstanding refresh tokens.
+* v1.3f "log out, keep my jobs" (DESIGN-v1.3e §6): the session ends exactly like a logout, but the row's reason is
+  ``logout_keep_jobs``: ``token.revoked`` carries ``keep_jobs: true``, the session-status sweep answers ``detached``
+  (until a later user-wide revocation), and the row is kept past the normal retention while it is still detached.
 """
 from __future__ import annotations
 
@@ -17,6 +20,7 @@ import jwt
 from django.conf import settings
 from django.core.cache import cache
 from django.db import IntegrityError, transaction
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 
@@ -99,7 +103,13 @@ def prune_revoked_sessions(*, dry_run: bool = False) -> int:
     """Delete ``RevokedSession`` rows older than the refresh lifetime + 1 day: every refresh token of such a
     session has expired, and its access tokens long before. Returns the number of rows (to be) deleted."""
     cutoff = timezone.now() - settings.SSO_REFRESH_TTL - timedelta(days=1)
-    old = RevokedSession.objects.filter(revoked_at__lt=cutoff)
+    # v1.3f: a keep-jobs logout row is what tells the sweep "detached" for the jobs that outlived the session; keep it
+    # until a later user-wide revocation (logout-all, password change, suspend) has ended those jobs. Deleting the
+    # user deletes it (cascade).
+    still_detached = Q(reason=LOGOUT_KEEP_JOBS) & (
+        Q(user__sso_token_revocation__isnull=True)
+        | Q(user__sso_token_revocation__revoked_at__lte=F("revoked_at")))
+    old = RevokedSession.objects.filter(revoked_at__lt=cutoff).exclude(still_detached)
     if dry_run:
         return old.count()
     return old.delete()[0]
@@ -123,7 +133,10 @@ def revoke_session(user, sid: str, reason: str) -> int:
         if new:  # v1.3e: one token.revoked per session end; services stop the session's jobs on it
             from .webhooks import emit
 
-            emit("token.revoked", sub=str(user.pk), sid=sid, reason=reason)
+            if reason == LOGOUT_KEEP_JOBS:  # v1.3f: services detach the jobs instead (older ones stop them: safe)
+                emit("token.revoked", sub=str(user.pk), sid=sid, reason="logout", keep_jobs=True)
+            else:
+                emit("token.revoked", sub=str(user.pk), sid=sid, reason=reason)
     _cache_revoked(sid)
     # a user's own logout is routine (v1.3e); every other session revocation is a security signal
     log = logger.info if reason in ROUTINE_SESSION_REASONS else logger.warning
@@ -132,7 +145,9 @@ def revoke_session(user, sid: str, reason: str) -> int:
     return len(family)
 
 
-ROUTINE_SESSION_REASONS = frozenset({"logout"})
+LOGOUT_KEEP_JOBS = "logout_keep_jobs"  # v1.3f RevokedSession reason (fits max_length=32; no migration)
+DETACHED = "detached"  # v1.3f session-status reason for a keep-jobs logout
+ROUTINE_SESSION_REASONS = frozenset({"logout", LOGOUT_KEEP_JOBS})
 
 
 def _claims(raw: str) -> dict:
@@ -149,6 +164,9 @@ def session_states(user, sids) -> dict[str, str | None]:
     ``revoked`` (every token of the user revoked: logout-all, password change, admin), or ``expired`` (no live
     refresh token left: idle past the refresh lifetime, or an unknown sid). The caller checks the user itself.
 
+    v1.3f: a keep-jobs logout answers ``detached`` (the jobs outlive the session) until a later user-wide
+    revocation, which answers ``revoked`` (it ends the detached jobs too).
+
     A session is alive while it has a refresh token that is unexpired, not blacklisted and issued after the
     user's revocation epoch; refresh keeps the ``sid``, so a session lives as long as the client keeps refreshing.
     """
@@ -156,8 +174,14 @@ def session_states(user, sids) -> dict[str, str | None]:
 
     wanted = set(sids)
     out: dict[str, str | None] = dict.fromkeys(wanted, "expired")
-    revoked = dict(RevokedSession.objects.filter(user=user, sid__in=wanted).values_list("sid", "reason"))
     epoch = revocation_epoch(user)
+    user_rev = getattr(user, "sso_token_revocation", None)
+    revoked = {}
+    for sid, reason, at in RevokedSession.objects.filter(user=user, sid__in=wanted).values_list(
+            "sid", "reason", "revoked_at"):
+        if reason == LOGOUT_KEEP_JOBS:  # a later logout-all / password change ends the detached jobs too
+            reason = "revoked" if user_rev is not None and user_rev.revoked_at > at else DETACHED
+        revoked[sid] = reason
     rows = (OutstandingToken.objects.filter(user=user, expires_at__gt=timezone.now())
             .values_list("token", "blacklistedtoken__id"))
     for raw, blacklisted in rows:

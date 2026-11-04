@@ -306,8 +306,10 @@ token: the service runs it under its own service identity and records the `owner
 session, from introspect) of the user who started it. **[Decision 2026-11-03, v1.3e]** The job lives as long as that
 session: on logout (`token.revoked {sub, sid, reason: logout}`) the service stops the jobs of that `sid`; on
 logout-all or a password change (`token.revoked` without `sid`) all the user's jobs; a 60 s
-`POST /api/v1/service/sessions/status` sweep catches lost webhooks and sessions that expired idle. Until the future
-"log out but keep my jobs" option exists, **users keep the front end signed in while their jobs run**. Suspend
+`POST /api/v1/service/sessions/status` sweep catches lost webhooks and sessions that expired idle. **Users keep the
+front end signed in while their jobs run, or log out with "keep my jobs running"** (**v1.3f**: `keep_jobs: true` on
+logout; the event carries `keep_jobs: true`, the sweep answers `detached`, and the service detaches the jobs from the
+session; logout-all, password change, suspend and delete still end them; [design §6](DESIGN-v1.3e-session-bound-jobs.md#6-log-out-and-keep-the-jobs-v13f-implemented)). Suspend
 handling (§5.6) still stops and deletes. Details: [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md).
 OAuth token exchange / delegated tokens (RFC 8693) are not planned (TODOS).
 
@@ -616,7 +618,9 @@ the admin and user are told which orders may still be open at the broker.
 
 **Session end [Decision 2026-11-03, v1.3e].** Logout, logout-all and password change **stop** (not delete) the cloud
 strategies started from the ended session(s): open orders cancelled through the relay, **positions untouched**,
-history kept, state `STOPPED (session_ended)`, user notified; the user restarts them after signing in again. PCs and
+history kept, state `STOPPED (session_ended)`, user notified; the user restarts them after signing in again. A
+logout with "keep my jobs running" (v1.3f, `keep_jobs: true`) instead detaches them: they keep trading until
+logout-all, a password change, suspend or delete. PCs and
 device credentials are not touched (the device is paired to the user, not to a session). Triggers: `token.revoked`
 (with `sid`: that session; without: all of the user's sessions) plus the 60 s session-status sweep
 ([DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md) §5).
@@ -887,7 +891,8 @@ flowchart LR
 
 Logout of one FUND tab logs out that browser session (refresh cookie gone) and stops the jobs started from it;
 other devices and their jobs stay. "Log out everywhere" = `POST /auth/logout-all` (stops all the user's jobs).
-To keep jobs running, keep the front end signed in; "log out but keep my jobs" is a future option (TODOS).
+To keep jobs running, keep the front end signed in, or choose "Log out and keep my jobs running" (v1.3f:
+`logout({keepJobs: true})` → `keep_jobs: true`; the jobs are detached from the session, not stopped).
 
 ---
 
@@ -933,6 +938,7 @@ flowchart LR
 | **v1.3c** | SSO, sso-client | **Signed webhooks** (`user.suspended`, `user.reactivated`, `user.deleted`, `token.revoked`, `permission.changed`, `keys.rotated`), `notify_secret` encrypted at rest, receiver helper in `sso-client` | v1.3a |
 | **v1.3d** | SSO | **Admin web UI at `/admin` on the SSO server** (decision 2026-10-15; moved from FUND v1.5b): server-rendered Django templates on a shared domain layer `sso/admin_ops.py`; session login (active + `is_staff` + `sso_admin`/superuser), CSRF, IP binding, step-up page; users, groups, permissions, apps + import (dry-run diff), services, devices, webhooks, audit; audit `channel` column; nginx allow-list + optional admin hostname; strict CSP. Design: [DESIGN-v1.3d-admin-ui.md](DESIGN-v1.3d-admin-ui.md). **SSO server complete** | v1.3a–c |
 | **v1.3e** | SSO | **Session-bound long-running jobs** (decision 2026-11-03): logout ends the whole session and emits `token.revoked {sub, sid, reason: logout}`; password change / logout-all emit without `sid`; `POST /api/v1/service/sessions/status` sweep. Design: [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md). Implemented | v1.3c |
+| **v1.3f** | SSO | **Log out, keep the jobs** (2026-11-03): `POST /auth/logout {"keep_jobs": true}` ends the session but `token.revoked` carries `keep_jobs: true` and the sessions status answers `detached`; services detach the jobs instead of stopping them. No migration. Design: [DESIGN-v1.3e §6](DESIGN-v1.3e-session-bound-jobs.md#6-log-out-and-keep-the-jobs-v13f-implemented). Implemented | v1.3e |
 | **v1.4** | SGMCP (+ relay) | **SGMCP and the local broker gateway on full SSO** (§5): SGMCP's `sso_permissions.py` imported; SGMCP API/MCP behind `sso-client` (user tokens for people, service tokens for agents); `gateway-relay` + pairing + device credentials + outbound WSS from the local broker gateway; one live connection per broker account (cold standby); `WAITING_GATEWAY`/halt + heartbeats; suspend (webhook + sweep) stops and deletes strategies, disconnects PCs, **positions untouched**; **`delete_strategy` soft delete, history always kept** (§5.7). Until FUND migrates, strategies are submitted through SGMCP's own API/MCP with an SSO token | v1.3a–d |
 | **v1.5a** | FUND | `sso_permissions.py`; `AUTH_PROVIDER=legacy\|both\|sso` (§3.4), start with `both`; agents on `sso-client`, one ServiceClient per service; llm-wiki behind configurable `/proxy/llmwiki/` (§6) | v1.3a–c, v1.4 |
 | **v1.5b** | FUND | FUND UI for cloud strategies (submit, broker pick, stay-on warnings, §5) | v1.5a |
@@ -966,8 +972,11 @@ implementation defaults to be confirmed during review of each phase, not open de
 
 20. **Long-running jobs are bound to the login session that started them** (v1.3e, §4.1, §5.6, §8.2). Logout stops
     the jobs of that session; logout-all and password change stop all the user's jobs (stop, not delete; positions
-    untouched). Until a future SSO release offers "log out but keep my jobs", users keep the front end signed in while
-    their jobs run. Supersedes the 2026-10-14 reading that only suspend ends long-running work.
+    untouched). Users keep the front end signed in while their jobs run, or (v1.3f, decision 21) log out and keep
+    them. Supersedes the 2026-10-14 reading that only suspend ends long-running work.
+21. **"Log out, keep my jobs running"** (v1.3f, same day): an explicit logout option (`keep_jobs: true`). The session
+    ends as usual; services detach its jobs, which run on until logout-all, password change, admin revocation,
+    suspend or delete. Services that do not know the flag stop the jobs (safe fallback).
 
 ### Round 6 (2026-10-15)
 

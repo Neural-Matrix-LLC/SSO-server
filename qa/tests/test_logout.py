@@ -1,4 +1,4 @@
-"""LOGOUT-xx: POST /api/v1/auth/logout (spec 6.3, addendum B9)."""
+"""LOGOUT-xx: POST /api/v1/auth/logout (spec 6.3, addendum B9; keep_jobs: DESIGN-v1.3e §6, v1.3f)."""
 import pytest
 
 from helpers import assert_error
@@ -79,3 +79,17 @@ def test_LOGOUT_08_logout_only_affects_that_session(sso, pool_user):
     b = sso.login_ok(name, pw).json()
     assert sso.logout_native(a["refresh_token"]).status_code == 204
     assert sso.refresh_native(b["refresh_token"]).status_code == 200
+
+
+def test_LOGOUT_09_keep_jobs_ends_the_session(sso, native_session):
+    """v1.3f: keep_jobs=true still ends the session (the jobs are detached at the services, not the session kept)."""
+    assert sso.logout_native(native_session["refresh_token"], keep_jobs=True).status_code == 204
+    assert_error(sso.me(native_session["access_token"]), 401, "token_invalid")
+    assert_error(sso.refresh_native(native_session["refresh_token"]), 401, "token_invalid")
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_LOGOUT_10_keep_jobs_must_be_boolean(sso, native_session, value):
+    assert_error(sso.logout_native(native_session["refresh_token"], keep_jobs=value), 400, "invalid_request")
+    # nothing was consumed
+    assert sso.refresh_native(native_session["refresh_token"]).status_code == 200

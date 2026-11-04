@@ -22,10 +22,11 @@ from .ipbinding import CIP_CLAIM, binding_enabled, cip_for, ip_matches, log_mism
 from .clientip import normalize_ip
 from .errors import AccountInactive, InvalidClient, InvalidCredentials, InvalidRequest, OriginNotAllowed, TokenInvalid
 from .logs import client_ip, log_login, log_token_event
-from .revocation import is_session_revoked, revoke_session, revoke_user_tokens
+from .revocation import LOGOUT_KEEP_JOBS, is_session_revoked, revoke_session, revoke_user_tokens
 from .serializers import (
     IntrospectSerializer,
     LoginSerializer,
+    LogoutInputSerializer,
     RefreshInputSerializer,
     UserSerializer,
     check_credentials,
@@ -95,13 +96,15 @@ def check_origin(request) -> None:
         raise OriginNotAllowed()
 
 
-def read_refresh_input(request) -> tuple[str | None, bool]:
-    """Return (raw refresh token or None, cookie_mode). Body token = native, else cookie mode."""
+def read_refresh_input(request, serializer_class=None) -> tuple[str | None, bool]:
+    """Return (raw refresh token or None, cookie_mode). Body token = native, else cookie mode.
+    The validated body is left on ``request.sso_input`` (e.g. ``keep_jobs`` for logout)."""
     data = request.data if isinstance(request.data, dict) else None
     if data is None:
         raise InvalidRequest("Request body must be a JSON object.")
-    ser = RefreshInputSerializer(data=data)
+    ser = (serializer_class or RefreshInputSerializer)(data=data)
     ser.is_valid(raise_exception=True)
+    request.sso_input = ser.validated_data
     raw = ser.validated_data.get("refresh_token")
     if raw:
         return raw, False
@@ -244,7 +247,8 @@ class LogoutView(_ServiceClientChallenge, APIView):
     throttle_classes = [RefreshThrottle]
 
     def post(self, request):
-        raw, cookie_mode = read_refresh_input(request)
+        raw, cookie_mode = read_refresh_input(request, LogoutInputSerializer)
+        keep_jobs = request.sso_input.get("keep_jobs", False)
         if not raw:
             if not cookie_mode:  # pragma: no cover - serializer guarantees a value in native mode
                 raise InvalidRequest()
@@ -266,7 +270,9 @@ class LogoutView(_ServiceClientChallenge, APIView):
             # v1.3e: logout ends the whole session: its access tokens fail at introspect / /me at once, its step-up
             # tokens die (v1.3a), and token.revoked {sub, sid, reason: logout} tells services to stop the
             # long-running jobs started from this session (DESIGN-v1.3e-session-bound-jobs.md).
-            revoke_session(user, token[SID_CLAIM], "logout")
+            # v1.3f: keep_jobs=true ends the session the same way, but the event carries keep_jobs: true and services
+            # detach the jobs from the session instead of stopping them (§6 of that design).
+            revoke_session(user, token[SID_CLAIM], LOGOUT_KEEP_JOBS if keep_jobs else "logout")
         log_token_event(request, "logout", "success", user_id=user.pk)
         response = Response(status=status.HTTP_204_NO_CONTENT)
         if cookie_mode:

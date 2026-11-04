@@ -26,6 +26,9 @@ HEALTHZ = "/healthz"
 COOKIE_NAME = "sso_refresh"
 
 
+_UNSET = object()
+
+
 @dataclass
 class ParsedCookie:
     name: str
@@ -114,8 +117,11 @@ class SSOClient:
     def refresh_cookie(self, cookie_value, origin=None, retry_on_429=True):
         return self.post(REFRESH, json={}, cookie=cookie_value, origin=origin, retry_on_429=retry_on_429)
 
-    def logout_native(self, refresh_token, origin=None):
-        return self.post(LOGOUT, json={"refresh_token": refresh_token}, origin=origin)
+    def logout_native(self, refresh_token, origin=None, keep_jobs=_UNSET):
+        body = {"refresh_token": refresh_token}
+        if keep_jobs is not _UNSET:  # v1.3f: "log out, keep my jobs running" (any JSON value, to test validation)
+            body["keep_jobs"] = keep_jobs
+        return self.post(LOGOUT, json=body, origin=origin)
 
     def logout_cookie(self, cookie_value, origin=None):
         return self.post(LOGOUT, json={}, cookie=cookie_value, origin=origin)

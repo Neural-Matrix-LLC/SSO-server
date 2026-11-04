@@ -62,7 +62,7 @@ Body (JSON, compact, UTF-8): `{"id": <int>, "type": "<type>", "time": "<ISO 8601
 | `user.suspended` | `sub` | `is_active` True→False saved anywhere (admin API, Django admin, code) |
 | `user.reactivated` | `sub` | `is_active` False→True |
 | `user.deleted` | `sub`, `username` | any user deletion (`post_delete`) |
-| `token.revoked` | `sub`, `reason` (`logout_all`, `password_change`, `suspended`, `admin`), or `sub` + `sid` + `reason` (`logout` since v1.3e, `refresh_reuse`, `ip_mismatch`) | user or session revocation; one event per session end. v1.3e: services stop the long-running jobs of the ended session(s), see [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md) |
+| `token.revoked` | `sub`, `reason` (`logout_all`, `password_change`, `suspended`, `admin`), or `sub` + `sid` + `reason` (`logout` since v1.3e, with `keep_jobs: true` since v1.3f; `refresh_reuse`, `ip_mismatch`) | user or session revocation; one event per session end. v1.3e: services stop the long-running jobs of the ended session(s), see [DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md) |
 | `permission.changed` | `sub`, `perm`, `granted` (direct grant) · `group`, `perm`, `granted` (group grant) · `sub`, `group`, `granted` (membership) · `app`, `created`/`updated`/`deprecated` (import) | `m2m_changed` on user permissions, group permissions, user groups (`application.*` only); permission import |
 | `keys.rotated` | `kids` (published key ids) | the worker sees a different published `kid` set than in the last `keys.rotated` event |
 

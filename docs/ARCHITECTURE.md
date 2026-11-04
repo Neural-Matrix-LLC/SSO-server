@@ -4,7 +4,7 @@
 
 | | |
 |---|---|
-| Status | Describes the code on `main` at `b749fae` (v1.3d merged: v1.0 core, v1.2a/b, v1.3a admin API, v1.3b devices, v1.3c webhooks, v1.3d admin UI; v1.3e session-bound jobs, 2026-11-03) plus the deploy tooling (`init` service, `deploy.sh`, `deploy_check.sh`). Sections 5–9 describe the v1.0–v1.2 core in depth; the v1.3 features are summarised in §3.2, §4 and §8.10 and specified in their design docs and the [API Reference Manual](API-REFERENCE-MANUAL.md) §8–11. Consumer: llm-wiki-svc `feat/sso-login` |
+| Status | Describes the code on `main` at `b749fae` (v1.3d merged: v1.0 core, v1.2a/b, v1.3a admin API, v1.3b devices, v1.3c webhooks, v1.3d admin UI; v1.3e session-bound jobs and v1.3f keep-jobs logout, 2026-11-03) plus the deploy tooling (`init` service, `deploy.sh`, `deploy_check.sh`). Sections 5–9 describe the v1.0–v1.2 core in depth; the v1.3 features are summarised in §3.2, §4 and §8.10 and specified in their design docs and the [API Reference Manual](API-REFERENCE-MANUAL.md) §8–11. Consumer: llm-wiki-svc `feat/sso-login` |
 | Audience | Developers building or integrating with the SSO server, reviewers, operators |
 | Supersedes | Nothing. `docs/SSO-server.md` (v1.0 spec), `docs/DESIGN-ADDENDUM-v1.1.md` and `docs/sso-integration-design.md` stay the design history. Where they disagree with this file, the **code** wins and this file describes the code (see §12 for the differences found) |
 
@@ -1402,6 +1402,12 @@ Logout does not check `is_active` or `revoked_at`. Since v1.3e a token with a `s
 tokens rejected by `/me` and introspect, step-up tokens dropped, and `token.revoked {sub, sid, reason: "logout"}`
 in the outbox (same transaction). A token without `sid` is only blacklisted. Services stop the jobs started from
 that session ([DESIGN-v1.3e-session-bound-jobs.md](DESIGN-v1.3e-session-bound-jobs.md)).
+
+v1.3f: optional body field `keep_jobs` (JSON boolean; anything else 400 before the token is touched). `true` ends the
+session the same way but records `RevokedSession.reason = "logout_keep_jobs"`, emits `token.revoked {sub, sid,
+reason: "logout", keep_jobs: true}`, and makes `session_states` answer `detached` (until a later user-wide
+revocation: `revoked`). `prune_revoked_sessions` keeps such rows while they are still detached. Services detach the
+jobs instead of stopping them ([design §6](DESIGN-v1.3e-session-bound-jobs.md#6-log-out-and-keep-the-jobs-v13f-implemented)).
 
 ### 8.4 POST /api/v1/auth/logout-all
 

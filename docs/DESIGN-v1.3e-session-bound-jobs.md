@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| Status | **Implemented** on `main` (2026-11-03). As-built API: [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md) §2.6, §8.2, §10 |
-| Decision | Thomas, 2026-11-03: logout and password change stop the running jobs (services) of the user's session |
+| Status | **Implemented** (v1.3e and the v1.3f keep-jobs logout, §6, 2026-11-03). As-built API: [API-REFERENCE-MANUAL.md](API-REFERENCE-MANUAL.md) §2.6, §8.2, §10 |
+| Decision | Thomas, 2026-11-03: logout and password change stop the running jobs (services) of the user's session; the user may instead log out and keep the jobs (v1.3f) |
 | Builds on | v1.2a sessions (`sid`), v1.3a service tokens, v1.3c signed webhooks |
 | Changes | [ECOSYSTEM-INTEGRATION.md](ECOSYSTEM-INTEGRATION.md) §4.1 "Long-running work", §5.6, §8.2 |
 
@@ -22,14 +22,15 @@ plain logout did not even tell services that it happened.
 | User action | Session effect | What services do with the user's jobs |
 |---|---|---|
 | Logout (`POST /auth/logout`) | that session (`sid`) ends | stop the jobs started from that `sid` |
+| Logout with `keep_jobs: true` (v1.3f, §6) | that session (`sid`) ends | **detach** the jobs of that `sid`: they keep running until a row below ends them |
 | Logout-all, password change, admin "logout everywhere" / set-password | every session of the user ends | stop **all** the user's session-bound jobs |
 | Suspend, delete | every session ends | stop and delete all the user's jobs (unchanged, ECOSYSTEM §5.6) |
 | Refresh-token reuse, IP mismatch in `ENFORCE` | that session ends (security) | stop the jobs of that `sid` |
 | Idle past the refresh lifetime (default 7 days without a refresh) | the session expires, **no webhook** | found by the status sweep (§4.3); stop the jobs of that `sid` |
 | Refresh | same `sid` continues | nothing |
 
-Consequence for users, until the option in §6 exists: **to keep jobs running, keep the front-end application
-signed in** (open, refreshing its tokens) and do not log out. Closing the browser without logging out keeps the
+Consequence for users: **to keep jobs running, keep the front-end application signed in** (open, refreshing its
+tokens), or log out with "keep my jobs running" (§6). Closing the browser without logging out keeps the
 session until the refresh token runs out; the front end must refresh at least once per refresh lifetime.
 
 ## 3. Flow
@@ -114,11 +115,13 @@ transport and signature, introspect (already returns `sid`). No migration, no ne
    the job. A job started by an agent on behalf of a user takes the `sid` of the user token it was given.
 2. **Run:** under the service's own service token; never keep or refresh the user's tokens.
 3. **Stop** the jobs on:
-   - `token.revoked` with `sid` → jobs with `owner_sub = sub` and `owner_sid = sid`;
+   - `token.revoked` with `sid` → jobs with `owner_sub = sub` and `owner_sid = sid`; with `keep_jobs: true`
+     (v1.3f) **detach** those jobs instead (§6);
    - `token.revoked` without `sid` (`logout_all`, `password_change`, `suspended`, `admin`, …) → all jobs of `sub`;
    - `user.suspended` / `user.deleted` → stop **and delete** all jobs of `sub` (ECOSYSTEM §5.6);
    - sweep: every 60 s, `POST /service/sessions/status` with the `(owner_sub, owner_sid)` of the running jobs
-     (batches of 100); stop every job whose session answers `active: false`.
+     (batches of 100), detached ones included; stop every job whose session answers `active: false`, except
+     `reason: "detached"` (v1.3f): detach it and keep it running.
 4. "Stop" for SGMCP means what suspend does to a strategy, minus deletion: cancel open orders through the relay,
    **leave broker positions untouched**, keep history (ECOSYSTEM §5.7), state `STOPPED (session_ended: <reason>)`,
    and notify the user. The user starts it again after signing in.
@@ -127,13 +130,59 @@ transport and signature, introspect (already returns `sid`). No migration, no ne
 Jobs with no user session (a service acting for itself, an admin's scheduled maintenance) are not session-bound
 and keep their v1.3a behaviour.
 
-## 6. Future option: log out and keep the jobs (not implemented)
+## 6. Log out and keep the jobs (v1.3f, implemented)
 
-Planned for a later SSO release (TODOS.md): the user may choose "log out, keep my jobs running". Sketch to agree
-before building: `POST /auth/logout {"keep_jobs": true}` ends the session but emits `token.revoked` with
-`keep_jobs: true` (services detach the jobs from the session instead of stopping them, and keep them bound to the
-user until suspend / delete / password change), and the status sweep then answers `detached` for that `sid`.
-Password change and logout-all would still stop everything.
+The user may choose "log out, keep my jobs running" (for example on a shared or public computer, while a strategy
+must keep trading).
+
+**Request.** `POST /api/v1/auth/logout {"refresh_token": "…", "keep_jobs": true}` (cookie mode: `{"keep_jobs":
+true}`). `keep_jobs` must be a JSON boolean; anything else is 400 `invalid_request` and nothing is consumed (a
+typo never logs out). Default `false` = the v1.3e logout. The browser helper: `logout({keepJobs: true})`
+(`examples/frontend/auth.js`).
+
+**The session still ends.** Exactly as in §4.1: refresh tokens of the `sid` blacklisted, its access tokens rejected
+at once by introspect and `/me`, step-up tokens dropped, cookie cleared. Only the jobs outlive it; the logged-out
+token cannot start new jobs. A token without `sid` is only blacklisted (no event), as for every logout.
+
+**Event.** `token.revoked {sub, sid, reason: "logout", keep_jobs: true}`, once per session. The reason stays
+`logout` on purpose: a v1.3e service that does not know `keep_jobs` stops the jobs, which is the safe fallback.
+
+**Stored as** `RevokedSession(sid, reason="logout_keep_jobs")` (fits the existing `CharField(32)`: no migration, no
+setting, no env var). The `session_revoked` log line is INFO, without token or sid.
+
+**Session status.** The sweep answers `{"active": false, "reason": "detached"}` for that `sid` until a later
+user-wide revocation (logout-all, password change, admin "logout everywhere" / set-password), after which it answers
+`revoked`; a suspended or deleted user answers `user_inactive` / `user_deleted` as before. An older user-wide
+revocation (before the keep-jobs logout) does not count. Services keep sending the detached jobs' `(owner_sub,
+owner_sid)` in the sweep; that is how a lost password-change webhook is still caught.
+
+**Retention.** Normal `RevokedSession` rows are pruned after the refresh lifetime + 1 day (v1.2b). A
+`logout_keep_jobs` row is kept past that while it is still detached (no later user-wide revocation), otherwise the
+sweep would answer `expired` and stop the jobs; deleting the user deletes it (cascade).
+
+**Service duties (on top of §5).**
+
+| Signal | Detached job |
+|---|---|
+| `token.revoked` with `sid` + `keep_jobs: true`, or sweep `detached` | mark detached, keep running, notify the user once ("keeps running after logout"); idempotent |
+| `token.revoked` without `sid` (logout-all, password change, admin, suspended) or sweep `revoked` | stop |
+| `user.suspended` / `user.deleted`, sweep `user_inactive` / `user_deleted` | stop and delete |
+| A later logout of another session (with or without `keep_jobs`) | nothing (other `sid`) |
+
+**Jobs belong to the user; the session is only a binding (decision Thomas, 2026-11-03).** Services key jobs by
+`owner_sub` and keep `owner_sid` as the current binding. When the user signs in again, the new session (any live
+session of the owner) lists the user's jobs including detached ones, can **stop** them, and can **re-attach** them
+(`owner_sid` = the new `sid`, `detached = false`; from then on a plain logout stops them, a keep-jobs logout detaches
+them again). Re-attaching is an explicit user choice, never automatic at login. Control calls are authorized by
+introspecting the caller's token; another user's job answers 404. Guide for service developers with endpoints and
+code: [API-REFERENCE-MANUAL.md §3.6](API-REFERENCE-MANUAL.md#36-long-running-jobs-bind-detach-re-attach-v13e--v13f).
+Nothing changes in the SSO for this: the job registry lives in each service. An SSO admin view of detached jobs is
+a future item (TODOS.md).
+
+**Known limits.** A refresh token replayed after a keep-jobs logout is still rejected and handled as reuse, but the
+session already ended, so no second event: the detached jobs keep running (as for any revocation, one event per
+session end). The user ends them with logout-all or a password change. Password changes written by myFinance stay
+invisible (§4.2).
 
 ## 7. Tests
 
@@ -169,3 +218,22 @@ records `state` (`RUNNING`, `STOPPED`, `DELETED`), `stop_reason`, `stopped_by` (
 | Wrong webhook secret | 401, job keeps running, SSO retries; after the fix the retry stops it |
 | Start: missing permission / logged-out session | `JobRefused` (`forbidden` / `token_inactive`) |
 | Job started by an agent on behalf of the user (`actor_token`) | bound to the user's session; logout stops it |
+
+**v1.3f keep-jobs logout.** `sso/tests/test_keep_jobs_v13f.py` (SSO side and the same dummy job service):
+
+| Case | Expected |
+|---|---|
+| Keep-jobs logout (native, cookie mode) | session ends (introspect inactive, `/me` and refresh 401); event `token.revoked {…, reason: logout, keep_jobs: true}`; stored `logout_keep_jobs`; INFO log without token or sid; other sessions untouched |
+| `keep_jobs: false` / omitted | plain v1.3e logout, no `keep_jobs` in the event |
+| `keep_jobs` = `"true"`, `1`, `0`, `"yes"`, `null`, `[]`, `{}` | 400 `invalid_request`, session still alive, no event |
+| Token without `sid`; replay after keep-jobs logout | blacklist only, no event; reason kept, one event |
+| Session status | `detached`, also after the refresh lifetime; `revoked` after a later password change / logout-all / admin; `detached` if the user-wide revocation came first; `user_inactive` / `user_deleted` |
+| Prune | detached rows kept; pruned after a later user-wide revocation; cascade on user delete |
+| Dummy jobs: keep-jobs logout | the session's jobs `RUNNING`, detached, ticks go on, one notification; sweep agrees; the logged-out token cannot start jobs |
+| Dummy jobs: later normal logout of another session | only that session's jobs stop |
+| Dummy jobs: password change (model, admin API), logout-all | detached jobs `STOPPED` |
+| Dummy jobs: suspend / delete | detached jobs `DELETED` |
+| Dummy jobs: keep-jobs webhook lost | sweep detaches (does not stop); late retry harmless |
+| Dummy jobs: password-change webhook lost after detaching | sweep stops with `revoked` |
+| Dummy jobs: refresh lifetime passed, prune ran | detached jobs keep running |
+| Dummy jobs: user signs in again | new session lists the user's jobs by user ID (detached included, not other users'); can stop them; can re-attach (then a plain logout stops, a keep-jobs logout detaches again); other users and the logged-out session are refused; a stopped job cannot be re-attached |

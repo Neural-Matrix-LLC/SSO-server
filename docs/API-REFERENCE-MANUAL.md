@@ -1,7 +1,7 @@
 # SSO-server API Reference Manual
 
 For developers of **clients** (browser SPAs, native apps, scripts, MCP clients, server-side "BFF" apps) and
-**services** (back-ends that accept SSO tokens). As-built reference for `main` (v1.3e): every fact here comes from
+**services** (back-ends that accept SSO tokens). As-built reference for `main` (v1.3f): every fact here comes from
 `ssoproject/urls.py`, `sso/*.py`, `application/*.py` and `adminui/` and matches [ARCHITECTURE.md](ARCHITECTURE.md)
 §8–9. Everything described is implemented except the items listed as future in [TODOS.md](../TODOS.md) (sign-up,
 password reset, hosted login / PKCE).
@@ -197,6 +197,13 @@ session of the user.
 **Long-running jobs (v1.3e):** jobs you start (strategies, subscriptions, scheduled work) run only while the
 session that started them is alive. Keep the app signed in and refreshing (at least once per refresh lifetime,
 default 7 days); logging out, logging out everywhere or changing the password stops them.
+
+**Log out but keep the jobs (v1.3f):** send `"keep_jobs": true` with the logout (`{"refresh_token": …,
+"keep_jobs": true}`, or `{"keep_jobs": true}` in cookie mode). The session still ends exactly as above, but services
+*detach* the jobs started from it instead of stopping them; the jobs then run until logout-all, a password change,
+an admin revocation, suspension or deletion. Offer it as an explicit choice ("Log out and keep my jobs running").
+The jobs belong to the user, not to the session: after the next login the app lists them again and the user can
+stop them or attach them to the new session (how services do this: §3.6).
 
 ### 2.7 Error handling and retry
 
@@ -395,6 +402,75 @@ def introspect(token: str, client_ip: str) -> dict:
 | Introspect returns 429 | honour `Retry-After`; fall back to local JWKS result for non-sensitive calls |
 | SSO down / timeout (JWKS or introspect) | cached JWKS keeps working; for introspect-required operations answer 503, do **not** accept unverified tokens |
 
+### 3.6 Long-running jobs: bind, detach, re-attach (v1.3e / v1.3f)
+
+For services that run work after the user's request returns (SGMCP strategies, FUND auto-trade, subscriptions,
+scheduled tasks). Reference implementation: `sso/tests/dummy_job_service.py`; design:
+[DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md) §5 and §6.
+
+**Key the job by user ID, not by session.** The owner of a job is the user (`owner_sub` = the `sub` from introspect).
+The session (`sid`) is only what the job is currently *bound* to. Store per job:
+
+| Column | Meaning |
+|---|---|
+| `owner_sub` | user ID; never changes. Every listing and every control check uses it |
+| `owner_sid` | session the job is bound to (from introspect at start, or the session that re-attached it). Keep it while detached: the sweep checks it |
+| `detached` | `true` after a keep-jobs logout: the job no longer depends on any session |
+| `state`, `stop_reason` | e.g. `RUNNING`, `STOPPED (session_ended: logout)`, `STOPPED (user)`, `DELETED` |
+
+Never store or refresh the user's tokens: the job runs under your service token (§3.1, v1.3a).
+
+**Start.** Introspect the user's token (`ip`, `require` your app permission). Refuse when `active` is false, `allowed`
+is false or there is no `sid`. Save `owner_sub = sub`, `owner_sid = sid`, `detached = false`.
+
+**React to the SSO** (webhooks §10 plus a 60 s sweep with `POST /api/v1/service/sessions/status` on
+`(owner_sub, owner_sid)` of every running job, detached ones included, batches of 100):
+
+| Signal | Bound job of that `sid` | Detached job |
+|---|---|---|
+| `token.revoked` with `sid`, no `keep_jobs` (logout, reuse, IP mismatch); sweep `logout`, `expired`, `refresh_reuse`, `ip_mismatch` | stop | (its `sid` already ended: no such event) |
+| `token.revoked` with `sid` and `keep_jobs: true`; sweep `detached` | set `detached = true`, keep running, tell the user once | nothing (idempotent) |
+| `token.revoked` **without** `sid` (logout-all, password change, admin, suspended); sweep `revoked` | stop all jobs of `sub` | stop |
+| `user.suspended` / `user.deleted`; sweep `user_inactive` / `user_deleted` | stop **and delete** | stop and delete |
+
+A service that ignores `keep_jobs` stops the jobs on a keep-jobs logout (the reason is still `logout`): safe, but the
+user loses the feature. Dedupe webhooks on the event `id`; all handlers must be idempotent.
+
+**When the user signs in again.** The new login has a new `sid`, but the jobs belong to the user, so the new
+session takes control of them:
+
+| Endpoint (your service) | Rule |
+|---|---|
+| `GET /jobs` | introspect the caller's token; return every job with `owner_sub = sub` (any session, detached ones included, with `detached` shown so the UI can say "running since your logout") |
+| `POST /jobs/{id}/stop` | introspect; the job must have `owner_sub = sub`, else 404 (do not reveal other users' jobs); stop it |
+| `POST /jobs/{id}/attach` | introspect; same owner check; set `owner_sid` = the caller's `sid`, `detached = false`. From now on the normal session rules apply: a plain logout of this session stops the job, a keep-jobs logout detaches it again |
+
+Only a live session can control jobs: the logged-out session's access token is rejected by introspect (`active:
+false`). Do not re-attach automatically on login: then a later plain logout would stop jobs the user meant to keep.
+Offer "attach to this session" as a choice, or leave the jobs detached and just let the user stop them.
+
+```python
+def on_token_revoked(ev):                                    # webhook handler, after signature check + dedupe
+    jobs = Job.running(owner_sub=ev["sub"])
+    if "sid" not in ev:                                       # every session of the user ended
+        return [j.stop(ev["reason"]) for j in jobs]
+    for j in jobs:
+        if j.owner_sid == ev["sid"]:
+            j.detach() if ev.get("keep_jobs") is True else j.stop(ev["reason"])
+
+def attach(user_token, ip, job_id):                           # POST /jobs/{id}/attach
+    me = introspect(user_token, ip)                           # 401 if not active
+    job = Job.get(job_id)
+    if job is None or job.owner_sub != me["sub"] or job.state == "DELETED":
+        raise NotFound()
+    job.owner_sid, job.detached = me["sid"], False
+```
+
+**SGMCP / FUND mapping.** "Stop" = cancel open orders through the relay, leave broker positions untouched, keep
+history (ECOSYSTEM §5.6, §5.7). Detached strategies keep trading under SGMCP's service identity; the FUND / SGMCP
+logout dialog offers "Log out" and "Log out and keep my strategies running" (`logout({keepJobs: true})`), and the
+strategy list after login shows detached strategies with Stop and "Attach to this session".
+
 ## 4. Endpoint reference
 
 | Method | Path | Auth | Throttle |
@@ -450,10 +526,14 @@ successful one.
 
 ### logout — `POST /api/v1/auth/logout`
 
-Input as refresh. 204 (token blacklisted, cookie cleared; also cookie mode without a cookie). Since v1.3e the whole
-session (`sid`) ends: its access tokens are rejected by `/me` and introspect, and `token.revoked {sub, sid,
-reason: "logout"}` is sent to subscribed services (§10). 401 `token_invalid` for an invalid/already-used token
-(cookie still cleared), 400, 401 `invalid_client`, 403 `origin_not_allowed`, 429.
+Input as refresh, plus optional `keep_jobs` (v1.3f, JSON boolean, default `false`). 204 (token blacklisted, cookie
+cleared; also cookie mode without a cookie). Since v1.3e the whole session (`sid`) ends: its access tokens are
+rejected by `/me` and introspect, and `token.revoked {sub, sid, reason: "logout"}` is sent to subscribed services
+(§10); services stop the session's jobs. With `keep_jobs: true` the session ends the same way, the event is
+`token.revoked {sub, sid, reason: "logout", keep_jobs: true}` and services detach the jobs instead (session status
+`detached`, §8.2). 400 `invalid_request` when `keep_jobs` is not `true`/`false` (nothing is consumed), 401
+`token_invalid` for an invalid/already-used token (cookie still cleared), 401 `invalid_client`, 403
+`origin_not_allowed`, 429.
 
 ### logout-all — `POST /api/v1/auth/logout-all`
 
@@ -533,6 +613,7 @@ All rows are implemented. Agreed design (decisions of
 | **Done in v1.2b** Client-IP binding | server setting `SSO_IP_BINDING_MODE=NOIP\|WARNING\|ENFORCE` (default `NOIP`). Access and refresh tokens carry `cip` = base64url(HMAC-SHA256(server secret, exact client IP)) and a session id `sid`. Services cannot check `cip` locally; they send the observed IP to introspect. `ENFORCE` + other IP: `active:false`, session revoked, client must log in again. `WARNING`: allowed and logged |
 | **Done in v1.2b** Introspect / permission query | request `{"token", "ip", "require"?}`; response adds `ip_binding`, `ip_match` (`true`/`false`/`null`), `allowed`; `perms` are current DB values. One token (single `aud`) works for all services. Services may cache `active:true` ≤ 30 s keyed by (token hash, ip) |
 | **Done in v1.3e** Session-bound long-running jobs | logout ends the whole session and emits `token.revoked {sub, sid, reason:"logout"}`; password change / logout-all emit `token.revoked` without `sid`; services stop the jobs of the ended session(s); `POST /api/v1/service/sessions/status` backstop sweep (§8.2). [DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md) |
+| **Done in v1.3f** Log out, keep the jobs | `POST /auth/logout {"keep_jobs": true}`: the session ends as usual, `token.revoked` carries `keep_jobs: true`, sessions status answers `detached`; services keep the jobs running, detached from the session, until logout-all / password change / admin / suspend / delete. [DESIGN-v1.3e §6](DESIGN-v1.3e-session-bound-jobs.md) |
 | **Done in v1.3c** Signed webhooks to services (§10) | `ServiceClient.notify_url`; `X-SSO-Event-Id`, `X-SSO-Timestamp`, `X-SSO-Signature: v1=HMAC-SHA256(notify_secret, ts + "." + body)`; at-least-once, retries with backoff for 24 h; events `token.revoked`, `user.suspended`, `user.reactivated`, `user.deleted`, `permission.changed`, `keys.rotated`. Clients get no push: they learn of expiry/revocation by rejection (401) |
 
 Not planned: per-service audience, DPoP, SSE/WebSocket client push (see TODOS.md). Sign-up and password
@@ -625,7 +706,7 @@ Service-side endpoints (not under `/admin`):
 |---|---|---|---|
 | `POST /api/v1/auth/service-token` | Basic `client_id:client_secret` | `{"grant_type":"client_credentials"}` | 200 `{"access_token","token_type":"Bearer","expires_in":300}`; bad client 401 `invalid_client`; other grant 400 `unsupported_grant_type` |
 | `GET /api/v1/service/users/inactive` | Basic ServiceClient or Bearer service token | `since` (ISO 8601, required) | 200 `{"users":[{"id","username","event","at"}],"next_since"}` (max 500, oldest first) |
-| `POST /api/v1/service/sessions/status` (v1.3e) | Basic ServiceClient or Bearer service token | `{"sessions":[{"sub":"42","sid":"…"}]}` (1–100) | 200 `{"sessions":[{"sub","sid","active":true}` or `{…,"active":false,"reason"}]}` in request order; reasons `logout`, `refresh_reuse`, `ip_mismatch`, `revoked` (logout-all, password change, admin), `expired`, `user_inactive`, `user_deleted`; 400 `invalid_request`. Backstop sweep for session-bound jobs ([DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md)) |
+| `POST /api/v1/service/sessions/status` (v1.3e) | Basic ServiceClient or Bearer service token | `{"sessions":[{"sub":"42","sid":"…"}]}` (1–100) | 200 `{"sessions":[{"sub","sid","active":true}` or `{…,"active":false,"reason"}]}` in request order; reasons `logout`, `detached` (v1.3f keep-jobs logout: keep the jobs running), `refresh_reuse`, `ip_mismatch`, `revoked` (logout-all, password change, admin; also after a keep-jobs logout), `expired`, `user_inactive`, `user_deleted`; 400 `invalid_request`. Backstop sweep for session-bound jobs ([DESIGN-v1.3e](DESIGN-v1.3e-session-bound-jobs.md)) |
 | `POST /api/v1/auth/introspect` | Basic ServiceClient | `{"token"}` (service token) | 200 `{"active":true,"token_type":"service","sub":"svc:<id>","subject_client_id","app","perms","iat","exp", …}` or `{"active":false}` |
 
 ### 8.3 Shapes
@@ -724,7 +805,8 @@ Design: [DESIGN-v1.3c-webhooks.md](DESIGN-v1.3c-webhooks.md). Implemented (v1.3c
 
 Events: `user.suspended {sub}`, `user.reactivated {sub}`, `user.deleted {sub, username}`,
 `token.revoked {sub, reason[, sid]}` (reasons `logout_all`, `password_change`, `suspended`, `admin`, `inactive`,
-`revoked`; with `sid`: `logout` (v1.3e), `refresh_reuse`, `ip_mismatch`; one event per session end), `permission.changed` (direct grant `{sub, perm, granted}`,
+`revoked`; with `sid`: `logout` (v1.3e; plus `keep_jobs: true` when the user chose to keep the jobs, v1.3f),
+`refresh_reuse`, `ip_mismatch`; one event per session end), `permission.changed` (direct grant `{sub, perm, granted}`,
 group grant `{group, perm, granted}`, membership `{sub, group, granted}`, import `{app, created, updated, deprecated}`),
 `keys.rotated {kids}`.
 

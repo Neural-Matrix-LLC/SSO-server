@@ -3,6 +3,48 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-11-03 — v1.3f: "log out, keep my jobs running" (`keep_jobs` on logout)
+
+**Goal.** TODOS item decided with v1.3e: let the user log out without stopping the long-running jobs started from
+that session, instead of having to keep the front end signed in.
+
+**Implementation.** `POST /api/v1/auth/logout` takes an optional `keep_jobs` (JSON boolean only; anything else is 400
+`invalid_request` before the token is touched; `LogoutInputSerializer`, `read_refresh_input(…, serializer_class)`).
+With `true` the session ends exactly like a v1.3e logout, but `revoke_session` stores the reason `logout_keep_jobs`
+(fits the existing `CharField(32)`: no migration, no setting, no env var) and emits `token.revoked {sub, sid, reason:
+"logout", keep_jobs: true}` (reason kept as `logout` so a v1.3e service stops the jobs: safe fallback). INFO log.
+`session_states` answers `detached` for such a sid, or `revoked` once a later user-wide revocation (logout-all,
+password change, admin) exists. `prune_revoked_sessions` keeps `logout_keep_jobs` rows while they are still detached,
+otherwise the sweep would answer `expired` after the refresh lifetime and stop the jobs.
+
+**Dummy job service.** `DummyJob.detached`; `token.revoked` with `keep_jobs: true` or sweep `detached` → detach
+(keep running, notify once); detached jobs are still stopped by `token.revoked` without `sid` / sweep `revoked`, and
+deleted by suspend / delete. Browser helper `logout({keepJobs: true})` in `examples/frontend/auth.js`; QA client
+`logout_native(…, keep_jobs=…)`.
+
+**Jobs belong to the user (follow-up decision, same day).** Services key jobs by `owner_sub`; `owner_sid` is only the
+current binding. After a new login, the new session lists the user's jobs (detached included), can stop them and can
+re-attach them to itself (explicit, never automatic). No SSO change: dummy service `list_jobs`, `stop_job`,
+`attach_job` (authorized by introspect; other users' jobs 404-like `not_found`); API manual new §3.6 (guide for
+FUND / SGMCP: columns, event table, endpoints, code); DESIGN-v1.3e §6; TODOS: admin UI view of detached jobs.
+
+**Files.** `sso/views.py`, `sso/serializers.py`, `sso/revocation.py`, `sso/tests/dummy_job_service.py`,
+`sso/tests/test_keep_jobs_v13f.py` (new), `qa/tests/sso_client.py`, `qa/tests/test_logout.py` (LOGOUT-09/10),
+`qa/TEST-PLAN.md`, `examples/frontend/auth.js`; docs: DESIGN-v1.3e §2, §5, §6 (rewritten: implemented), §7;
+API-REFERENCE-MANUAL §2.6, logout, §4 table, §8.2, §10; DESIGN-v1.3c event table; ECOSYSTEM §4.1, §5.6, §8.2,
+§9.1 (v1.3f row), §10 decision 21; ARCHITECTURE status, §8.3; README design link and §9; TODOS.
+
+**Tests.** `test_keep_jobs_v13f.py`, 40 items: session ends like a logout; event with `keep_jobs`; plain / `false`
+unchanged; cookie mode; validation (7 bad values, nothing consumed; cookie mode without cookie); token without sid;
+INFO log without secrets; replay emits once; status `detached` (also past the refresh lifetime), `revoked` after
+password change / logout-all / admin, `detached` when the user-wide revocation came first, inactive / deleted;
+prune retention; dummy jobs end to end (detach, cookie mode, plain logout still stops, other session's logout,
+password change / logout-all / admin set-password stop, suspend / delete delete, lost keep-jobs webhook → sweep
+detaches, lost password-change webhook → sweep stops, jobs outlive refresh lifetime + prune; after a new login: list
+by user ID, stop, re-attach then plain logout stops / keep-jobs logout detaches again, refused for other users and
+the logged-out session, stopped job not re-attachable). Mutation checks: no
+prune exemption → 2 fail; detached never ends → 4 fail; `keep_jobs` not emitted → 12 fail.
+
 ## 2026-11-03 — v1.3e: long-running jobs bound to the login session (logout / password change stop them)
 
 **Goal.** Decision (Thomas): a long-running job (SGMCP strategy, webhook subscription, auto-trade job) lives as long

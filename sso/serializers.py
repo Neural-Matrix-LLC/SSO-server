@@ -37,6 +37,17 @@ class RefreshInputSerializer(serializers.Serializer):
     refresh_token = serializers.CharField(required=False, allow_blank=False, max_length=8192)
 
 
+class LogoutInputSerializer(RefreshInputSerializer):
+    # v1.3f: "log out, keep my jobs running" (DESIGN-v1.3e-session-bound-jobs.md §6). A JSON boolean only:
+    # "true", 1, "yes" are a 400, so a typo never silently stops (or keeps) a user's jobs.
+    keep_jobs = serializers.JSONField(required=False, default=False)
+
+    def validate_keep_jobs(self, value):
+        if not isinstance(value, bool):
+            raise serializers.ValidationError("keep_jobs must be true or false.")
+        return value
+
+
 class IntrospectSerializer(serializers.Serializer):
     token = serializers.CharField(max_length=8192)
     # v1.2b (design §4.4): client IP observed by the service; unparseable = no IP (a mismatch when bound).
