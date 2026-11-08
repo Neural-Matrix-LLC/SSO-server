@@ -180,7 +180,7 @@ tokens = ServiceTokenSource(cfg)                 # cached, renewed 30 s before e
 headers = on_behalf_of_headers(tokens.get(), user_token, browser_ip)   # Authorization + X-SSO-User-Token + X-SSO-Client-IP
 
 sso = SSOClient(cfg)
-result = sso.check(user_token, browser_ip, require=["application.gateway_trade"], actor_token=caller_service_token)
+result = sso.check(user_token, browser_ip, require=["application.sgmcp", "application.sgmcp_ib_trade"], actor_token=caller_service_token)
 result.via            # "svc:relay" (None without actor)
 svc = sso.check_service(service_token)   # ServiceCheck(client_id, perms, typ, owner)
 

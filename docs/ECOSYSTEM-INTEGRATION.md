@@ -102,19 +102,29 @@ permissions, and an admin imports them into the SSO from the SSO admin UI `/admi
 
 ```python
 # <app repo>/sso_permissions.py  (separate from the app's config.py)
-APP_CODENAME = "gateway"            # [a-z][a-z0-9_]{1,40}; becomes application.<APP_CODENAME>
+APP_CODENAME = "sgmcp"              # [a-z][a-z0-9_]{1,40}; becomes application.<APP_CODENAME>
 APP_NAME = "Smart Gateway MCP"
 APP_DESCRIPTION = "Broker connectivity and strategy execution"
-PERMISSIONS_VERSION = 3             # bump on every change; the import shows a diff
+PERMISSIONS_VERSION = 1             # bump on every change; the import shows a diff
 PERMISSIONS = [
     # (codename, name, description); codename must start with APP_CODENAME + "_"
-    ("gateway_trade", "Trade (paper/sim)", "Submit, stop, delete strategies on paper and simulator"),
-    ("gateway_live",  "Trade live",        "Allows environment=live (still needs SGMCP_ALLOW_LIVE=1)"),
+    ("sgmcp_trade",        "Paper trade, all brokers", "Paper/sim orders on every broker"),
+    ("sgmcp_live",         "Live trade, all brokers",  "Live orders on every broker (also needs SGMCP_ALLOW_LIVE=1)"),
+    ("sgmcp_ib_trade",     "IB paper trade",           "Paper orders on Interactive Brokers"),
+    ("sgmcp_ib_live",      "IB live trade",            "Live orders on Interactive Brokers"),
+    ("sgmcp_webull_trade", "Webull paper trade",       "Paper orders on Webull"),
+    ("sgmcp_webull_live",  "Webull live trade",        "Live orders on Webull"),
+    ("sgmcp_futu_trade",   "Futu paper trade",         "Paper orders on Futu"),
+    ("sgmcp_futu_live",    "Futu live trade",          "Live orders on Futu"),
 ]
 ```
 
 - The app-access permission `application.<APP_CODENAME>` ("may use this app") is implicit and always created.
-- Codenames are prefixed with `APP_CODENAME_` (Django codenames cannot contain dots), so two apps can never clash.
+- Codenames are prefixed with `APP_CODENAME_` and lowercase `[a-z][a-z0-9_]` (no dots, no capitals: `SGMCP.IB.live`
+  is written `sgmcp_ib_live`), so two apps can never clash.
+- **Permissions are data, not SSO code** (decision 2026-11-04): adding one is a line here plus a re-import (or the
+  admin UI / `POST /api/v1/admin/permissions`); the SSO needs no code change, migration or release. The SSO does not
+  interpret them; the app does.
 - The file is plain data (no imports); the Admin UI parses it as Python literals or the app exposes the same data as
   `GET /.well-known/sso-permissions.json` (either feeds the same API).
 
@@ -124,10 +134,12 @@ PERMISSIONS = [
 |---|---|
 | `fund` | `application.fund`, `application.fund_admin` (scheduler start/stop, replaces `role=="admin"`) |
 | `llmwiki` | `application.llmwiki`, `application.llmwiki_write` (ingest/upload) |
-| `gateway` | `application.gateway` (read), `application.gateway_trade`, `application.gateway_live` |
+| `sgmcp` (SGMCP) | `application.sgmcp` (may use SGMCP); `application.sgmcp_trade` / `_live` (paper / live, every broker); per broker `application.sgmcp_{ib,webull,futu}_{trade,live}` (decision 2026-11-04, round 7 #22; the real list, §2.1). Paper and live are separate grants |
 | `sso` (built in) | `application.sso_admin` (SSO admin API and SSO admin UI `/admin`) |
 
-Services require the app permission plus the finer one (`require=[...]`). Groups bundle permissions and are managed
+Services require the app permission (`require=[...]`, which means *all of*) and check "either one" rules themselves on
+`perms`: SGMCP allows an IB live order when `perms` has `application.sgmcp` and (`application.sgmcp_live` or
+`application.sgmcp_ib_live`), and `SGMCP_ALLOW_LIVE=1` (API-REFERENCE-MANUAL §8.4). Groups bundle permissions and are managed
 in the Admin UI.
 
 ---
@@ -245,7 +257,7 @@ credentials [Decision 2026-10-14 round 3]), `TRUSTED_PROXY_IPS` = the `fund-fron
 | orchestrator/management/discovery scheduler start/stop | `application.fund` + `application.fund_admin` |
 | analytic, coding, backtesting, dataserver, research | `application.fund` |
 | storage | keep `X-Storage-Key` (service secret) **and** `application.fund` for browser-originated calls |
-| auto-trade | read routes `application.gateway`; submit/stop `application.gateway_trade` |
+| auto-trade | `application.sgmcp` for every SGMCP call; submit also the broker's paper or live permission (§2.2), checked by SGMCP |
 | internal agent→agent calls (orchestrator → analytic …) | service token; on behalf of a user also the user token + browser IP (§4.1) |
 
 ```mermaid
@@ -325,8 +337,9 @@ sequenceDiagram
   B->>AT: POST run, Bearer U (user token)
   AT->>GW: submit_strategy, Bearer S, X-SSO-User-Token U, X-SSO-Client-IP 203.0.113.7
   GW->>GW: verify S locally (JWKS), S may delegate
-  GW->>SSO: introspect U, ip 203.0.113.7, require gateway_trade
-  SSO-->>GW: active, ip_match true, allowed
+  GW->>SSO: introspect U, ip 203.0.113.7, require application.sgmcp
+  SSO-->>GW: active, ip_match true, allowed, perms
+  GW->>GW: perms has sgmcp_trade or sgmcp_<broker>_trade
   GW-->>AT: PENDING, owner_sub = user, owner_sid = sid (v1.3e)
   Note over AT,GW: Monitor loop later: Bearer S only, no user token, read tools only
   Note over GW,SSO: v1.3e: token.revoked for that sid (logout) or without sid (logout-all, password change) stops the strategy
@@ -421,7 +434,7 @@ sequenceDiagram
   participant LA as local-agent (PC)
   U->>SPA: Brokers, Connect this PC
   SPA->>RL: POST /relay/devices/pairing-code (user token, IP bound)
-  RL->>SSO: introspect user token, require application.gateway
+  RL->>SSO: introspect user token, require application.sgmcp
   RL-->>SPA: code K7Q2-M9XD (10 min) + install command
   U->>LA: fundgw pair K7Q2-M9XD
   LA->>LA: generate Ed25519 key pair (private key stays on PC)
@@ -441,7 +454,7 @@ sequenceDiagram
 ### 5.3 Authorization: the user's own submission is the grant [Decision 2026-10-14 round 4]
 
 The user submits the strategy in the FUND UI and **chooses the broker and account**; that submission (by a user holding
-`gateway_trade`, plus `gateway_live` for live) **is the authorization** for the cloud strategy to send orders to that
+`application.sgmcp` and the paper or live permission for that broker, §2.2; live also needs `SGMCP_ALLOW_LIVE=1`) **is the authorization** for the cloud strategy to send orders to that
 account through the user's PC. There is **no separate per-agent grant**: an AI agent acts through the same path (its
 own service token, on behalf of the user per §4.1) and is bound by the same rules.
 
@@ -460,7 +473,8 @@ The relay only forwards a broker request when **all** hold:
 | local-agent → relay | outbound WSS | device token | **no** |
 | Broker login on the PC | `127.0.0.1` | local only | n/a |
 
-Rules kept: trading needs `gateway_trade`; live needs `gateway_live` and `SGMCP_ALLOW_LIVE=1`; strategies record
+Rules kept: using SGMCP needs `application.sgmcp`; paper trading needs `sgmcp_trade` or `sgmcp_<broker>_trade`; live
+needs `sgmcp_live` or `sgmcp_<broker>_live` (separate from paper) and SGMCP's `SGMCP_ALLOW_LIVE=1`; strategies record
 `owner_sub`; the static `SGMCP_AUTH_TOKEN` is dev/break-glass only.
 
 ### 5.4 One live connection per broker account; cold standby [Decision 2026-10-14 round 4]
@@ -794,8 +808,8 @@ dry run, shows the diff, and on confirm applies it. CI jobs call the same import
 
 `PUT /api/v1/admin/apps/{app_codename}/permissions`
 ```json
-{"app_name": "Smart Gateway MCP", "version": 3,
- "permissions": [{"codename": "gateway_trade", "name": "Trade (paper/sim)", "description": "..."}]}
+{"app_name": "FUND", "version": 3,
+ "permissions": [{"codename": "fund_admin", "name": "FUND administrator", "description": "..."}]}
 ```
 Response: `{"created": [...], "updated": [...], "unchanged": [...], "missing": [...], "version": 3}`.
 
@@ -859,9 +873,9 @@ sequenceDiagram
   RS-->>SPA: research report
   SPA->>NG: POST /proxy/auto-trade/run broker=sim Bearer T
   NG->>AT: + XFF
-  AT->>SSO: introspect T, ip, require gateway + gateway_trade
+  AT->>SSO: introspect T, ip, require application.sgmcp
   AT->>GW: submit_strategy broker=sim (service token + T + client_ip)
-  GW->>SSO: introspect T, ip, require gateway_trade (no cache)
+  GW->>SSO: introspect T, ip, require application.sgmcp (no cache), then broker permission on perms
   GW->>GW: owner_sub = user, PENDING
   GW->>SIM: orders (a real broker would go via gateway-relay to the user's PC)
   GW-->>AT: fill notifications
@@ -977,6 +991,12 @@ implementation defaults to be confirmed during review of each phase, not open de
 21. **"Log out, keep my jobs running"** (v1.3f, same day): an explicit logout option (`keep_jobs: true`). The session
     ends as usual; services detach its jobs, which run on until logout-all, password change, admin revocation,
     suspend or delete. Services that do not know the flag stop the jobs (safe fallback).
+22. **SGMCP permissions** (2026-11-04): app codename `sgmcp` (was `gateway`); `application.sgmcp` = may use SGMCP;
+    `sgmcp_trade` / `sgmcp_live` = paper / live on every broker; `sgmcp_{ib,webull,futu}_{trade,live}` per broker.
+    Paper and live are separate grants. Live also needs `SGMCP_ALLOW_LIVE=1`.
+23. **Permissions are data, not SSO code** (2026-11-04): every app permission comes from the app's import or the admin
+    tools; a new permission never needs an SSO code change. Only the SSO's own `application.sso_admin` (and legacy
+    `app1`) stay code-defined.
 
 ### Round 6 (2026-10-15)
 

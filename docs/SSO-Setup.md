@@ -353,6 +353,8 @@ Django admin (step 9) stays available as break-glass.
    `sso_admin` ask for your password again (valid 5 min, `SSO_ADMIN_REAUTH_SECONDS`). Sessions end after 30 min
    idle or 8 h (`SSO_ADMIN_UI_IDLE_SECONDS`, `SSO_ADMIN_UI_MAX_AGE_SECONDS`) and are bound to your IP.
 
+How to use the UI (and the same tasks from the command line): [SSO-Admin-User-Manual.md](SSO-Admin-User-Manual.md).
+
 MFA for admins is not implemented.
 
 ## 11. Upgrading the database later

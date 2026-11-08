@@ -208,14 +208,14 @@ Not under `/admin`:
  "is_active": true, "is_staff": false, "is_superuser": false, "groups": ["trader"],
  "perms": ["application.app1"], "last_login": "2026-10-15T08:00:00Z", "date_joined": "2026-01-02T00:00:00Z"}
 // group
-{"id": 3, "name": "trader", "perms": ["application.gateway_trade"], "members": [42, 43]}
+{"id": 3, "name": "trader", "perms": ["application.sgmcp_trade"], "members": [42, 43]}
 // permission
-{"codename": "gateway_trade", "perm": "application.gateway_trade", "name": "Trade (paper/sim)",
- "description": "…", "app_codename": "gateway", "deprecated": false, "deprecated_at": null,
+{"codename": "sgmcp_trade", "perm": "application.sgmcp_trade", "name": "Paper trade, all brokers",
+ "description": "…", "app_codename": "sgmcp", "deprecated": false, "deprecated_at": null,
  "code_defined": false, "users": 3, "groups": 1}
 // service
-{"client_id": "sgmcp", "name": "Smart Gateway MCP", "app_codename": "gateway", "notify_url": null,
- "is_active": true, "perms": ["application.gateway"], "created": "…"}
+{"client_id": "sgmcp", "name": "Smart Gateway MCP", "app_codename": "sgmcp", "notify_url": null,
+ "is_active": true, "perms": ["application.sgmcp"], "created": "…"}
 // audit row
 {"id": 9, "ts": "…", "actor": "42", "actor_ip": "203.0.113.5", "action": "user.suspend",
  "target_type": "user", "target_id": "43", "before": {"is_active": true}, "after": {"is_active": false},
@@ -233,11 +233,11 @@ The app keeps `sso_permissions.py` (schema in [ECOSYSTEM-INTEGRATION.md §2.1](E
 ```json
 {"app_name": "Smart Gateway MCP", "description": "Broker connectivity and strategy execution", "version": 3,
  "permissions": [
-   {"codename": "gateway_trade", "name": "Trade (paper/sim)", "description": "Submit, stop, delete strategies"},
-   {"codename": "gateway_live",  "name": "Trade live",        "description": "Allows environment=live"}]}
+   {"codename": "sgmcp_trade", "name": "Paper trade, all brokers", "description": "Paper/sim orders on every broker"},
+   {"codename": "sgmcp_live",  "name": "Live trade, all brokers",  "description": "Live orders on every broker"}]}
 ```
 
-`curl -X PUT …/api/v1/admin/apps/gateway/permissions?dry_run=true -d @gateway.json` shows the diff; the same call
+`curl -X PUT …/api/v1/admin/apps/sgmcp/permissions?dry_run=true -d @sgmcp.json` shows the diff; the same call
 without `dry_run` applies it.
 
 ### 5.2 Rules

@@ -420,7 +420,8 @@ The session (`sid`) is only what the job is currently *bound* to. Store per job:
 
 Never store or refresh the user's tokens: the job runs under your service token (§3.1, v1.3a).
 
-**Start.** Introspect the user's token (`ip`, `require` your app permission). Refuse when `active` is false, `allowed`
+**Start.** Introspect the user's token (`ip`, `require` your app permission: SGMCP `application.sgmcp`, FUND
+`application.fund`; then check finer rules on `perms`, §8.4). Refuse when `active` is false, `allowed`
 is false or there is no `sid`. Save `owner_sub = sub`, `owner_sid = sid`, `detached = false`.
 
 **React to the SSO** (webhooks §10 plus a 60 s sweep with `POST /api/v1/service/sessions/status` on
@@ -729,17 +730,44 @@ Service-side endpoints (not under `/admin`):
 ### 8.4 Permission import
 
 ```bash
-python scripts/sso_permissions_to_json.py path/to/sso_permissions.py > gw.json   # never executes the file
-curl -X PUT "$SSO/api/v1/admin/apps/gateway/permissions?dry_run=true" -H "Authorization: Bearer $AT" \
-  -H 'Content-Type: application/json' -d @gw.json
-# CI of the app itself, with its own ServiceClient (app_codename=gateway):
-curl -X PUT "$SSO/api/v1/admin/apps/gateway/permissions" -u "sgmcp:$SECRET" -H 'Content-Type: application/json' -d @gw.json
+python scripts/sso_permissions_to_json.py path/to/sso_permissions.py > sgmcp.json   # never executes the file
+curl -X PUT "$SSO/api/v1/admin/apps/sgmcp/permissions?dry_run=true" -H "Authorization: Bearer $AT" \
+  -H 'Content-Type: application/json' -d @sgmcp.json
+# CI of the app itself, with its own ServiceClient (app_codename=sgmcp):
+curl -X PUT "$SSO/api/v1/admin/apps/sgmcp/permissions" -u "sgmcp:$SECRET" -H 'Content-Type: application/json' -d @sgmcp.json
 ```
 
 Payload `{"app_name","description"?,"version","permissions":[{"codename","name","description"?}]}` → result
 `{"app","version","dry_run","created","updated","unchanged","missing","deprecated"}`. Codenames must start with
 `<app>_`. **Never deletes**: permissions missing from the file are marked deprecated and keep working. Older
 `version` → 409 `version_conflict` unless `force=true`.
+
+**Permissions are data, not SSO code.** An application's permissions are rows in the database: the import above,
+`POST /permissions` (§8.2) or the admin UI add one, and it reaches `perms` at once. Adding a permission (a new broker,
+a new feature) never needs an SSO code change, migration or release. The SSO does not know what a permission means;
+only `application.sso_admin` (checked by the SSO itself) and the legacy `application.app1` are defined in SSO code.
+Codenames are lowercase `[a-z][a-z0-9_]{1,62}` (no dots, no capitals) and, when imported, start with `<app>_`.
+
+**Rules with "either one".** `require` on introspect means *all of*. When a rule says "either permission is enough",
+`require` only the base permission and decide on `perms` in the service. SGMCP's set (decision 2026-11-04):
+
+| Permission | Allows |
+|---|---|
+| `application.sgmcp` | use SGMCP at all (created by the import as "Can use Smart Gateway MCP") |
+| `application.sgmcp_trade` / `application.sgmcp_live` | paper/sim / live trading on **every** broker |
+| `application.sgmcp_ib_trade` / `application.sgmcp_ib_live` | IB paper / IB live |
+| `application.sgmcp_webull_trade` / `application.sgmcp_webull_live` | Webull paper / Webull live |
+| `application.sgmcp_futu_trade` / `application.sgmcp_futu_live` | Futu paper / Futu live |
+
+```python
+def may_trade(perms: set[str], broker: str, live: bool) -> bool:      # inside SGMCP
+    kind = "live" if live else "trade"                                  # live and paper are separate grants
+    return "application.sgmcp" in perms and (
+        f"application.sgmcp_{kind}" in perms or f"application.sgmcp_{broker}_{kind}" in perms)
+```
+
+Live trading additionally needs SGMCP's own `SGMCP_ALLOW_LIVE=1` (server-wide switch). A new broker (e.g. Schwab)
+is two lines in SGMCP's `sso_permissions.py` plus a re-import.
 
 ### 8.5 Service token claims
 

@@ -3,6 +3,73 @@
 Change log for the SSO server, newest first. Each entry records goal, root cause (for bugs),
 implementation, related files and test coverage.
 
+## 2026-11-06 — docs: current status page
+
+**Goal.** Record the state of the uncommitted work so it can be picked up later (Thomas).
+
+**Implementation.** New `docs/CURRENT_STATUS.md`: branch and last commit, the two uncommitted pieces of work
+(v1.3f SGMCP permission set; Admin User Manual §4 field guide with Mermaid screens), how they were verified, and
+the open items (commit split, the QA test `test_DEPLOY_21` that was already failing, UI label TODO, Mermaid
+generator not in the repo). Linked from the README documentation map.
+
+**Files.** `docs/CURRENT_STATUS.md` (new), `README.md`.
+
+## 2026-11-04 — docs: Admin User Manual, page-by-page field guide
+
+**Goal.** The admin UI's form labels (for example *Create custom permission*: Codename / Name / Description, or a
+service's *App codename* vs *Permissions*) were not explained anywhere and were confusing (Thomas).
+
+**Implementation.** `docs/SSO-Admin-User-Manual.md` §4 now has §4.1 (drawing conventions and a glossary of
+look-alike terms) and one guide each for Permissions (§4.2), Applications (§4.3), Services (§4.4), Devices (§4.5)
+and Webhooks (§4.6). Each guide has ASCII drawings of the screens in click order with a worked example, a table of
+every field (meaning, rules, example, changeable later), the list filters and columns, the buttons with step-up and
+audit action, and gotchas. Facts found in the code and now documented: a hand-made permission has no app until an
+import of `<app>` lists it (it then shows as *Updated*); a service gets no webhooks until its first **Rotate
+webhook secret**; deleting a permission still held by a service needs *revoke from everyone*; the device owner
+filter takes a numeric user id. Contents and the §7 cookbook link to the new sections. UI wording improvements are
+recorded in `TODOS.md`. The screens are Mermaid flowcharts (one per screen, plus a sequence diagram per page and a
+legend in §4.1), so they render in GitHub and in the VS Code preview with `bierner.markdown-mermaid`; all 21
+diagrams were rendered with that extension's Mermaid 11 bundle in headless Chrome without errors. Every quoted label was checked against `adminui/templates/adminui/`. A throwaway test ran
+each documented sequence through the real views and confirmed the messages. No code change.
+
+**Files.** `docs/SSO-Admin-User-Manual.md`, `TODOS.md`.
+
+## 2026-11-04 — docs: SSO Admin User Manual
+
+**Goal.** One manual for SSO administrators covering the admin web UI and the command line (Thomas).
+
+**Implementation.** New `docs/SSO-Admin-User-Manual.md`: which tool to use (UI, `manage.py`, admin REST API, Django
+admin as emergency), getting admin access (active + staff + `sso_admin`, first superuser, admin group, nginx
+allow-lists, CSRF origins), UI login / session / step-up, every UI page, every `manage.py` command and admin script,
+curl helpers (`api`, `stepup`, password via `read -s`), a task cookbook with UI and CLI side by side, application
+permissions and import, routine operations (cron), guard rules, troubleshooting. Checked against `adminui/urls.py`,
+`adminui/views.py`, `sso/admin_ops.py` and the management commands.
+
+**Files.** `docs/SSO-Admin-User-Manual.md` (new); links from README (documentation map, cheat sheet) and
+SSO-Setup §10. No code change.
+
+## 2026-11-04 — v1.3f: SGMCP permission set; app permissions are data, not SSO code
+
+**Goal.** Decision (Thomas): SGMCP gets `application.sgmcp` (may use SGMCP), `sgmcp_trade` / `sgmcp_live` (paper / live
+on every broker) and `sgmcp_{ib,webull,futu}_{trade,live}` (per broker), paper and live separate; and the SSO treats
+every app permission as data, so a new permission never needs an SSO code change. A first draft (2026-11-03) that made
+`application.gateway` code-defined with migration `application.0003` was dropped before commit: no migration, no
+schema change.
+
+**Implementation.** No SSO code change: the import, the admin API / UI and `create_app_permission` already create
+permissions at runtime. Codenames stay `[a-z][a-z0-9_]{1,62}` (Django codenames; `SGMCP.IB.live` → `sgmcp_ib_live`),
+imported ones prefixed `<app>_`. Introspect `require` is all-of, so "either one" rules (`sgmcp_live` or
+`sgmcp_ib_live`) are evaluated by SGMCP on `perms`; documented with SGMCP's `may_trade` example.
+
+**Files.** Tests `sso/tests/test_sgmcp_permissions_v13f.py` (new); docs: API-REFERENCE-MANUAL §3.6, §8.4 ("Permissions
+are data", SGMCP table, either-one rule); ECOSYSTEM §2.1 (SGMCP's real `sso_permissions.py`), §2.2, §3 auto-trade
+row, §4.1 / §5.2 / §8.2 diagrams, §5.3, decisions 22 and 23; DESIGN-v1.3a / v1.3b examples (`gateway_*` → `sgmcp_*`);
+README; TODOS (SGMCP repo work).
+
+**Tests.** Importing SGMCP's file creates all nine, none code-defined, all deletable; user and group grants reach
+introspect `perms`; `require` with two permissions is all-of; the SGMCP either-one rule over real `perms`; a new
+broker permission added by re-import and by `POST /admin/permissions` reaches `perms` with no code change.
+
 ## 2026-11-03 — v1.3f: "log out, keep my jobs running" (`keep_jobs` on logout)
 
 **Goal.** TODOS item decided with v1.3e: let the user log out without stopping the long-running jobs started from

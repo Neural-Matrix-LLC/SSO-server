@@ -19,12 +19,14 @@ sign-up, password reset, admin MFA ([TODOS.md](TODOS.md)).
 | Read this | For |
 |---|---|
 | [docs/SSO-Setup.md](docs/SSO-Setup.md) | **Setup manual**: step by step on a Linux/WSL host, VPS from images only, DB upgrades, troubleshooting |
+| [docs/SSO-Admin-User-Manual.md](docs/SSO-Admin-User-Manual.md) | **Admin user manual**: day-to-day administration with the admin web UI (`/admin/`), `manage.py` commands and the admin REST API (curl), side by side |
 | [docs/API-REFERENCE-MANUAL.md](docs/API-REFERENCE-MANUAL.md) | **API** for client and service developers: endpoints, claims, error codes, admin API, devices, webhooks |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | **Architecture**: components, data model, workflows, failure handling, every environment variable (§10), security and deployment view, design decisions (§11.4), open questions (§12) |
 | Design docs | [v1.0 spec](docs/SSO-server.md), [addendum v1.1](docs/DESIGN-ADDENDUM-v1.1.md), [app permissions](docs/sso-integration-design.md), [v1.2](docs/DESIGN-v1.2-requirements.md), [v1.3a admin API](docs/DESIGN-v1.3a-admin-api.md), [v1.3b devices](docs/DESIGN-v1.3b-devices-on-behalf-of.md), [v1.3c webhooks](docs/DESIGN-v1.3c-webhooks.md), [v1.3d admin UI](docs/DESIGN-v1.3d-admin-ui.md), [v1.3e session-bound jobs (+ v1.3f keep-jobs logout)](docs/DESIGN-v1.3e-session-bound-jobs.md), [sso-client library](docs/SSO-CLIENT-LIBRARY-DESIGN.md), [ecosystem integration](docs/ECOSYSTEM-INTEGRATION.md) |
 | [devops/DEPLOYMENT-PLAN.md](devops/DEPLOYMENT-PLAN.md) | Deployment plan: environments, secrets, rotation runbook, rollout and rollback |
 | [qa/TEST-PLAN.md](qa/TEST-PLAN.md), `qa/RESULTS-*.md` | Black-box test plan and results per release |
 | [HISTORY.md](HISTORY.md), [TODOS.md](TODOS.md) | Change log; future items |
+| [docs/CURRENT_STATUS.md](docs/CURRENT_STATUS.md) | Work in progress: uncommitted changes, how they were verified, next steps |
 
 ## Docker quick start (local / WSL)
 
@@ -51,7 +53,8 @@ Production compose file (`web`, `webhooks`, `redis`, `nginx`, one-shot `init`; n
 7. **Start and check**: `scripts/deploy.sh` (init, schema gate, `up --wait`, then `scripts/deploy_check.sh`, which
    prints `[PASS]`/`[WARN]`/`[FAIL]` with the fix). Then `curl -sk https://localhost/healthz` → `{"status":"ok"}`.
 8. **Admin and app access**: `docker compose run --rm web python manage.py createsuperuser`. Superusers get **no**
-   app access automatically: grant `application.app1` (and `application.sso_admin` + staff for the admin UI).
+   app access automatically: grant `application.app1`, the apps' imported permissions (e.g. SGMCP's
+   `application.sgmcp`, `application.sgmcp_ib_trade`, …) and `application.sso_admin` + staff for the admin UI.
    `scripts/sso_login_check.py <username>` checks a real login and prints `perms`.
 
 Something fails: [SSO-Setup.md Troubleshooting](docs/SSO-Setup.md#troubleshooting) or `scripts/deploy_check.sh`.
@@ -155,15 +158,17 @@ Run commands as `docker compose exec web python manage.py …` (or `run --rm web
 | Add an application permission | `create_app_permission app2 "Can use app2 (reports)"` (idempotent) |
 | Grant app access | Admin UI or Django admin → user/group permissions → `application.<codename>`; effective at the next refresh |
 | Admin REST API | grant `application.sso_admin` + staff; destructive calls need `POST /api/v1/admin/reauth` ([API §8](docs/API-REFERENCE-MANUAL.md#8-admin-rest-api-v13a)) |
-| Admin web UI | `https://<host>/admin/`; restrict with `docker/nginx-admin-ui.d/*.conf` ([Setup §10](docs/SSO-Setup.md#10-admin-web-ui)) |
+| Admin web UI | `https://<host>/admin/`; restrict with `docker/nginx-admin-ui.d/*.conf` ([Setup §10](docs/SSO-Setup.md#10-admin-web-ui)); how to use it: [Admin User Manual](docs/SSO-Admin-User-Manual.md) |
 | Webhooks | set `notify_url`, `rotate_notify_secret <id>`; compose service `webhooks` delivers ([API §10](docs/API-REFERENCE-MANUAL.md#10-signed-webhooks-v13c)) |
 | Cron | daily `flushexpiredtokens`, hourly `revoke_inactive_users`, certbot renewal ([Setup §12.8](docs/SSO-Setup.md#128-lets-encrypt-certificate)) |
 
 ### Application permissions (`application.<codename>`)
 
 One permission per application, checked by that application in the `perms` claim. `application.app1`
-(llm-wiki-svc) and `application.sso_admin` are code-defined and recreated by `migrate`; others come from
-`create_app_permission`, `register_service --app` or the permission import. `perms` is computed from real
+(llm-wiki-svc) and `application.sso_admin` are code-defined and recreated by `migrate`; every other permission is
+data, not SSO code: it comes from the app's permission import, the admin UI / API, `create_app_permission` or
+`register_service --app`, so a new permission (e.g. SGMCP's per-broker `application.sgmcp_ib_live`) never needs an SSO
+code change ([API-REFERENCE-MANUAL §8.4](docs/API-REFERENCE-MANUAL.md#84-permission-import)). `perms` is computed from real
 permission rows (user + groups), never `has_perm()`, so superusers get only explicit grants unless
 `SSO_SUPERUSER_ALL_APPS=true`. Details: [ARCHITECTURE.md §6.11](docs/ARCHITECTURE.md#611-granting-applicationapp1-and-how-it-reaches-the-token).
 
@@ -210,6 +215,7 @@ Full reference: [API-REFERENCE-MANUAL.md](docs/API-REFERENCE-MANUAL.md). All JSO
 | refresh rotation (old token rejected on reuse) | `test_token_flow.py::test_refresh_rotation_old_token_rejected_on_reuse`, `test_cookie_mode.py::test_cookie_refresh_with_allowed_origin_rotates_cookie` |
 | logout blacklists | `test_logout_blacklists_refresh_token`, `test_cookie_logout_checks_origin_then_clears_cookie` |
 | v1.3e: logout / password change end the session and stop its jobs | `test_session_bound_jobs_v13e.py::test_logout_ends_the_session_but_not_other_sessions`, `test_logout_emits_token_revoked_with_sid_and_delivers_it`, `test_password_change_ends_every_session_and_emits_without_sid`, `test_status_*`; dummy-job end to end: `test_dummy_jobs_v13e.py` |
+| v1.3f: app permissions are data (SGMCP's nine, no SSO code) | `test_sgmcp_permissions_v13f.py` (import creates all nine, not code-defined, grants reach introspect `perms`, `require` is all-of, a new broker permission via import or admin API without code, separate paper / live) |
 | v1.3f: logout with `keep_jobs` keeps the session's jobs running | `test_keep_jobs_v13f.py::test_keep_jobs_logout_ends_the_session_like_a_logout`, `test_keep_jobs_logout_emits_token_revoked_with_keep_jobs`, `test_status_detached_*`, `test_prune_keeps_detached_rows_until_a_later_user_wide_revocation`, `test_dummy_*` (incl. new login: `test_dummy_new_session_sees_detached_jobs_by_user_id`, `test_dummy_new_session_can_stop_a_detached_job`, `test_dummy_reattach_binds_the_job_to_the_new_session`) |
 | logout-all and introspect after revocation | `test_logout_all_blacklists_everything_and_revokes`, `test_introspect.py::test_introspect_inactive_after_logout_all` |
 | access token rejected at /refresh | `test_access_token_rejected_at_refresh` |
